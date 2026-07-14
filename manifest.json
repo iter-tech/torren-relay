@@ -28,6 +28,8 @@
       "content/soundAlert.js",
       "content/priceSurge.js",
       "content/detailOpener.js",
+      "content/patApi.js",
+      "content/patModal.js",
       "content/inlinePanel.js",
       "content/tabAlert.js",
       "content/sidebar.js",

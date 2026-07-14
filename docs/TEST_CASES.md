@@ -221,6 +221,30 @@ Two relay.amazon.com tabs open simultaneously. All cases verified with both tabs
    - NO inline panel renders under any card.
 4. **Reset check:** open popup, click Reset to defaults → Auto-Open toggle returns to **ON** (true-default).
 
+---
+
+## PAT modal (2026-07-07)
+
+### TC-PAT-1 — Create Post on a freshly loaded page with the loop never started
+1. Load `relay.amazon.com` (fresh page load or hard reload).
+2. Do NOT press Play in the sidebar. The loop has never run; `parseLoads()` has never been called.
+3. Click any load card that shows a "53' Trailer" to open its detail sheet.
+4. Wait for the inline panel to appear below the card (manual toggle path, `waitForSheet` callback fires).
+5. Click the `ext-action-post` button (document icon).
+6. **Expected:**
+   - In the console: `ext-action-post: Phase 1 missing — parsing card on demand` log line; also logs `usedLive: true` (live DOM node resolved via `getElementById`) and `sameNode` (`true` when the live outermost node is the same element as the captured `cardElement`; `false` when card nesting caused `initManualToggle` to capture an inner node — this is the scenario `findLiveOutermostCard` corrects).
+   - The PAT modal opens immediately.
+   - Origin and destination city name areas show the board stop codes (pre-parse placeholder), then switch to resolved city names as the API call completes.
+   - Payout field shows `boardPayout + 5000` (a large number, not $0 or blank).
+   - $/mi and min/max miles are computed from `distance`.
+   - Equipment shown in the summary row matches the card's equipment text.
+   - No "Could not read load data" error; no "unsupported equipment" error.
+7. **Regression check (loop running):** start the loop, let a card auto-open. Click `ext-action-post`. Expected: `ext-action-post: Phase 1 missing` log does NOT appear (Phase 1 was already populated by `parseLoads()`). Form opens with the same data.
+8. **Edge case — card layout unexpected:** if `parseOneCard` returns empty equipment (selector `.equipment-type-text` absent or different), expected:
+   - `ext-action-post: on-demand parse yielded empty Phase 1` error log with `outerHTMLLen` and `loadId`.
+   - Modal opens showing "Could not read load data from this card — start the refresh loop once, or report this card layout to the PM." (testid `pat-no-equipment`).
+   - No network request is made.
+
 ### TC-SOUND-1 — Popup preview and in-page alert produce identical tones for the same soundId
 1. In the popup, select a sound (e.g. "Fanfare") and click the replay button.
 2. Let the extension play an in-page alert for the same soundId (manually trigger via `__EXT_DEBUG.playAlert()` in the content console, with `soundId = 'fanfare'`).

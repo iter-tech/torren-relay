@@ -85,6 +85,24 @@ counted among, or added to, the "three click sites" above.
 
 ---
 
+## Network write — PAT order upsert (content/patApi.js + content/patModal.js — 2026-07-06)
+
+The PAT feature makes a **same-origin POST** from a content script to Amazon Relay's internal
+order-upsert API. This is not a click site and does not touch Amazon's DOM.
+
+**Safety properties:**
+- CSRF token always read live from `<meta name="x-owp-csrf-token">` — never captured, cached, or hardcoded.
+- No `.click()` on any Amazon DOM element anywhere in this feature.
+- `FORBIDDEN_SELECTORS` and `isForbiddenElement()` are not involved (no DOM clicks).
+- No `innerHTML` with page data — all dynamic text via `textContent`.
+- No new `manifest.json` permissions required — same-origin fetch needs only `host_permissions`.
+- The dispatcher must click **Confirm** in the extension's own modal — there is no auto-submit path.
+- `PAT_TEST_MARKUP_USD = 5000`: default offer = board payout + $5000. This deliberate safety margin ensures any accidental POST to the live system uses an unrealistic price that will be rejected or immediately visible.
+- The POST creates a **carrier offer (truck post)**, not a booking. No load is reserved or booked.
+- `FORBIDDEN_SELECTORS` booking-button rule is unrelated and must not be touched.
+
+---
+
 ## Scope
 - **Load Board (Layout A) only.** `div.load-list:first-of-type` → `div.load-card` / `div.load-card__selected` / `div.wo-card-header--highlighted`.
 - Layout B (Contracts / tour-container) is intentionally ignored.

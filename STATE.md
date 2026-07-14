@@ -1,5 +1,5 @@
 # Стан проекту
-Оновлено: 2026-07-06 (sidebar dark mode bug — nightMode.js stale !important override fixed)
+Оновлено: 2026-07-07 (Створення поста працює без запущеної петлі — on-demand Phase 1 parse)
 
 ## Поточна фаза
 **Step 3 — Підключення контролів попапу до `chrome.storage.local`**
@@ -60,21 +60,27 @@ Click → `html2canvas(cardElement)` → PNG blob → `navigator.clipboard.write
 ### LoadUnit data model ✅ DONE (2026-06-30)
 `utils/loadStore.js` — in-memory per-tab store (IIFE), not sessionStorage-backed. `mergeLoadUnit / getLoadUnit / pruneLoadUnits / getAllLoadUnits`. Loaded in manifest after `tabState.js`, before all content/ modules. Phase 1 wired in `loadParser.js` (per successfully parsed card + prune after loop). Phase 2 wired in `inlinePanel.js` (`showInlinePanel()`, after `readSheetData()` succeeds). `parseLoads()` and `showInlinePanel()` return values and external behavior unchanged — additive only. `priceSurge.js` untouched (Step 4 deferred). `searchContext` stays null (future work). `window.__EXT_DEBUG.getLoadUnits` exposed.
 
+### ext-action-post wired ✅ DONE — Stage 14 (reworked 2026-07-07)
+`content/patApi.js` + `content/patModal.js` — both fully rewritten to LoadFetcher parity. `inlinePanel.js` post button click → `openPostModal(sheetLoadId)` (unchanged). `manifest.json` load order unchanged. Equipment gate: "53' Trailer" only; other types → unsupported notice. Modal: origin/dest resolved from `boardStops` via API (static text, not user-editable), radii, time steppers (±15 min), stop count, min/max miles, $/mi + payout (linked via board distance), stem time, swing-door checkbox. Confirm → `buildPatPayload()` → `submitOrder()` POST to `/api/loadboard/orders/upsert` (confirmed path). City search API `/api/loadboard/filters/cities/search/<city>` confirmed path + response shape (`displayValue` always null — built manually). `PAT_TEST_MARKUP_USD = 5000` silent margin. Zero new `.click()` sites on Amazon DOM.
+
 ## Що в роботі
-Нічого активного. Чотири bug-fix passes + design system завершені:
+Нічого активного. Чотири bug-fix passes + design system + Stage 14 завершені:
 - Core loop (7 виправлень): tabState no-op, подвійний старт, спільний пайплайн, ре-арм observer, захист prune, isExtManagedNode, heap log.
 - inlinePanel.js (5 виправлень): stale-sheet fingerprint, currentPanelCard ownership, stop numbering counter, drift alarm, flashActionSuccess null title.
 - Click pipeline (5 виправлень): highest-paying auto-open (sortByPayoutDesc), detach guard in 250ms settle, nested card dedup, panelCloser Strategy 2 tightened, stale click-site comments.
 - Popup / sidebar / sound (6 виправлень): Auto-Open popup toggle, shared soundDefs.js, toggleRunning tabState fix, logger discipline, priceSurge null-parent guard, log-noise + isForbiddenElement hardening.
 - **Design system ✅ (2026-07-06)**: `utils/designTokens.js` (new) + `popup/popup.css` (full rewrite) + `content/sidebar.js`, `content/inlinePanel.js`, `content/highlighter.js`, `content/priceSurge.js`, `popup/popup.js`. Blue accent (#1a73e8/#4c8dff), neutral scale n100–n900, dark mode via `html.ext-night` CSS vars. STYLING ONLY — zero behavior changes.
 - **Sidebar dark mode fix ✅ (2026-07-06)**: `content/nightMode.js` stale green `!important` rules replaced with correct dark neutral surface (#1c1f24) + blue scanline + dark pill. `content/sidebar.js` explicit `html.ext-night #ext-sidebar` dark override block added. All `.js`/`.css` files clean of legacy green except `NIGHT_HEADER` (Amazon's native header, intentional).
+- **Elevation dark theme ✅ (2026-07-06)**: `content/nightMode.js` full rework — 4-level surface ramp (base/raised/overlay/high), neutral gray text scale, green removed from all constants. Inline panel override block added (seg-header HIGH, stop-num accent, loaded/empty/dot/action-bar). `content/priceSurge.js` dark `!important` gaps fixed. Uncovered blocks noted: left filter panel (inherits base, acceptable), card hover.
+- **PAT Modal rework ✅ (2026-07-07)**: `content/patApi.js` + `content/patModal.js` fully rewritten. LoadFetcher-parity form. Correct data mapping (`payoutNum`, `boardStops`, confirmed API paths). Stage 14 complete.
+- **PAT on-demand Phase 1 parse ✅ (2026-07-07)**: `content/inlinePanel.js` post button handler now calls `parseOneCard(cardElement)` + `loadStore.mergeLoadUnit(…)` when LoadUnit Phase 1 is missing (loop was never started). Standalone-safe: zero side effects on detection pipeline. `content/patModal.js` equipment gate now shows "Could not read load data" for empty equipment (vs "unsupported" for a known non-53' value).
 
 ---
 
 ## Що далі (1–2 кроки)
 
-1. **Auto-restore Amazon filters after reload** (PLANNED, не розпочато) — потребує SAFETY.md review перед стартом, бо вимагає нових click/input сайтів на Amazon DOM (фільтр-панель). Div. BACKLOG.md.
-2. **Memory-leak audit** — `_element` в `knownLoadIds` ✅ ЗАКРИТО 2026-06-30 (non-issue). `knownLoadIds` — це `Set<string>` (тільки UUID рядки, ніяких DOM-вузлів). Єдине реальне джерело heap-росту — Amazon's React SPA; диспетчер управляє цим через ручний `ext-memory-indicator` reload.
+1. **Live test PAT — no-loop path** — на свіжо завантаженій сторінці, без натискання Play, відкрий картку вручну та клікни Create Post. Очікувано: форма відкривається з повними даними (equipment, payout, boardStops заповнені через on-demand parse). Дивись TC-PAT-1 у TEST_CASES.md.
+2. **Auto-restore Amazon filters after reload** (PLANNED, не розпочато) — потребує SAFETY.md review перед стартом, бо вимагає нових click/input сайтів на Amazon DOM (фільтр-панель). Div. BACKLOG.md.
 
 ---
 

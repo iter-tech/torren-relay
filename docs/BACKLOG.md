@@ -136,8 +136,11 @@ Seven hardening fixes in `utils/tabState.js`, `content/content.js`, `content/loa
 
 ---
 
-## Stage 14 — PAT Helper (PLANNED)
-Fill the Post-a-Truck form programmatically based on the selected load. User submits manually. No auto-submit. See MVP_SPECIFICATION.md for original stage definition.
+## Stage 14 — PAT Helper ✅ DONE (reworked 2026-07-07)
+`ext-action-post` wired. Click → `openPostModal(loadId)` → extension-owned modal (580px, full form, LoadFetcher parity). Modal pre-fills from `loadStore`: origin/dest from `boardStops` (API-resolved), radii, time steppers (±15 min), stop count, min/max miles, $/mi+payout (linked via board distance), stem time, swing-door checkbox. Equipment gate: "53' Trailer" only (v1). Dispatcher reviews/edits, clicks Confirm → `buildPatPayload()` + `submitOrder()` POSTs to `/api/loadboard/orders/upsert` (same-origin, no new permissions). No `.click()` on Amazon DOM. `PAT_TEST_MARKUP_USD = 5000` silent safety markup. API paths confirmed from live captures. See AMAZON_SELECTORS.md + SAFETY.md "Network write" section.
+
+**26' Truck / other equipment (PLANNED — waiting for live capture)**
+`patModal.js` shows an unsupported notice for any equipment other than "53' Trailer". To add a new type: capture a live PAT upsert for that equipment type via DevTools Network, identify the correct `equipmentTypes` enum values, add a branch to `patApi.js` with a separate equipment list, remove the equipment gate for that type. Do NOT guess enum values.
 
 ---
 

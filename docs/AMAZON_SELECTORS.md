@@ -34,7 +34,8 @@ Duration:         .wo-card-header__components matching /\d+[dh]/ and not contain
 Stops (locations): .wo-card-header__components where textContent includes ", " but NOT "/mi"  → ["CMH3 MONROE, OH...", ...]
 Equipment:        .equipment-type-text  → "53' Trailer"
 Trailer circle:   .trailer-type-circle  → "P"  (may be absent)
-Loading type:     .loading-type  → "Drop" or "Live"
+Loading type:     .loading-type  → "Drop", "Live", "Live/Drop", or "Drop/Live"
+                  Combined value appears in both orderings on the live board — treat as order-insensitive.
 Deadhead:         previousElementSibling of span[title="Deadhead"]  → "32.31 mi"
 Tag:              #STARTING_SOON or .wo-tag  → "Starting soon"  (may be absent)
 Price increase:   .wo-total_payout__modified-load-increase-attr  (Amazon's own highlight)
@@ -60,10 +61,37 @@ isForbiddenElement() blocks any .click() call that targets these elements.
 #book-btn-row is guarded as a paranoid safety measure even though Layout B
 is not targeted — the extension must never book regardless of which view is active.
 
-## PAT form (Stage 14)
-Container: .css-kkw3y5 (fragile — find by structure)
-Create Order: find button by text "Create Order"
-Submit: find button by text "Submit" (DO NOT CLICK — user does)
+## Relay internal API endpoints (PAT — confirmed from live captures)
+
+Used by `content/patApi.js` via same-origin `fetch`. CSRF read live from `<meta name="x-owp-csrf-token">`; sent as request header `x-csrf-token`.
+
+| Constant | Path | Purpose |
+|----------|------|---------|
+| `PAT_UPSERT_PATH` | `/api/loadboard/orders/upsert` | POST — create truck post (carrier offer). |
+| `CITY_SEARCH_BASE` | `/api/loadboard/filters/cities/search/<encodeURIComponent(city)>` | GET — city resolution (not autocomplete). |
+
+**City search response shape (confirmed from live API):**
+Array of objects: `{ name, stateCode, country, latitude, longitude, nearestDomicileCode, displayValue }`.
+
+⚠️ `displayValue` is ALWAYS `null` in this API — never use it directly. Build it manually: `"${name}, ${stateCode}"`.
+`uniqueKey` must also be built manually: `"${latitude}${displayValue}"` (after building displayValue).
+
+boardStops string format: `"JAX9 JACKSONVILLE, Florida 32221-8118"`. Drop first token (warehouse code), split on comma: city = left, state = first word of right (may be full name "Florida" or abbrev "FL" → normalize via `STATE_NAME_TO_CODE`).
+
+**POST body shape (confirmed from live cURL capture — MEMPHIS→LEBANON):** see `buildPatPayload()` in `content/patApi.js` for canonical structure.
+
+Key structural notes (mismatches that caused HttpMessageNotReadableException):
+- `totalCost`: `{ value, unit:"USD" }` — key is `unit`, not `currency`
+- `costPerDistance`: `{ value, currencyUnit:"USD", distanceUnit:"mi" }` — key is `currencyUnit`; distanceUnit is `"mi"` (lowercase), not `"MILES"`
+- `minDistance`/`maxDistance`: `{ value, unit:"mi" }` — NOT bare numbers
+- `originCityRadius`/`destinationCityRadius`: `{ value, unit:"mi" }` — NOT bare numbers
+- `originCityInfo`: single object (NOT an array) `{ name, stateCode, country, latitude, longitude, displayValue, isCityLive:false, isAnywhere:false, uniqueKey }`
+- `endLocationList[0]`: `{ displayValue, stateCode, isCityLive:false, latitude, longitude, name }` (no country/isAnywhere/uniqueKey)
+
+Static fields (all confirmed): `runType:"ONE_WAY"`, `distanceOrDuration:"DISTANCE"`, `payoutType:"FLAT_RATE"`, `driverTypes:["SOLO"]`, `visibleProvidedTrailerType:"AMAZON_PROVIDED"`, `providedTrailerType:"AMAZON_PROVIDED"`, `isLinkedOrder:false`, `isRepostingAllowed:true`, `isAnywhereDestination:false`, `matchingDemands:[]`, `matchingWork:0`, `isCheckingMatchingWork:false`, `isMatchingWorkLoaded:false`, `supplyDriverIdList:[]`, `supplyTransientDriverIdList:[]`, `exclusionCityList:[]`, `endRegionList:[]`, `startTimeWindow:null`, `minDurationInMinutes:null`, `maxDurationInMinutes:null`, `destinationCityInfo:null`, `destinationCityInfoForFilter:null`, `auditMetaData:{suggestedCostPerDistance:null,matchOutlookScore:"LOW"}`, `patOrderContext:null`, `cancellationDetails:null`, `repostingDetails:null`.
+
+## PAT form (Amazon DOM — NOT used by extension)
+Extension bypasses Amazon's PAT form and POSTs directly to the API above. No Amazon form selectors needed.
 
 ## Neutral zone (Stage 13)
 The load card itself (div.load-card) — clicking opens details panel.

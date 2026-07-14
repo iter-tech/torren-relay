@@ -2,6 +2,178 @@
 
 ## [Unreleased]
 
+### 2026-07-08 — BUG FIX: "startLocationList" → "originCityInfo" (invented key, wrong shape)
+
+Files changed: `content/patApi.js` (`buildPatPayload`).
+Docs updated: `AMAZON_SELECTORS.md`, `CHANGELOG.md`.
+
+The origin city was sent as `"startLocationList": [{ ... }]` — an invented key wrapping the object in an array. The capture has `"originCityInfo": { ... }` — a single object at the top level, no array. Fixed: key renamed, array brackets removed. No change to the object's field set.
+
+---
+
+### 2026-07-08 — BUG FIX: buildPatPayload structural mismatch → HttpMessageNotReadableException
+
+Files changed: `content/patApi.js` (`buildPatPayload`).
+Docs updated: `AMAZON_SELECTORS.md`, `CHANGELOG.md`.
+
+Server returned HTTP 400 `HttpMessageNotReadableException` — the server could not deserialize the JSON body due to structural mismatches (wrong key names / bare numbers where objects were expected).
+
+**Keys corrected (4 confirmed mismatches from live capture):**
+- `totalCost`: `currency:"USD"` → `unit:"USD"`
+- `costPerDistance`: `{value, distanceUnit:"MILES"}` → `{value, currencyUnit:"USD", distanceUnit:"mi"}`
+- `minDistance` / `maxDistance`: bare number → `{value, unit:"mi"}`
+- `originCityRadius` / `destinationCityRadius`: bare number → `{value, unit:"mi"}`
+
+**City object shapes corrected:**
+- `originCityInfo`: was invented as `startLocationList:[{...}]` (array) — capture has `originCityInfo:{...}` (single object). Corrected 2026-07-08.
+- `endLocationList[0]`: was passing full object — capture requires stripped shape: `{displayValue, stateCode, isCityLive:false, latitude, longitude, name}` (no country/isAnywhere/uniqueKey)
+
+**Static fields added (previously absent, all confirmed from live capture):**
+`runType:"ONE_WAY"`, `distanceOrDuration:"DISTANCE"`, `payoutType:"FLAT_RATE"`, `visibleProvidedTrailerType:"AMAZON_PROVIDED"`, `providedTrailerType:"AMAZON_PROVIDED"`, `isLinkedOrder:false`, `isRepostingAllowed:true`, `isAnywhereDestination:false`, `matchingDemands:[]`, `matchingWork:0`, `isCheckingMatchingWork:false`, `isMatchingWorkLoaded:false`, `supplyDriverIdList:[]`, `supplyTransientDriverIdList:[]`, `exclusionCityList:[]`, `endRegionList:[]`, `startTimeWindow:null`, `minDurationInMinutes:null`, `maxDurationInMinutes:null`, `destinationCityInfoForFilter:null`, `auditMetaData:{suggestedCostPerDistance:null,matchOutlookScore:"LOW"}`, `patOrderContext:null`, `cancellationDetails:null`, `repostingDetails:null`.
+
+No change to `submitOrder`, `resolvePATCity`, `resolveLoadingType`, or any other function.
+
+---
+
+### 2026-07-07 — BUG FIX: submitOrder was posting to an invented endpoint
+
+Files changed: `content/patApi.js` (constant + fetch headers).
+Docs updated: `AMAZON_SELECTORS.md`, `BACKLOG.md`, `STATE.md`, `CHANGELOG.md`.
+
+**Root cause:** `PAT_UPSERT_PATH` was set to `/relay/rlb/api/pat/create-order` — a path that exists in no live capture and no doc. The correct endpoint, confirmed from a fresh cURL of a real manual Post-a-Truck submission, is `/api/loadboard/orders/upsert`. The wrong endpoint caused 400 InvalidCsrfTokenException because it rejected the CSRF token from the real domain.
+
+**Fix — `content/patApi.js`:**
+- `PAT_UPSERT_PATH` → `/api/loadboard/orders/upsert`
+- Request header corrected: `x-owp-csrf-token` → `x-csrf-token` (header name confirmed from live capture; meta tag name `x-owp-csrf-token` is unchanged — we read from it, but send as `x-csrf-token`)
+- Accept header corrected: `application/json` → `*/*` (confirmed from live capture)
+- No Referer header added — browser sends it automatically for same-origin fetch
+
+**Amazon URLs the feature contacts (complete list):**
+1. `POST /api/loadboard/orders/upsert` — order creation
+2. `GET /api/loadboard/filters/cities/search/<city>` — city resolution
+3. `<meta name="x-owp-csrf-token">` — CSRF read (DOM, no network request)
+
+---
+
+### 2026-07-07 — PAT: loadingType combined value is order-insensitive
+
+Files changed: `content/patApi.js` (`resolveLoadingType`).
+Docs updated: `AMAZON_SELECTORS.md`, `CHANGELOG.md`.
+
+Live board shows combined loadingType in both orderings: `"Live/Drop"` (previously captured) and `"Drop/Live"` (captured today, blocked by the guard). `resolveLoadingType` now splits on `/`, trims each token, maps `"Drop"→DROP` / `"Live"→LIVE`, and returns `null` on any unrecognized token. When both tokens are present (in any order) the return value is always `["LIVE","DROP"]` — fixed order to match the captured upsert payload. The null-guard behavior is unchanged: an unrecognized token still produces `null`, which the modal surfaces as a blocking error.
+
+---
+
+### 2026-07-07 — PAT on-demand parse: fix nested-card element resolution
+
+Files changed: `content/inlinePanel.js` (new `findLiveOutermostCard` helper + post button handler).
+Docs updated: `CHANGELOG.md`, `TEST_CASES.md`.
+
+**Root cause:** `initManualToggle` captures the card element via `ev.target.closest('div.load-card, div.load-card__selected')` — this returns the **innermost** matching ancestor. When Amazon nests `div.wo-card-header--highlighted` inside `div.load-card` (the exact nesting the `parseLoads` dedup was added for), the captured element is the inner node. It contains `div[id]` (Phase 2 / loadId work), but NOT `.equipment-type-text` / `.wo-total_payout` / `.wo-card-header__components` — so `parseOneCard()` on it returns all Phase 1 fields as null. After one loop tick `parseLoads` has merged Phase 1 under the correct outermost loadId, `needsPhase1` becomes false, and the broken on-demand branch is skipped — masking the bug. A stale-after-React-remount `cardElement` is covered by the same fix.
+
+**Fix — `findLiveOutermostCard(loadId)`** (new function, before `showInlinePanel`):
+1. `document.getElementById(loadId)` — always live DOM.
+2. `.closest('div.load-card, div.load-card__selected')` — nearest card ancestor.
+3. Climb via `parentElement.closest(…)` loop to the **outermost** matching container — mirrors `parseLoads` `allCards.filter(elB.contains(elA))` pass.
+Selectors: `div.load-card, div.load-card__selected` — identical to the `parseLoads` querySelectorAll pair. `div.wo-card-header--highlighted` excluded: always inner, never outer (parseLoads contains-filter drops it). Returns `null` if `getElementById` finds nothing.
+
+**Fix — post button handler** (inside `showInlinePanel`):
+Calls `findLiveOutermostCard(sheetLoadId)` before `parseOneCard`. Logs `usedLive` and `sameNode` at the "Phase 1 missing" log line. Passes `liveCard || cardElement` to `parseOneCard`. Empty-parse error log now includes `usedLive` and `sameNode` for diagnostics.
+No change to `initManualToggle`, `parseLoads`, camera/map handlers, PAT modal, or patApi.js.
+
+---
+
+### 2026-07-07 — PAT modal: on-demand Phase 1 parse when loop was never started
+
+Files changed: `content/inlinePanel.js` (post button handler), `content/patModal.js` (equipment gate).
+Docs updated: `TEST_CASES.md`, `STATE.md`.
+
+**Problem:** when the dispatcher opens a card and clicks Create Post without ever starting the refresh loop, `parseLoads()` has never run and the LoadUnit has no Phase 1 board fields (payout, boardStops, equipment, distance, loadingType all null). The modal correctly refused with equipment «» unsupported, but the message was confusing.
+
+**Fix — `content/inlinePanel.js`** (`showInlinePanel`, post button handler):
+Before calling `openPostModal(sheetLoadId)`, checks `loadStore.getLoadUnit(sheetLoadId)` for missing Phase 1 (equipment null/'' OR boardStops empty). If missing, calls `parseOneCard(cardElement)` directly — confirmed standalone-safe (no knownLoadIds write, no detection pipeline, no tabState, no sound). Replicates the exact `loadStore.mergeLoadUnit(…)` call that `parseLoads()` would have made, including the `boardStops: parsed.stops` field name. Detection state is untouched. If on-demand parse also yields empty equipment/boardStops (unexpected card layout), logs `logger.error` with `outerHTML.length` and `loadId` for diagnostics, then proceeds to `openPostModal` which will show the user-facing error.
+
+**Fix — `content/patModal.js`** (equipment gate):
+Split the `equipment !== "53' Trailer"` branch into two cases:
+- `!equipment` (empty string after on-demand parse failed) → `showSimplePatModal("Could not read load data from this card — start the refresh loop once, or report this card layout to the PM.", 'pat-no-equipment')` + `logger.error`.
+- non-empty unsupported equipment → existing "not supported yet: «X»" message unchanged.
+
+No change to form logic, payload assembly, patApi.js, or any detection/booking path.
+
+---
+
+### 2026-07-07 — PAT Modal + API rework (LoadFetcher parity, data mapping fixed)
+
+Files changed: `content/patApi.js` (full rewrite), `content/patModal.js` (full rewrite).
+Docs updated: `UI_ELEMENTS.md`, `AMAZON_SELECTORS.md`, `BACKLOG.md`, `STATE.md`.
+
+**Reason for rework:** the first implementation (2026-07-06) was confirmed broken by live testing — wrong field names (`payout` vs `payoutNum`), wrong data sources (stop addresses vs `boardStops`), invented equipment labels, missing form fields, and silent markup exposed as a UI label.
+
+All old functions removed: `parseCityState`, `parsePickupDate`, `parseCityStateFromInput`, `wirePatCitySearch`, `CITY_DEBOUNCE_MS`, `resolveEquipmentCode`, `searchCity`, `buildCityInfo`, `buildOrderPayload`, `EQUIPMENT_EXPANSION`, `CITY_SEARCH_PATH`.
+Old testids removed: `pat-origin-input`, `pat-dest-input`, `pat-date-input`, `pat-equipment-select`, `pat-markup-note`, `pat-origin-suggestions`, `pat-dest-suggestions`, `pat-city-suggestion`.
+
+No new `.click()` sites. No new manifest permissions. No Amazon DOM interaction. All text via `textContent`.
+
+**patApi.js** (full rewrite — network layer):
+- `STATE_NAME_TO_CODE` — full 50+DC table. `normalizeState(s)` — "Florida"→"FL", "FL"→"FL".
+- `parseBoardStop(str)` — "JAX9 JACKSONVILLE, Florida 32221" → `{city:"JACKSONVILLE",state:"FL"}`. Drops warehouse code, splits on comma, normalizes state.
+- `parsePatStopTime(timeStr)` — "07/10 10:42 EDT" → `{date:Date(UTC), tzName, tzOffset}`. Returns `{tzError}` on unknown TZ; null on unrecognized format. Year rollover if >30 days past.
+- `getCsrfToken()` — reads live from `<meta name="x-owp-csrf-token">`, never hardcoded.
+- `resolvePATCity(boardStopStr)` — `GET /api/loadboard/filters/cities/search/<city>` (confirmed path). API returns `{name,stateCode,country,latitude,longitude,nearestDomicileCode,displayValue:null}` — `displayValue` is ALWAYS null; built manually as `"${name},${stateCode}"`. Matches by exact name+stateCode, then prefix+stateCode fallback.
+- `resolveLoadingType(str)` — "Drop"→["DROP"], "Live"→["LIVE"], "Live/Drop"→["LIVE","DROP"]; null for unknown.
+- `buildPatPayload(formState)` — full upsert POST body (confirmed fields from live capture).
+- `submitOrder(payload)` — POST to `/api/loadboard/orders/upsert` (confirmed path — earlier draft used invented path `/relay/rlb/api/pat/create-order`, corrected 2026-07-07).
+
+**patModal.js** (full rewrite — UI layer):
+- `PAT_TEST_MARKUP_USD = 5000` — silent, no label anywhere. Default payout = `payoutNum + 5000`.
+- Equipment gate: only "53' Trailer" shows form; any other equipment → `showSimplePatModal(unsupported notice)`, no form, no network. `logger.warn` with equipment string.
+- `makeTimeStepper(timeResult, testidBase)` — [−] [MM/DD HH:mm TZ] [+]; click span → datetime-local input; steps ±15 min. Returns `{el, getDate()}`.
+- `openPostModal(loadId)` — async. Modal appears immediately with pre-parsed city name text; then `await Promise.all([resolvePATCity(o), resolvePATCity(d)])` resolves cities in background; guards `overlay.isConnected` before DOM update.
+- Confirm disabled until cities resolve + no blocking errors (unknown TZ, unknown loading type).
+- $/mi ↔ Payout linked via board distance (not min/max miles). Guard div/0.
+- "Exclude Swing Door" checkbox (default checked → `excludeSpecialServices:["SWING_DOOR"]`).
+- Success: green "Post created ✓" + modal fade-close after 2.5s. Error: red status, re-enable button.
+
+**Unchanged from original implementation:** `inlinePanel.js` (post button wired correctly), `manifest.json` (load order correct).
+
+---
+
+### 2026-07-06 — Elevation-based dark theme rebuild (nightMode.js)
+
+Files changed: `content/nightMode.js` (full rework), `content/priceSurge.js`.
+
+Styling only — no behavior changes, no new `.click()` sites, no new Amazon selectors.
+
+**Surface ramp** (4 levels, no green):
+
+| Level | Value | Used for |
+|---|---|---|
+| base | `#16181c` | Page background only |
+| raised | `#1e2126` | Load cards, nav header, footer, form inputs, buttons |
+| overlay | `#262a31` | Selected card, detail panel, popovers, our inline panel |
+| high | `#2e333b` | Stop data rows, segment headers, modal content, expanded rows |
+
+**Text scale**: primary `#e8eaed`, secondary/placeholder `#a8b0b9`, disabled/labels `#6b7480`. Green tint removed from all text values.
+
+**Key changes vs old theme**:
+- All green-tinted color constants (`NIGHT_BG`, `NIGHT_CARD`, etc.) replaced with `DK_*` elevation ramp constants.
+- Amazon header/banner/nav: was `#1a5c38` (green) → `DK_RAISED` (neutral dark). `NIGHT_HEADER` constant removed.
+- Cards: `#1b201d` → `#1e2126` (raised) + `DK_BORDER` hairline each card.
+- Selected card: `#2c332e` → `#262a31` (overlay) + strong border.
+- Detail sheet: `#161b18` (was DARKER than cards, wrong) → `#262a31` (overlay, correctly elevated above cards).
+- Stop rows in detail: `#121714` (near-black) → `#2e333b` (high — readable, elevated from overlay).
+- Inline panel: `#161b18` → `#262a31` (overlay — sits at same level as detail sheet against raised card). Added explicit overrides for `.ext-seg-header` (high), `.ext-stop-num` (accent tint), `.ext-seg-loaded` (success), `.ext-seg-empty` (muted), `.ext-route-arrow` (muted), `.ext-action-bar` (overlay), `.ext-action-btn:hover` (high), `.ext-dot-loaded/empty`.
+- Footer: was `#151a17` → `DK_RAISED`.
+- Text: was `#e7efe9` (green tint) → `#e8eaed` (neutral); disabled labels `rgba(231,239,233,0.32)` → `#6b7480`.
+
+**`content/priceSurge.js`**: Added `!important` to dark-override background (`rgba(212,167,44,.20)`) and badge color (`#f0c040`) — the nightMode.js universal reset was silently winning those properties.
+
+**Uncovered blocks** (no stable selector; inheriting base bg is acceptable):
+- Left filter panel: Amazon uses hashed CSS classes; it inherits base bg (`#16181c`) which gives correct base-level reading. No risky selector added.
+- Load card `:hover` state: no hover-elevation rule added (risky selector territory). Cards stay raised on hover.
+
+---
+
 ### 2026-07-06 — Bug: Sidebar dark mode ignored (root cause: nightMode.js !important override)
 
 Files changed: `content/nightMode.js`, `content/sidebar.js`.

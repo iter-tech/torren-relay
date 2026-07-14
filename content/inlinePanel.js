@@ -691,6 +691,31 @@ function buildPanelElement(data) {
   return panel;
 }
 
+// Resolves the live outermost card element for loadId at click time.
+// Mirrors parseLoads() dedup: initManualToggle.closest() returns the INNERMOST matching
+// ancestor, but parseLoads keeps only the OUTERMOST via allCards.filter(elB.contains(elA)).
+// When Amazon nests div.wo-card-header--highlighted inside div.load-card, the captured
+// cardElement is the inner node — it has div[id] but lacks .equipment-type-text /
+// .wo-total_payout / .wo-card-header__components, so parseOneCard returns empty Phase 1.
+// Selectors: div.load-card, div.load-card__selected — same pair as parseLoads querySelectorAll.
+// div.wo-card-header--highlighted excluded: always an inner wrapper, never the outer container;
+// parseLoads already drops it via the contains() filter.
+function findLiveOutermostCard(loadId) {
+  var idEl = document.getElementById(loadId);
+  if (!idEl) return null;
+  var card = idEl.closest('div.load-card, div.load-card__selected');
+  if (!card) return null;
+  var outer = card;
+  var p = card.parentElement;
+  while (p) {
+    var candidate = p.closest('div.load-card, div.load-card__selected');
+    if (!candidate) break;
+    outer = candidate;
+    p = candidate.parentElement;
+  }
+  return outer;
+}
+
 function showInlinePanel(cardElement) {
   logger.log('inlinePanel', 'showInlinePanel called');
 
@@ -732,6 +757,56 @@ function showInlinePanel(cardElement) {
     mapBtn.addEventListener('click', function () {
       logger.log('inlinePanel', 'ext-action-map clicked');
       openRouteInMaps(data);
+    });
+  }
+
+  var postBtn = panel.querySelector('[data-testid="ext-action-post"]');
+  if (postBtn) {
+    postBtn.addEventListener('click', function () {
+      logger.log('inlinePanel', 'ext-action-post clicked');
+      // On-demand Phase 1 parse: covers the case where the refresh loop was never started
+      // and parseLoads() has therefore never run for this card.
+      // parseOneCard() is standalone-safe — no effect on knownLoadIds, detection pipeline,
+      // tabState, highlight, or sound. Replicates exactly the mergeLoadUnit call in parseLoads().
+      try {
+        var storedUnit  = sheetLoadId ? loadStore.getLoadUnit(sheetLoadId) : null;
+        var needsPhase1 = !storedUnit || !storedUnit.equipment ||
+                          !storedUnit.boardStops || storedUnit.boardStops.length === 0;
+        if (needsPhase1 && sheetLoadId) {
+          var liveCard    = findLiveOutermostCard(sheetLoadId);
+          var usedLive    = !!liveCard;
+          var sameNode    = liveCard === cardElement;
+          var parseTarget = liveCard || cardElement;
+          logger.log('inlinePanel', 'ext-action-post: Phase 1 missing — parsing card on demand', { loadId: sheetLoadId, usedLive: usedLive, sameNode: sameNode });
+          var parsed = parseOneCard(parseTarget);
+          loadStore.mergeLoadUnit(parsed.loadId || sheetLoadId, {
+            payout:          parsed.payout,
+            pricePerMile:    parsed.pricePerMile,
+            distance:        parsed.distance,
+            duration:        parsed.duration,
+            boardStops:      parsed.stops,
+            equipment:       parsed.equipment,
+            trailerLetter:   parsed.trailerLetter,
+            loadingType:     parsed.loadingType,
+            deadhead:        parsed.deadhead,
+            tag:             parsed.tag,
+            specialServices: parsed.specialServices,
+          });
+          if (!parsed.equipment || !parsed.stops || parsed.stops.length === 0) {
+            logger.error('inlinePanel', 'ext-action-post: on-demand parse yielded empty Phase 1 — card layout may have changed', {
+              loadId:       sheetLoadId,
+              outerHTMLLen: parseTarget ? parseTarget.outerHTML.length : 0,
+              equipment:    parsed.equipment,
+              stopsCount:   parsed.stops ? parsed.stops.length : 0,
+              usedLive:     usedLive,
+              sameNode:     sameNode,
+            });
+          }
+        }
+      } catch (e) {
+        logger.error('inlinePanel', 'ext-action-post: on-demand Phase 1 parse failed', { error: e, loadId: sheetLoadId });
+      }
+      openPostModal(sheetLoadId);
     });
   }
 

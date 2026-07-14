@@ -96,27 +96,55 @@ Injected on the payout element of a surge-triggered card. Never on the whole car
 
 Single-segment loads: table rendered directly, no accordion wrapper.
 
-## PAT Modal (Stage 14 — not yet built)
+## PAT Modal (content/patModal.js — rework 2026-07-07)
 
+Extension-owned dialog. Opens when dispatcher clicks `ext-action-post`. Pre-fills from `loadStore.getLoadUnit(loadId)`. Cities auto-resolved via API (not user-editable). No `.click()` on Amazon DOM. All text via `textContent`. Width: 580px. Equipment gate: "53' Trailer" only — other equipment shows an unsupported notice.
+
+### Kept testids (same name across both implementations)
 | testid | Type | Function |
 |--------|------|----------|
-| btn-create-pat | button | On each load — open PAT modal |
-| pat-modal | div | The template modal |
-| pat-confirm | button | Confirm → fill form |
-| pat-cancel | button | Cancel |
+| pat-modal-overlay | div | Full-screen backdrop. Click outside modal → close. |
+| pat-modal | div[role=dialog] | Modal shell. `aria-modal=true`. Escape key → close. |
+| pat-modal-title | span | "Are you sure you want to create the following order?" heading. |
+| pat-modal-close | button | × close button in header. |
 
-## Card Action Bar (content/inlinePanel.js — 2026-06-30)
+### New testids (ext-pat-* prefix)
+| testid | Type | Function |
+|--------|------|----------|
+| ext-pat-origin | div | Origin city name (static text). Resolved from `boardStops[0]` via `resolvePATCity()`. Shows "CITY, ST" from API result. `.resolving` class while API call is in flight. |
+| ext-pat-origin-radius | select | Origin radius in miles. Options: 5/10/15/20/25/50/75/100. Default 25. |
+| ext-pat-dest | div | Destination city name (static text). Resolved from `boardStops[last]`. Same display format and loading state. |
+| ext-pat-dest-radius | select | Destination radius in miles. Options: 25/50/75/100/150/200/250. Default 50. |
+| ext-pat-start | span[role=button] | Start-time stepper display. Format: "MM/DD HH:mm TZ". Click → reveals datetime-local input. |
+| ext-pat-start-minus | button | Step start time back 15 min. |
+| ext-pat-start-plus | button | Step start time forward 15 min. |
+| ext-pat-end | span[role=button] | End-time stepper display. Same pattern as start. |
+| ext-pat-end-minus | button | Step end time back 15 min. |
+| ext-pat-end-plus | button | Step end time forward 15 min. |
+| ext-pat-stops | div | Stop count (static text from `detail.header.stopsCount`). |
+| ext-pat-min-miles | input[type=number] | Minimum distance filter. Default: board distance − 25. |
+| ext-pat-max-miles | input[type=number] | Maximum distance filter. Default: board distance + 25. |
+| ext-pat-driver | div | Driver type (static text "Solo"). |
+| ext-pat-permile | input[type=number] | Offer per mile ($/mi). Linked to payout via board distance. |
+| ext-pat-payout | input[type=number] | Total offer payout ($). Default = `payoutNum + 5000` (silent markup). Linked to per-mile. |
+| ext-pat-stem | select | Stem time (minimum pickup buffer). Options: 5/15/30/45/60/90/120/150/180/210/240/480/720/1440 min. Default 30 min. |
+| ext-pat-exclude-swing | checkbox | "Exclude Swing Door loads". Default checked → `excludeSpecialServices:["SWING_DOOR"]`. |
+| ext-pat-summary | div | Summary line: "Equipment: X (Provided) Loading Type: Y". Static text. |
+| ext-pat-cancel | button | Dismiss modal without submitting. |
+| ext-pat-confirm | button | Validate → `buildPatPayload()` → `submitOrder()`. Disabled until cities resolve. Disabled + "Submitting…" during POST. Green "Post created ✓" on success; modal fades and closes after 2.5s. Re-enables on error. |
+| ext-pat-status | div | Status line (resolving / error / success messages). |
+
+## Card Action Bar (content/inlinePanel.js — 2026-06-30, post wired 2026-07-06)
 
 Thin icon row at the very bottom of every expanded inline panel (single and multi-segment).
-Rendered via `buildActionBar()`, appended last inside `buildPanelElement()`. Camera and map
-buttons are fully wired; post button is a render-only placeholder pending a Create Post spec.
+Rendered via `buildActionBar()`, appended last inside `buildPanelElement()`. All three buttons wired as of 2026-07-06.
 
 | testid | Type | Function |
 |--------|------|----------|
-| ext-action-bar | div | Bar container. `border-top`, `background:#f8f9f9`, `display:flex`. Rendered. |
+| ext-action-bar | div | Bar container. `border-top`, `background:var(--ext-n100)`, `display:flex`. Rendered. |
 | ext-action-camera | button.ext-action-btn | Camera icon (screenshot). `aria-label="Screenshot"`. **Wired (2026-06-30)**: click → `captureCardToClipboard()` → html2canvas renders the load card → PNG blob → `navigator.clipboard.write()`. On success: icon flashes green checkmark for 1.1 s via `flashActionSuccess()`. On error: `logger.error()` with context. |
 | ext-action-map | button.ext-action-btn | Map-pin icon (route map). `aria-label="Route map"`. **Wired (2026-06-30)**: click → `openRouteInMaps(data)` → deduplicates stops from `data.segments`, builds Google Maps Directions URL (origin/waypoints/destination from `stop.name + address`), opens in new tab via `window.open(_blank, noopener,noreferrer)`. No flash — new tab is self-evident confirmation. |
-| ext-action-post | button.ext-action-btn | Document+plus icon (create post). `aria-label="Create post"`. **Render-only placeholder** — no click handler, no modal. Wire when Create Post / PAT Helper spec is defined. |
+| ext-action-post | button.ext-action-btn | Document+plus icon (create post). `aria-label="Create post"`. **Wired (2026-07-06)**: click → `openPostModal(sheetLoadId)` → PAT modal (patModal.js). |
 
 All three buttons share `.ext-action-btn`: 28×28 px, no border/background, `border-radius:4px`,
 hover → subtle grey tint + darker icon. SVGs are static 16×16 stroke-based markup (no page data).

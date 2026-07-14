@@ -21,10 +21,10 @@ function injectSurgeStyle() {
       'color:#7a4f00;margin-left:4px;vertical-align:middle;' +
     '}' +
     'html.ext-night .ext-surge-price{' +
-      'color:#f0c040 !important;background:rgba(212,167,44,.20);' +
+      'color:#f0c040 !important;background:rgba(212,167,44,.20) !important;' +
     '}' +
     'html.ext-night .ext-surge-badge{' +
-      'color:#f0c040;' +
+      'color:#f0c040 !important;-webkit-text-fill-color:#f0c040 !important;' +
     '}';
   document.head.appendChild(style);
 }
