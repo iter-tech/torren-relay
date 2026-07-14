@@ -145,15 +145,36 @@ Enums observed so far:
 - `runType`: `ONE_WAY`
 - `driverTypes`: `SOLO`
 - `providedTrailerType`: `AMAZON_PROVIDED`
-- `equipmentTypes`: `FIFTY_THREE_FOOT_TRUCK`, `SKIRTED_FIFTY_THREE_FOOT_TRUCK`,
+- `equipmentTypes` (53' Trailer): `FIFTY_THREE_FOOT_TRUCK`, `SKIRTED_FIFTY_THREE_FOOT_TRUCK`,
   `FIFTY_THREE_FOOT_DRY_VAN`, `FIFTY_THREE_FOOT_A5_AIR_TRAILER`, `FORTY_FIVE_FOOT_TRUCK`
+- `equipmentTypes` (53' Container and Chassis): `FIFTY_THREE_FOOT_CONTAINER`
 - `payoutType` (UI state): `FLAT_RATE`
 
-## 4. Unsupported equipment types (need a captured sample before enabling)
+## 4. order-upsert — 53' Container and Chassis (captured 2026-07-14)
 
-- ❌ **53' Container and Chassis** — extension correctly blocks post creation for this type.
-  To add support: capture a manual Post-a-Truck upsert for this equipment type from the UI
-  (DevTools → Network → filter "upsert") and append it here.
+Status: ✅ confirmed working; enabled in ext-action-post 2026-07-14.
+
+Payload structure **identical to section 3** (53' Trailer). The only field that differs:
+
+```json
+"equipmentTypes": ["FIFTY_THREE_FOOT_CONTAINER"]
+```
+
+All other fields — `originCityInfo`, `endLocationList`, `runType`, `driverTypes`,
+`providedTrailerType`, `costPerDistance`, `startTimeWindow`, `loadingTypeList`,
+`excludeSpecialServices`, all static nulls — are identical to section 3.
+
+Implementation: `PAT_EQUIPMENT_TYPES_CONTAINER` constant in `content/patApi.js`.
+Board label `"53' Container and Chassis"` maps to this constant via `PAT_EQUIPMENT_MAP`
+in `content/patModal.js`. `buildPatPayload` reads `formState.equipmentTypes` (not hardcoded).
+
+## 5. Equipment types not yet supported (need captured sample before enabling)
+
+No remaining blocked types at this time. For any new type seen on the board:
+1. Capture a real manual Post-a-Truck upsert for that equipment via DevTools → Network → filter "upsert".
+2. Compare `equipmentTypes` array with all known constants.
+3. Add a new `PAT_EQUIPMENT_TYPES_*` constant in `patApi.js` and map it in `PAT_EQUIPMENT_MAP` in `patModal.js`.
+4. Append the captured payload here.
 
 ## 5. Known open bugs (as of 2026-07-13)
 

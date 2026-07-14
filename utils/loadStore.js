@@ -15,7 +15,10 @@ var loadStore = (function () {
 
   var _units = {}; // { [loadId]: LoadUnit }
 
-  // Derive a numeric payout from a raw string like "$427.61". Returns null if unparseable.
+  // Derive a numeric payout from a raw string like "$427.61" or "$2,320.23".
+  // Returns null when the string is absent or unparseable (caller uses null to mean "unknown").
+  // Strips $ and , before parseFloat — same normalization as parseNumStr in patApi.js
+  // (loadStore loads before patApi so it cannot call parseNumStr directly).
   function _parsePayoutNum(payoutStr) {
     if (!payoutStr) return null;
     var n = parseFloat(payoutStr.replace(/[$,]/g, ''));

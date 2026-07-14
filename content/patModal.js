@@ -352,8 +352,15 @@ async function openPostModal(loadId) {
   }
 
   // --- Equipment gate ---
+  // Map board label → equipmentTypes array for the upsert. To add a new type: capture a live
+  // upsert, add the enum constant in patApi.js, add the mapping here, update api-samples.md.
+  var PAT_EQUIPMENT_MAP = {
+    "53' Trailer":               PAT_EQUIPMENT_TYPES_53,
+    "53' Container and Chassis": PAT_EQUIPMENT_TYPES_CONTAINER,
+  };
   var equipment = loadUnit.equipment || '';
-  if (equipment !== "53' Trailer") {
+  var patEquipmentTypes = PAT_EQUIPMENT_MAP[equipment] || null;
+  if (!patEquipmentTypes) {
     if (!equipment) {
       // Empty equipment means Phase 1 data could not be read from the card DOM at all
       // (on-demand parse in inlinePanel.js already logged outerHTML length + loadId).
@@ -387,11 +394,20 @@ async function openPostModal(loadId) {
   var originParsed = parseBoardStop(originStop);
   var destParsed   = parseBoardStop(destStop);
 
-  var boardPayout = loadUnit.payoutNum || 0;
-  var initPayout  = boardPayout + PAT_TEST_MARKUP_USD;
+  // payoutNum is pre-parsed by _parsePayoutNum (strips $, commas) — same as parseNumStr.
+  // Falls back to parsing the raw payout string directly when payoutNum is null
+  // (happens when .wo-total_payout was absent from the card at parse time).
+  var boardPayout = loadUnit.payoutNum != null
+    ? loadUnit.payoutNum
+    : parseNumStr(loadUnit.payout);
+  if (loadUnit.payoutNum === null || loadUnit.payoutNum === undefined) {
+    logger.warn('patModal', 'openPostModal: payoutNum is null — parseNumStr fallback on raw payout string', {
+      loadId: loadId, payout: loadUnit.payout, resolvedTo: boardPayout,
+    });
+  }
+  var initPayout  = parseFloat((boardPayout + PAT_TEST_MARKUP_USD).toFixed(2));
 
-  var distStr   = loadUnit.distance || '0 mi';
-  var distMiles = parseFloat(distStr) || 0;
+  var distMiles = parseNumStr(loadUnit.distance);
   var minMiles  = Math.max(0, Math.round(distMiles) - 25);
   var maxMiles  = Math.round(distMiles) + 25;
   var initPermile = distMiles > 0 ? (initPayout / distMiles).toFixed(2) : '0.00';
@@ -817,6 +833,7 @@ async function openPostModal(loadId) {
     var formState = {
       originCity:           originCityObj,
       destCity:             destCityObj,
+      equipmentTypes:       patEquipmentTypes,
       originRadius:         parseInt(originRadiusSel.value, 10),
       destRadius:           parseInt(destRadiusSel.value, 10),
       startTime:            startStepper.getDate(),

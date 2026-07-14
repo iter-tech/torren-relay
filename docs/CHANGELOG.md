@@ -2,6 +2,120 @@
 
 ## [Unreleased]
 
+### 2026-07-14 — FEATURE: equipment-type collector — getEquipmentEnumMap from PAT form
+
+Files changed: `content/loadParser.js`.
+
+**Problem:** Equipment enum codes (e.g. `FIFTY_THREE_FOOT_TRUCK`) are not present in the load board's rendered HTML. The board's `.equipment-type-text` gives only the display label. Guessing from load-card React fiber props is unreliable — the authoritative source is Amazon's own PAT form Equipment dropdown, which must map each display option to its enum value in order to submit the upsert request.
+
+**Changes:**
+- `_seenEquipmentTypes` and `getSeenEquipmentTypes()` remain as before (simple display-name string list from the board). No speculative enum probing on load cards.
+- Added `window.__EXT_DEBUG.getEquipmentEnumMap()` — call this from the console while the PAT form's Equipment dropdown is expanded.
+
+**`getEquipmentEnumMap()` tries three strategies in order:**
+1. **Native `<select>` options** — reads `option.value` / `option.textContent`.
+2. **ARIA option elements + React fiber** — queries `[role="option"]` etc.; reads `data-value` attribute first, then probes up to 12 hops of `memoizedProps` for a `value`/`optionValue` prop.
+3. **BFS over the full React fiber tree** — walks up to 4000 fiber nodes from the page root looking for `memoizedProps` arrays named `options`, `items`, `choices`, `equipmentOptions`, `selectOptions`, or `equipmentTypeOptions`; each array element must have `{value, label}` or `{enumValue, displayName}` shape.
+
+Returns `{ strategies: string[], map: { displayLabel: string[] } }` on success, or `{ map: null, hint: '...' }` if nothing is found.
+
+**If `map: null` is returned:** the enum is not accessible from the page DOM or fiber state and must be captured manually via DevTools Network (filter "upsert") per `api-samples.md` §5.
+
+---
+
+### 2026-07-14 — FEATURE: ext-action-post — enable 53' Container and Chassis equipment type
+
+Files changed: `content/patApi.js`, `content/patModal.js`.
+Docs updated: `docs/api-samples.md`, `docs/CHANGELOG.md`.
+
+Live capture confirmed: payload structure for 53' Container and Chassis is identical to 53' Trailer except `equipmentTypes: ["FIFTY_THREE_FOOT_CONTAINER"]` (single element vs. 5-element trailer list).
+
+**`content/patApi.js`:**
+- Added `PAT_EQUIPMENT_TYPES_CONTAINER = ['FIFTY_THREE_FOOT_CONTAINER']`.
+- `buildPatPayload` no longer hardcodes `PAT_EQUIPMENT_TYPES_53`; reads `formState.equipmentTypes` (array) and `formState.equipmentTypes[0]` for `visibleEquipmentTypes`. No other payload field changed.
+
+**`content/patModal.js`:**
+- Equipment gate replaced: `equipment !== "53' Trailer"` check → `PAT_EQUIPMENT_MAP` object lookup (`"53' Trailer"` → `PAT_EQUIPMENT_TYPES_53`, `"53' Container and Chassis"` → `PAT_EQUIPMENT_TYPES_CONTAINER`). Unknown types (including empty) still hit the existing `showSimplePatModal` paths unchanged.
+- `formState` now includes `equipmentTypes: patEquipmentTypes` — passed through to `buildPatPayload`.
+- Adding a future equipment type requires: new constant in `patApi.js`, one new key in `PAT_EQUIPMENT_MAP`, captured sample in `api-samples.md`.
+
+**`docs/api-samples.md`:**
+- Section 4 added: "order-upsert — 53' Container and Chassis (captured 2026-07-14)".
+- `FIFTY_THREE_FOOT_CONTAINER` added to enums list.
+- Old ❌ "Unsupported equipment" section updated to reflect no remaining blocked types.
+
+---
+
+### 2026-07-14 — FEATURE: ext-action-post — prefix+subsequence city fallback for abbreviated board names
+
+Files changed: `content/patApi.js` (`isSubseq`, `resolvePATCity`).
+Docs updated: `CHANGELOG.md`, `TEST_CASES.md`.
+
+**Problem:** Amazon abbreviates some city names on the board by dropping vowels — e.g. "BURLNGTN TWP, NJ" for "BURLINGTON TWP, NJ". The cities API has no entry for "BURLNGTN TWP"; exact and starts-with searches both return no match.
+
+**New fallback (4th path in `resolvePATCity`):**
+1. Strip non-letters from the abbreviated name → `abbrevLetters` (e.g. `"BURLNGTNTWP"`).
+2. Take the first 4 characters of the city string as a prefix → `"BURL"`.
+3. GET `/api/loadboard/filters/cities/search/BURL` — returns all cities whose name starts with the prefix.
+4. Filter results to `stateCode === state`.
+5. For each candidate, strip non-letters → `candLetters`; call `isSubseq(abbrevLetters, candLetters)`.
+6. If **exactly one** candidate passes → use it (strong match).
+7. If **zero** → no match, return null (same as before).
+8. If **more than one** → ambiguous, log names, return null (never guess).
+
+Added helper `isSubseq(abbrev, full)` — returns true when every character of `abbrev` appears in `full` in order (letter subsequence). Classic algorithm, O(n+m).
+
+Guards: only runs when `abbrevLetters.length >= 4` AND `prefix.trim().length >= 3`; skips for trivially short names.
+
+**Test:** `"BURLNGTN TWP, NJ"` — abbrevLetters `"BURLNGTNTWP"` is a subsequence of `"BURLINGTONTWP"` (from "BURLINGTON TWP") but not of `"BURLINGTON"` alone (too short — can't absorb TWP). Result: 1 candidate → `BURLINGTON TWP, NJ`.
+
+---
+
+### 2026-07-14 — BUG FIX: ext-action-post — payout null fallback surfaces as $5000.00
+
+Files changed: `utils/loadStore.js` (comment only), `content/patModal.js`.
+Docs updated: `CHANGELOG.md`.
+
+**Root cause:** `loadUnit.payoutNum` is `null` when `.wo-total_payout` was absent from the card DOM at the time `parseLoads()` (or on-demand Phase 1 parse) ran. The previous `|| 0` collapsed null→0, so `initPayout = 0 + PAT_TEST_MARKUP_USD = 5000`.
+
+**Not a comma bug:** `_parsePayoutNum` in `loadStore.js` already calls `.replace(/[$,]/g, '')` before `parseFloat` — identical normalization to `parseNumStr`. `"$2,320.23"` → `2320.23` is handled correctly when the payout string IS present.
+
+**Fix — `patModal.js`:**
+Replaced `loadUnit.payoutNum || 0` with a null-aware two-step:
+1. If `payoutNum` is non-null, use it (normal path).
+2. Else, call `parseNumStr(loadUnit.payout)` on the raw payout string — direct fallback that also strips `$` and commas (handles the case where `payoutNum` was never derived or was overwritten with null by a subsequent merge).
+3. Added `logger.warn` when `payoutNum` is null so the fallback is visible in DevTools (not silent).
+
+**`loadStore.js`:** comment added to `_parsePayoutNum` documenting why it cannot call `parseNumStr` directly (load order: loadStore at position 18, patApi at position 31) and confirming equivalent normalization.
+
+---
+
+### 2026-07-14 — BUG FIX: ext-action-post — miles parsing, payout rounding, city normalizer (3 bugs)
+
+Files changed: `content/patApi.js`, `content/patModal.js`.
+Docs updated: `AMAZON_SELECTORS.md`, `TEST_CASES.md`, `CHANGELOG.md`.
+
+**Bug 1 — Miles parsing (comma thousands-separator):**
+`loadUnit.distance` values like `"1,233.2 mi"` gave `distMiles = 1` (parseFloat stops at the comma) → minMiles = 0, maxMiles = 26.
+Added shared helper `parseNumStr(str)` in `patApi.js`: strips `$` and `,` before parseFloat, returns `0` on NaN.
+`patModal.js`: replaced two-line `distStr`/`parseFloat(distStr)` with `var distMiles = parseNumStr(loadUnit.distance)`.
+
+**Bug 2 — Payout rounding at declaration:**
+`boardPayout + PAT_TEST_MARKUP_USD` (e.g. `2279.86 + 5000`) can produce `7279.860000000001` as a raw float due to IEEE 754 addend mismatch. The input field display was already guarded by `.toFixed(2)`, but `initPayout` itself remained the raw float, appearing in the logger and any direct downstream use.
+Fixed: `var initPayout = parseFloat((boardPayout + PAT_TEST_MARKUP_USD).toFixed(2))` — all uses of `initPayout` now see a clean 2-decimal value.
+
+**Bug 3a — Full state name prefixed before city name in boardStops:**
+Entry like `"ILL1 Illinois AURORA, IL 60505"` → after station-code drop: `"Illinois AURORA, IL 60505"` → comma split gives city `"Illinois AURORA"` (wrong).
+Added `STATE_NAMES_SORTED` constant (all keys from `STATE_NAME_TO_CODE`, sorted longest-first, computed once at load).
+Added loop in `parseBoardStop` after city extraction: if the city string (lowercase) starts with a state name + space, strip the prefix. `"Illinois AURORA"` → `"AURORA"`. Longest-first sort prevents `"north"` matching before `"north carolina"`.
+
+**Bug 3b — Dotted abbreviation city names fail API lookup:**
+`"MT. JULIET"` sent verbatim to the city search API may return no matching entry.
+Added `ABBREV_EXPAND` constant (`MT.→MOUNT`, `ST.→SAINT`, `FT.→FORT`, regex with `\b` word boundary).
+Added retry in `resolvePATCity`: if primary + fallback match both fail, expand abbreviations in the city string; if the string changed, issue a second GET to the city search API and re-run primary + fallback on the expanded name. Retry fires only when abbreviation expansion actually changes the string.
+
+---
+
 ### 2026-07-08 — BUG FIX: "startLocationList" → "originCityInfo" (invented key, wrong shape)
 
 Files changed: `content/patApi.js` (`buildPatPayload`).

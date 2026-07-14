@@ -76,7 +76,11 @@ Array of objects: `{ name, stateCode, country, latitude, longitude, nearestDomic
 ⚠️ `displayValue` is ALWAYS `null` in this API — never use it directly. Build it manually: `"${name}, ${stateCode}"`.
 `uniqueKey` must also be built manually: `"${latitude}${displayValue}"` (after building displayValue).
 
-boardStops string format: `"JAX9 JACKSONVILLE, Florida 32221-8118"`. Drop first token (warehouse code), split on comma: city = left, state = first word of right (may be full name "Florida" or abbrev "FL" → normalize via `STATE_NAME_TO_CODE`).
+boardStops string format: `"JAX9 JACKSONVILLE, Florida 32221-8118"`. Drop first token (warehouse code), split on comma: city = left, state portion = right (strip trailing ZIP first — state may be full name "Florida" or abbrev "FL" → normalize via `STATE_NAME_TO_CODE`).
+
+Additional observed patterns handled by `parseBoardStop`:
+- Full state name prefixed before city: `"ILL1 Illinois AURORA, IL 60505"` → `{ city:"AURORA", state:"IL" }`. Detected by checking if city string starts with a `STATE_NAME_TO_CODE` key + space (checked longest-first via `STATE_NAMES_SORTED`).
+- Dotted abbreviations (`"MT. JULIET"`, `"ST. LOUIS"`, `"FT. WAYNE"`) are NOT stripped in `parseBoardStop` — they are sent verbatim to the city search API. If the API returns no match, `resolvePATCity` expands `MT.→MOUNT`, `ST.→SAINT`, `FT.→FORT` and retries the search.
 
 **POST body shape (confirmed from live cURL capture — MEMPHIS→LEBANON):** see `buildPatPayload()` in `content/patApi.js` for canonical structure.
 

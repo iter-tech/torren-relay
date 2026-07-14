@@ -1,6 +1,13 @@
 // Layout A ONLY — Load Board (div.load-card / div.load-card__selected).
 // NO Layout B, NO .click(), NO setInterval, NO auto-run.
 
+// Deduplicated in-memory collector: { [rawBoardLabel] → true }.
+// Tracks display names seen on the load board. Enum codes are a separate concern —
+// use window.__EXT_DEBUG.getEquipmentEnumMap() on the PAT form page for that.
+// Populated by parseOneCard on every call path (tick + on-demand PAT parse).
+// Read via window.__EXT_DEBUG.getSeenEquipmentTypes().
+var _seenEquipmentTypes = {};
+
 function parseOneCard(card) {
   // loadId: inner div whose id attribute is a UUID
   const loadId = card.querySelector('div[id]')?.id || null;
@@ -43,6 +50,10 @@ function parseOneCard(card) {
 
   // Equipment type → "53' Trailer"
   const equipment = card.querySelector('.equipment-type-text')?.textContent?.trim() || null;
+  if (equipment && !Object.prototype.hasOwnProperty.call(_seenEquipmentTypes, equipment)) {
+    _seenEquipmentTypes[equipment] = true;
+    logger.log('loadParser', 'new equipment type seen', { equipment: equipment });
+  }
 
   // Trailer type letter circle → "P" (may be absent)
   const trailerCircle = card.querySelector('.trailer-type-circle');
@@ -153,3 +164,113 @@ function parseLoads() {
 // content.js does NOT call parseLoads(). No observer, no interval here.
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};
 window.__EXT_DEBUG.getLoads = parseLoads;
+window.__EXT_DEBUG.getSeenEquipmentTypes = function () {
+  return Object.keys(_seenEquipmentTypes).sort();
+};
+
+// Call from the console while Amazon's PAT form is open.
+// For best results: expand the Equipment dropdown so all options are rendered in the DOM,
+// then call this function. It tries three strategies in order:
+//   1. Native <select> option values
+//   2. React fiber props on visible ARIA option elements (open dropdown)
+//   3. BFS over the React fiber tree looking for an options array in component props
+// Returns { strategies: string[], map: { displayLabel: string[] } }
+// or { map: null, hint: '...' } if nothing is found.
+window.__EXT_DEBUG.getEquipmentEnumMap = function () {
+  logger.log('loadParser', 'getEquipmentEnumMap called');
+  var map = {};
+  var strategies = [];
+
+  function record(lbl, val) {
+    lbl = (lbl || '').trim();
+    val = (val || '').trim();
+    if (!lbl || !val) return false;
+    if (!map[lbl]) map[lbl] = [];
+    if (map[lbl].indexOf(val) === -1) { map[lbl].push(val); return true; }
+    return false;
+  }
+
+  function fiberOf(el) {
+    var ks = Object.keys(el);
+    for (var i = 0; i < ks.length; i++) {
+      if (ks[i].startsWith('__reactFiber$') || ks[i].startsWith('__reactInternalInstance$')) return el[ks[i]];
+    }
+    return null;
+  }
+
+  // --- Strategy 1: native <select> ---
+  var s1 = 0;
+  Array.from(document.querySelectorAll('select option')).forEach(function (opt) {
+    var val = opt.value;
+    var lbl = opt.textContent.trim();
+    if (val && val !== lbl && record(lbl, val)) s1++;
+  });
+  if (s1) strategies.push('native-select:' + s1);
+
+  // --- Strategy 2: ARIA option elements with fiber probe ---
+  var s2 = 0;
+  Array.from(document.querySelectorAll('[role="option"],[role="listitem"],[role="menuitem"],[role="radio"]')).forEach(function (el) {
+    var lbl = el.textContent.trim();
+    var val = el.getAttribute('data-value') || el.getAttribute('data-option-value');
+    if (val && record(lbl, val)) { s2++; return; }
+    var fiber = fiberOf(el);
+    var d = 0;
+    while (fiber && d < 12) {
+      var p = fiber.memoizedProps;
+      if (p && typeof p === 'object') {
+        val = typeof p.value === 'string' ? p.value
+            : typeof p.optionValue === 'string' ? p.optionValue : null;
+        var fLbl = typeof p.label === 'string' ? p.label : null;
+        if (val && record(fLbl || lbl, val)) { s2++; break; }
+      }
+      fiber = fiber.return; d++;
+    }
+  });
+  if (s2) strategies.push('aria-option-fiber:' + s2);
+
+  // --- Strategy 3: BFS on React fiber tree — finds options array even with dropdown closed ---
+  var s3 = 0;
+  var rootEl = document.querySelector('[data-reactroot]') || document.getElementById('root') || document.body;
+  var rootFiber = fiberOf(rootEl);
+  if (rootFiber) {
+    var queue = [rootFiber];
+    var visited = 0;
+    var OPTION_KEYS = ['options', 'items', 'choices', 'equipmentOptions', 'selectOptions', 'equipmentTypeOptions'];
+    while (queue.length && visited < 4000) {
+      var node = queue.shift();
+      if (!node) continue;
+      visited++;
+      var p = node.memoizedProps;
+      if (p && typeof p === 'object') {
+        for (var ki = 0; ki < OPTION_KEYS.length; ki++) {
+          var arr = p[OPTION_KEYS[ki]];
+          if (!Array.isArray(arr) || arr.length < 2) continue;
+          arr.forEach(function (o) {
+            if (!o || typeof o !== 'object') return;
+            var val = typeof o.value === 'string' ? o.value
+                    : typeof o.enumValue === 'string' ? o.enumValue : null;
+            var lbl = typeof o.label === 'string' ? o.label
+                    : typeof o.displayName === 'string' ? o.displayName : null;
+            if (val && lbl && record(lbl, val)) s3++;
+          });
+        }
+      }
+      if (node.child) queue.push(node.child);
+      if (node.sibling) queue.push(node.sibling);
+    }
+    logger.log('loadParser', 'getEquipmentEnumMap BFS done', { visited: visited, found: s3 });
+    if (s3) strategies.push('fiber-bfs:' + s3 + '(visited=' + visited + ')');
+  }
+
+  var total = Object.keys(map).length;
+  if (total > 0) {
+    logger.log('loadParser', 'getEquipmentEnumMap success', { strategies: strategies, map: map });
+    return { strategies: strategies, map: map };
+  }
+  logger.warn('loadParser', 'getEquipmentEnumMap: nothing found');
+  return {
+    strategies: [],
+    map: null,
+    hint: 'Open the PAT form, expand the Equipment dropdown so all options are visible, then call this again. If still null, the enum is not in the page DOM/fiber state.',
+  };
+};

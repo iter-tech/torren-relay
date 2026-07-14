@@ -245,6 +245,55 @@ Two relay.amazon.com tabs open simultaneously. All cases verified with both tabs
    - Modal opens showing "Could not read load data from this card — start the refresh loop once, or report this card layout to the PM." (testid `pat-no-equipment`).
    - No network request is made.
 
+### TC-PAT-2 — Distance > 1000 mi: MIN/MAX compute correctly with comma in distance string
+1. Open the inline panel for a load whose board distance shows `"1,233.2 mi"` (or any value with a thousands-comma).
+2. Click `ext-action-post`.
+3. **Expected:**
+   - MIN miles field = `Math.round(1233.2) - 25` = **1208**
+   - MAX miles field = `Math.round(1233.2) + 25` = **1258**
+   - $/mi = `initPayout / 1233.2` (rounded to 2 decimals)
+4. **Regression check (< 1000 mi, e.g. "104.0 mi"):** MIN = 79, MAX = 129 — unchanged.
+5. **Failure signature before fix:** `distMiles = 1` (parseFloat stops at comma) → MIN = 0, MAX = 26.
+
+### TC-PAT-3 — Payout rounding: no trailing float noise anywhere
+1. Open ext-action-post for any load whose `payoutNum` produces a float-arithmetic imprecision (e.g. `boardPayout = 2279.86` → `2279.86 + 5000 = 7279.860000000001` raw float).
+2. **Expected in the Payout ($) field:** `"7279.86"` — exactly two decimals, no `"7279.860000000001"`.
+3. **Expected in the console logger** (`modal rendered` entry): `initPayout: 7279.86` — the variable itself is rounded, not just the field.
+4. Change the $/mi field and change it back. **Expected:** Payout field remains `"7279.86"` (listener also applies `.toFixed(2)`).
+
+### TC-PAT-4 — boardStops with full state name prefixed before city
+1. Simulate a boardStops entry `"ILL1 Illinois AURORA, IL 60505"` (open `ext-action-post` on a card whose origin has this entry, OR call `parseBoardStop("ILL1 Illinois AURORA, IL 60505")` directly in the console).
+2. **Expected result:** `{ city: "AURORA", state: "IL" }`.
+3. **Regression — normal entry:** `parseBoardStop("DNA4 MEMPHIS, TN 38128-2510")` → `{ city: "MEMPHIS", state: "TN" }` unchanged.
+4. **Regression — multi-word city starting with state-ish word:** `parseBoardStop("XYZ1 NORTH LITTLE ROCK, AR 72117")` → `{ city: "NORTH LITTLE ROCK", state: "AR" }` (no stripping — "north little rock" does not start with any state name + space).
+
+### TC-PAT-5 — Dotted abbreviation in city triggers API retry with expanded name
+1. Simulate a boardStops origin entry `"TNK1 MT. JULIET, TN 37122"`.
+2. **Expected flow in console:**
+   - First fetch: `GET /api/loadboard/filters/cities/search/MT.%20JULIET` — attempt primary + fallback match.
+   - If no match: log line `resolvePATCity: retrying with expanded abbrev { from: "MT. JULIET", to: "MOUNT JULIET" }`.
+   - Second fetch: `GET /api/loadboard/filters/cities/search/MOUNT%20JULIET` — primary match on `"MOUNT JULIET, TN"`.
+3. **Expected modal:** origin city resolves to `"MOUNT JULIET, TN"`.
+4. **No retry when no abbreviation:** city `"MEMPHIS"` — no second fetch is issued (`expandedCity === city`, condition false).
+5. **ST. / FT. variants:** `"ST. LOUIS, MO"` → retry with `"SAINT LOUIS, MO"`; `"FT. WAYNE, IN"` → retry with `"FORT WAYNE, IN"`.
+
+### TC-PAT-6 — Abbreviated board city name resolves via prefix+subsequence fallback
+1. Simulate a boardStops entry `"NJC1 BURLNGTN TWP, NJ 08016"` (or use a real card with that board text).
+2. Click `ext-action-post`. Watch the console.
+3. **Expected console sequence:**
+   - `resolvePATCity: retrying with expanded abbrev` — NOT logged (no dotted abbreviation in "BURLNGTN TWP").
+   - `resolvePATCity: trying prefix+subsequence fallback { city: "BURLNGTN TWP", prefix: "BURL", state: "NJ" }`
+   - Second GET: `/api/loadboard/filters/cities/search/BURL`
+   - `resolvePATCity: prefix+subsequence matched { city: "BURLNGTN TWP", matched: "BURLINGTON TWP", state: "NJ" }`
+4. **Expected modal:** origin city shows `"BURLINGTON TWP, NJ"`.
+5. **No-guess case (ambiguous):** if more than one NJ city starting with "BURL" passes the subsequence check, expected log: `ambiguous prefix+subsequence — not guessing { count: N, names: [...] }` and origin city shows the "Could not resolve city" error.
+6. **No-guess case (zero candidates):** no NJ city starting with "BURL" passes subsequence check → same "Could not resolve" error.
+7. **Regression — normal city name:** `"DNA4 MEMPHIS, TN 38128-2510"` → primary match finds "MEMPHIS, TN" directly; prefix+subsequence fallback is never reached.
+8. **`isSubseq` correctness:**
+   - `isSubseq("BURLNGTNTWP", "BURLINGTONTWP")` → `true` (all 11 abbrev chars found in order)
+   - `isSubseq("BURLNGTNTWP", "BURLINGTON")` → `false` (10 chars in full, can't absorb TWP)
+   - `isSubseq("BURLNGTNTWP", "BURLINGTONHEIGHTS")` → `false` (no T,W,P after consuming the middle chars)
+
 ### TC-SOUND-1 — Popup preview and in-page alert produce identical tones for the same soundId
 1. In the popup, select a sound (e.g. "Fanfare") and click the replay button.
 2. Let the extension play an in-page alert for the same soundId (manually trigger via `__EXT_DEBUG.playAlert()` in the content console, with `soundId = 'fanfare'`).

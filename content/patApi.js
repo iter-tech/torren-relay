@@ -7,13 +7,18 @@ var PAT_UPSERT_PATH  = '/api/loadboard/orders/upsert';
 var CITY_SEARCH_BASE = '/api/loadboard/filters/cities/search/';
 
 // Equipment types for 53' Trailer — confirmed from live upsert capture.
-// For new equipment types: capture a live upsert first, then add a separate entry.
 var PAT_EQUIPMENT_TYPES_53 = [
   'FIFTY_THREE_FOOT_TRUCK',
   'SKIRTED_FIFTY_THREE_FOOT_TRUCK',
   'FIFTY_THREE_FOOT_DRY_VAN',
   'FIFTY_THREE_FOOT_A5_AIR_TRAILER',
   'FORTY_FIVE_FOOT_TRUCK',
+];
+
+// Equipment types for 53' Container and Chassis — confirmed from live upsert capture 2026-07-14.
+// Payload structure identical to 53' Trailer; only this list differs.
+var PAT_EQUIPMENT_TYPES_CONTAINER = [
+  'FIFTY_THREE_FOOT_CONTAINER',
 ];
 
 // All 50 US states + DC: full name (lowercase) → 2-letter code.
@@ -38,6 +43,22 @@ var TZ_OFFSET_HOURS = {
   EDT:-4, EST:-5, CDT:-5, CST:-6, MDT:-6, MST:-7, PDT:-7, PST:-8,
 };
 
+// Strip currency symbols, thousands-commas, and trailing units before parseFloat.
+// "1,233.2 mi" → 1233.2   "$2,279.86" → 2279.86   undefined → 0
+function parseNumStr(str) {
+  return parseFloat(String(str || '').replace(/[$,]/g, '')) || 0;
+}
+
+// Pre-sorted longest-first so multi-word names ("north carolina") match before "north".
+var STATE_NAMES_SORTED = Object.keys(STATE_NAME_TO_CODE).sort(function (a, b) { return b.length - a.length; });
+
+// Regex + replacement pairs for dotted-abbreviation expansion in resolvePATCity retry.
+var ABBREV_EXPAND = [
+  [/\bMT\./gi, 'MOUNT'],
+  [/\bST\./gi, 'SAINT'],
+  [/\bFT\./gi, 'FORT'],
+];
+
 // Normalize a state string to 2-letter code.
 // "FL" → "FL"; "Florida" → "FL"; "Indiana" → "IN"
 function normalizeState(s) {
@@ -59,10 +80,16 @@ function parseBoardStop(str) {
   var ci = afterCode.indexOf(',');
   if (ci === -1) return { city: afterCode.trim(), state: '' };
   var city = afterCode.slice(0, ci).trim();
-  // Strip trailing ZIP ("38128-2510", "27409") before normalizing state.
-  // State may be 2-letter ("TN") or full name ("North Carolina") — both handled
-  // by normalizeState via STATE_NAME_TO_CODE.
+  // Strip trailing ZIP before normalizing state (full name or 2-letter both handled)
   var stateRaw = afterCode.slice(ci + 1).trim().replace(/\s+\d{5}(-\d{4})?\s*$/, '').trim();
+  // Strip full state name prefix from city: "Illinois AURORA" → "AURORA"
+  var lcCity = city.toLowerCase();
+  for (var sni = 0; sni < STATE_NAMES_SORTED.length; sni++) {
+    if (lcCity.indexOf(STATE_NAMES_SORTED[sni] + ' ') === 0) {
+      city = city.slice(STATE_NAMES_SORTED[sni].length + 1).trim();
+      break;
+    }
+  }
   return { city: city, state: normalizeState(stateRaw) };
 }
 
@@ -98,6 +125,16 @@ function getCsrfToken() {
   var meta = document.querySelector('meta[name="x-owp-csrf-token"]');
   if (!meta) { logger.warn('patApi', 'getCsrfToken: meta tag not found'); return ''; }
   return meta.getAttribute('content') || '';
+}
+
+// Returns true if every character of abbrev appears in full in the same order (subsequence check).
+// Both strings must already be uppercased and contain only letters — caller strips non-letters.
+function isSubseq(abbrev, full) {
+  var ai = 0;
+  for (var fi = 0; fi < full.length && ai < abbrev.length; fi++) {
+    if (abbrev[ai] === full[fi]) ai++;
+  }
+  return ai === abbrev.length;
 }
 
 // Resolve a boardStops string to a full city object for the PAT payload.
@@ -143,8 +180,79 @@ async function resolvePATCity(boardStopStr) {
       }
     }
     if (!match) {
-      logger.warn('patApi', 'resolvePATCity: no match', { city: city, state: state, n: results.length });
-      return null;
+      // Retry with dotted-abbreviation expansion (MT.→MOUNT, ST.→SAINT, FT.→FORT)
+      var expandedCity = city;
+      for (var ai = 0; ai < ABBREV_EXPAND.length; ai++) {
+        expandedCity = expandedCity.replace(ABBREV_EXPAND[ai][0], ABBREV_EXPAND[ai][1]);
+      }
+      if (expandedCity !== city) {
+        logger.log('patApi', 'resolvePATCity: retrying with expanded abbrev', { from: city, to: expandedCity });
+        var resp2 = await fetch(CITY_SEARCH_BASE + encodeURIComponent(expandedCity), {
+          method: 'GET', credentials: 'include',
+          headers: { 'Accept': 'application/json', 'x-owp-csrf-token': csrf },
+        });
+        if (resp2.ok) {
+          var results2 = await resp2.json();
+          if (Array.isArray(results2)) {
+            var lc2 = expandedCity.toLowerCase();
+            for (var ei = 0; ei < results2.length; ei++) {
+              if (results2[ei].name && results2[ei].name.toLowerCase() === lc2 &&
+                  results2[ei].stateCode === state) { match = results2[ei]; break; }
+            }
+            if (!match) {
+              for (var fi = 0; fi < results2.length; fi++) {
+                if (results2[fi].stateCode === state && results2[fi].name &&
+                    results2[fi].name.toLowerCase().indexOf(lc2) === 0) { match = results2[fi]; break; }
+              }
+            }
+          }
+        }
+      }
+      if (!match) {
+        // Fallback: prefix query + letter-subsequence for board-abbreviated city names.
+        // "BURLNGTN TWP, NJ" → prefix "BURL" → API returns all NJ cities starting with BURL
+        // → subseq check ("BURLNGTNTWP" ⊆ "BURLINGTONTWP") → exactly one match → use it.
+        // Never guesses when zero or more than one candidate survives.
+        var abbrevLetters = city.replace(/[^A-Za-z]/g, '').toUpperCase();
+        var prefix = city.slice(0, 4);
+        if (abbrevLetters.length >= 4 && prefix.trim().length >= 3) {
+          logger.log('patApi', 'resolvePATCity: trying prefix+subsequence fallback', {
+            city: city, prefix: prefix, state: state,
+          });
+          var resp3 = await fetch(CITY_SEARCH_BASE + encodeURIComponent(prefix), {
+            method: 'GET', credentials: 'include',
+            headers: { 'Accept': 'application/json', 'x-owp-csrf-token': csrf },
+          });
+          if (resp3.ok) {
+            var results3 = await resp3.json();
+            if (Array.isArray(results3)) {
+              var candidates = [];
+              for (var gi = 0; gi < results3.length; gi++) {
+                if (results3[gi].stateCode !== state || !results3[gi].name) continue;
+                var candLetters = results3[gi].name.replace(/[^A-Za-z]/g, '').toUpperCase();
+                if (isSubseq(abbrevLetters, candLetters)) candidates.push(results3[gi]);
+              }
+              if (candidates.length === 1) {
+                match = candidates[0];
+                logger.log('patApi', 'resolvePATCity: prefix+subsequence matched', {
+                  city: city, matched: match.name, state: state,
+                });
+              } else if (candidates.length > 1) {
+                logger.warn('patApi', 'resolvePATCity: ambiguous prefix+subsequence — not guessing', {
+                  city: city, count: candidates.length,
+                  names: candidates.map(function (c) { return c.name; }),
+                });
+              }
+            }
+          }
+        }
+        if (!match) {
+          logger.warn('patApi', 'resolvePATCity: no match on any path', {
+            city: city, state: state, n: results.length,
+          });
+          return null;
+        }
+      }
     }
     var displayValue = match.name + ', ' + match.stateCode;
     return {
@@ -187,6 +295,7 @@ function resolveLoadingType(str) {
 
 // Build the PAT upsert POST body — structure reconciled against live cURL capture (MEMPHIS→LEBANON).
 // formState: { originCity, destCity (from resolvePATCity),
+//   equipmentTypes (string[] — PAT_EQUIPMENT_TYPES_53 or PAT_EQUIPMENT_TYPES_CONTAINER),
 //   originRadius, destRadius (numbers), startTime, endTime (Date UTC),
 //   stopCount, minMiles, maxMiles, permile, payout, stemMin (numbers),
 //   loadingTypeList (string[]), excludeSpecialServices (string[]) }
@@ -214,8 +323,8 @@ function buildPatPayload(formState) {
     loadingTypeList:             formState.loadingTypeList,
     excludeSpecialServices:      formState.excludeSpecialServices,
     driverTypes:                 ['SOLO'],
-    visibleEquipmentTypes:       PAT_EQUIPMENT_TYPES_53[0],
-    equipmentTypes:              PAT_EQUIPMENT_TYPES_53,
+    visibleEquipmentTypes:       formState.equipmentTypes[0],
+    equipmentTypes:              formState.equipmentTypes,
     visibleProvidedTrailerType:  'AMAZON_PROVIDED',
     providedTrailerType:         'AMAZON_PROVIDED',
     originCityInfo:              {
