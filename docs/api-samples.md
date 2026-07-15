@@ -148,9 +148,27 @@ Enums observed so far:
 - `equipmentTypes` (53' Trailer): `FIFTY_THREE_FOOT_TRUCK`, `SKIRTED_FIFTY_THREE_FOOT_TRUCK`,
   `FIFTY_THREE_FOOT_DRY_VAN`, `FIFTY_THREE_FOOT_A5_AIR_TRAILER`, `FORTY_FIVE_FOOT_TRUCK`
 - `equipmentTypes` (53' Container and Chassis): `FIFTY_THREE_FOOT_CONTAINER`
+- `equipmentTypes` (40' Container): `FORTY_FOOT_CONTAINER`
+- `equipmentTypes` (26' Truck): `TWENTY_SIX_FOOT_BOX_TRUCK`
 - `payoutType` (UI state): `FLAT_RATE`
 
-## 4. order-upsert — 53' Container and Chassis (captured 2026-07-14)
+## 4. order-upsert — 40' Container and 26' Truck (Amazon API data 2026-07-14)
+
+Status: ✅ enabled in ext-action-post 2026-07-14. Full payload not captured — enums confirmed from Amazon API data only. If a post fails, recapture via DevTools → Network → filter "upsert" and compare `equipmentTypes`.
+
+```json
+"equipmentTypes": ["FORTY_FOOT_CONTAINER"]      // 40' Container
+"equipmentTypes": ["TWENTY_SIX_FOOT_BOX_TRUCK"] // 26' Truck
+```
+
+Payload structure assumed identical to section 3 (53' Trailer). All other fields unchanged.
+
+Implementation: `PAT_EQUIPMENT_TYPES_40_CONTAINER` and `PAT_EQUIPMENT_TYPES_26_TRUCK` constants
+in `content/patApi.js`; mapped via `PAT_EQUIPMENT_MAP` in `content/patModal.js`.
+
+---
+
+## 5. order-upsert — 53' Container and Chassis (captured 2026-07-14)
 
 Status: ✅ confirmed working; enabled in ext-action-post 2026-07-14.
 

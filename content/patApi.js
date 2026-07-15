@@ -21,6 +21,16 @@ var PAT_EQUIPMENT_TYPES_CONTAINER = [
   'FIFTY_THREE_FOOT_CONTAINER',
 ];
 
+// Equipment types for 40' Container — confirmed from Amazon API data 2026-07-14.
+var PAT_EQUIPMENT_TYPES_40_CONTAINER = [
+  'FORTY_FOOT_CONTAINER',
+];
+
+// Equipment types for 26' Truck — confirmed from Amazon API data 2026-07-14.
+var PAT_EQUIPMENT_TYPES_26_TRUCK = [
+  'TWENTY_SIX_FOOT_BOX_TRUCK',
+];
+
 // All 50 US states + DC: full name (lowercase) → 2-letter code.
 var STATE_NAME_TO_CODE = {
   'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR',
@@ -58,6 +68,25 @@ var ABBREV_EXPAND = [
   [/\bST\./gi, 'SAINT'],
   [/\bFT\./gi, 'FORT'],
 ];
+
+// Parse { city, state } from a detail-panel stop address string.
+// The address field in detail stops is the clean text shown in the pick-up/drop-off panel
+// (e.g. "Concord, NC 28025" or "1000 Amazon Way, Concord, NC 28025") — no warehouse code,
+// no state-code prefix — and is the authoritative source for PAT city resolution.
+// Returns { city: '', state: '' } when no "CITY, 2-letter-state" pattern is found.
+function parseDetailAddress(address) {
+  logger.log('patApi', 'parseDetailAddress called', { address: address });
+  if (!address) return { city: '', state: '' };
+  var m;
+  // "..., CITY, ST [ZIP]" — when a street address precedes the city (joined by ", ")
+  m = address.match(/,\s*([A-Za-z][A-Za-z\s.'-]*),\s*([A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/);
+  if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+  // "CITY, ST [ZIP]" — city is the first (or only) component
+  m = address.match(/^([A-Za-z][A-Za-z\s.'-]*),\s*([A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/);
+  if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+  logger.warn('patApi', 'parseDetailAddress: no match', { address: address });
+  return { city: '', state: '' };
+}
 
 // Normalize a state string to 2-letter code.
 // "FL" → "FL"; "Florida" → "FL"; "Indiana" → "IN"
@@ -137,13 +166,21 @@ function isSubseq(abbrev, full) {
   return ai === abbrev.length;
 }
 
-// Resolve a boardStops string to a full city object for the PAT payload.
+// Resolve a city for the PAT payload.
+// input: either a raw board-stop string ("DNA4 MEMPHIS, TN 38128") parsed via parseBoardStop,
+//        OR a pre-parsed { city, state } object from parseDetailAddress (preferred — clean names).
 // Returns null on network error or no match.
 // Confirmed response shape: array of { name, stateCode, country, latitude, longitude,
 //   nearestDomicileCode, displayValue: null }  (displayValue is ALWAYS null in this API)
-async function resolvePATCity(boardStopStr) {
-  logger.log('patApi', 'resolvePATCity called', { boardStopStr: boardStopStr });
-  var parsed = parseBoardStop(boardStopStr);
+async function resolvePATCity(input) {
+  var parsed;
+  if (input && typeof input === 'object' && input.city !== undefined) {
+    parsed = { city: String(input.city || ''), state: String(input.state || '') };
+    logger.log('patApi', 'resolvePATCity called (pre-parsed)', parsed);
+  } else {
+    logger.log('patApi', 'resolvePATCity called (board string)', { input: input });
+    parsed = parseBoardStop(String(input || ''));
+  }
   var city   = parsed.city;
   var state  = parsed.state;
   if (!city) {

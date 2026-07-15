@@ -2,24 +2,53 @@
 
 ## [Unreleased]
 
-### 2026-07-14 — FEATURE: equipment-type collector — getEquipmentEnumMap from PAT form
+### 2026-07-14 — FEATURE: ext-action-post — enable 40' Container and 26' Truck
+
+Files changed: `content/patApi.js`, `content/patModal.js`.
+Docs updated: `docs/api-samples.md`, `docs/CHANGELOG.md`.
+
+Enums confirmed from Amazon API data (not full payload capture — if a post fails, recapture via DevTools Network filter "upsert"):
+- `"40' Container"` → `["FORTY_FOOT_CONTAINER"]`
+- `"26' Truck"` → `["TWENTY_SIX_FOOT_BOX_TRUCK"]`
+
+**`content/patApi.js`:** Added `PAT_EQUIPMENT_TYPES_40_CONTAINER` and `PAT_EQUIPMENT_TYPES_26_TRUCK` constants.
+
+**`content/patModal.js`:** Both board labels added to `PAT_EQUIPMENT_MAP`. No other changes — the existing `formState.equipmentTypes` / `buildPatPayload` path handles them identically to 53' Container.
+
+---
+
+### 2026-07-14 — FIX: ext-action-post — use detail-panel stop address for PAT city resolution
+
+Files changed: `content/patApi.js`, `content/patModal.js`.
+
+**Root cause:** Board card summary stops (`.wo-card-header__components` text) can carry a 2-letter state-code prefix before the city name, e.g. `"DNA4 NC CONCORD, NC 28025"`. `parseBoardStop` strips the warehouse code (`DNA4 `) leaving `"NC CONCORD, NC 28025"`, then extracts city `= "NC CONCORD"`. The existing state-name prefix stripping loop only matches full names from `STATE_NAMES_SORTED` (e.g. `"north carolina"`), so `"nc"` is never stripped.
+
+The detail-panel stop `address` field (from `parseStopBlock` in `inlinePanel.js`) contains the same text that Amazon displays in the pick-up/drop-off view: `"Concord, NC 28025"` — clean, no prefix.
+
+**Fix:**
+
+**`content/patApi.js`:**
+- Added `parseDetailAddress(address)` — parses `{ city, state }` from a detail stop address string. Matches `"CITY, ST [ZIP]"` anchored to end-of-string; handles optional street prefix joined by `", "`. Returns `{ city: '', state: '' }` on no-match.
+- `resolvePATCity(input)` now accepts either a raw board-stop string (calls `parseBoardStop` internally — unchanged behavior) OR a pre-parsed `{ city, state }` object (skips `parseBoardStop`). Branch is determined by `typeof input === 'object'`.
+
+**`content/patModal.js`:**
+- `firstSeg`/`lastSeg`/`firstStop`/`lastStop` moved up to the sync extraction block (previously declared again in the time-parsing section — now declared once, used by both city and time logic).
+- `parseDetailAddress(firstStop.address)` / `parseDetailAddress(lastStop.address)` called for origin and dest. Both board string and detail address are logged side by side (`city source comparison`) so the fix can be verified for one load.
+- If detail parse succeeds (non-empty city), `originInput`/`destInput` = `{ city, state }` objects → passed to `resolvePATCity` bypassing `parseBoardStop`. Falls back to `originStop` string if detail address is absent or unparseable.
+
+**Test:** Open a load whose board card shows `"NC CONCORD"` or similar prefixed city. Open the PAT modal. Logger should show `detailOriginParsed: { city: "Concord", state: "NC" }` alongside the corrupted board stop. Origin in the modal should resolve to `"CONCORD, NC"` instead of failing.
+
+---
+
+### 2026-07-14 — equipment-type collector — confirmed enums not in page state; removed dead strategy
 
 Files changed: `content/loadParser.js`.
 
-**Problem:** Equipment enum codes (e.g. `FIFTY_THREE_FOOT_TRUCK`) are not present in the load board's rendered HTML. The board's `.equipment-type-text` gives only the display label. Guessing from load-card React fiber props is unreliable — the authoritative source is Amazon's own PAT form Equipment dropdown, which must map each display option to its enum value in order to submit the upsert request.
+**Confirmed:** Amazon's equipment enum codes are NOT present in the page DOM, ARIA attributes, or React fiber state. Verified by calling `getEquipmentEnumMap()` on the live PAT form with the Equipment dropdown expanded — all three strategies (native select, ARIA fiber probe, BFS over 4000 fiber nodes) returned null.
 
-**Changes:**
-- `_seenEquipmentTypes` and `getSeenEquipmentTypes()` remain as before (simple display-name string list from the board). No speculative enum probing on load cards.
-- Added `window.__EXT_DEBUG.getEquipmentEnumMap()` — call this from the console while the PAT form's Equipment dropdown is expanded.
+**Authoritative source:** capture each new equipment type's enum from the real upsert payload via DevTools Network → filter "upsert" when posting that type manually. Add to `api-samples.md` and a new `PAT_EQUIPMENT_TYPES_*` constant per `api-samples.md` §5.
 
-**`getEquipmentEnumMap()` tries three strategies in order:**
-1. **Native `<select>` options** — reads `option.value` / `option.textContent`.
-2. **ARIA option elements + React fiber** — queries `[role="option"]` etc.; reads `data-value` attribute first, then probes up to 12 hops of `memoizedProps` for a `value`/`optionValue` prop.
-3. **BFS over the full React fiber tree** — walks up to 4000 fiber nodes from the page root looking for `memoizedProps` arrays named `options`, `items`, `choices`, `equipmentOptions`, `selectOptions`, or `equipmentTypeOptions`; each array element must have `{value, label}` or `{enumValue, displayName}` shape.
-
-Returns `{ strategies: string[], map: { displayLabel: string[] } }` on success, or `{ map: null, hint: '...' }` if nothing is found.
-
-**If `map: null` is returned:** the enum is not accessible from the page DOM or fiber state and must be captured manually via DevTools Network (filter "upsert") per `api-samples.md` §5.
+**Change:** `getEquipmentEnumMap()` removed from `window.__EXT_DEBUG`. `getSeenEquipmentTypes()` (display-name list from the board) kept as-is.
 
 ---
 

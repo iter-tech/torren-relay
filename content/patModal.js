@@ -357,6 +357,8 @@ async function openPostModal(loadId) {
   var PAT_EQUIPMENT_MAP = {
     "53' Trailer":               PAT_EQUIPMENT_TYPES_53,
     "53' Container and Chassis": PAT_EQUIPMENT_TYPES_CONTAINER,
+    "40' Container":             PAT_EQUIPMENT_TYPES_40_CONTAINER,
+    "26' Truck":                 PAT_EQUIPMENT_TYPES_26_TRUCK,
   };
   var equipment = loadUnit.equipment || '';
   var patEquipmentTypes = PAT_EQUIPMENT_MAP[equipment] || null;
@@ -391,8 +393,49 @@ async function openPostModal(loadId) {
   var boardStops  = loadUnit.boardStops || [];
   var originStop  = boardStops[0]                              || '';
   var destStop    = boardStops[boardStops.length - 1]          || '';
-  var originParsed = parseBoardStop(originStop);
-  var destParsed   = parseBoardStop(destStop);
+
+  // Detail-panel stop objects — used for city resolution, time parsing, and stop count.
+  // Declared here (not duplicated below) so both uses share the same references.
+  var firstSeg  = detail.segments[0];
+  var lastSeg   = detail.segments[detail.segments.length - 1];
+  var firstStop = (firstSeg.stops && firstSeg.stops[0]) || null;
+  var lastStop  = (lastSeg.stops  && lastSeg.stops[lastSeg.stops.length - 1]) || null;
+
+  // Prefer city from the detail-panel stop address — the same clean "City, ST" text that is
+  // displayed in the pick-up/drop-off view. Board card summary stops may carry a 2-letter
+  // state-code prefix ("NC CONCORD, NC") that parseBoardStop does not strip (it only handles
+  // full-name prefixes like "Illinois AURORA"). Log both side by side to confirm the source.
+  var detailOriginParsed = firstStop ? parseDetailAddress(firstStop.address) : null;
+  var detailDestParsed   = lastStop  ? parseDetailAddress(lastStop.address)  : null;
+
+  logger.log('patModal', 'openPostModal: city source comparison', {
+    boardOrigin:         originStop,
+    detailOriginAddress: firstStop ? firstStop.address : null,
+    detailOriginParsed:  detailOriginParsed,
+    boardDest:           destStop,
+    detailDestAddress:   lastStop ? lastStop.address : null,
+    detailDestParsed:    detailDestParsed,
+  });
+
+  var originParsed, originInput;
+  if (detailOriginParsed && detailOriginParsed.city) {
+    originParsed = detailOriginParsed;
+    originInput  = detailOriginParsed; // resolvePATCity accepts { city, state }
+  } else {
+    logger.warn('patModal', 'openPostModal: detail origin address unparseable — falling back to boardStop', { originStop: originStop });
+    originParsed = parseBoardStop(originStop);
+    originInput  = originStop;
+  }
+
+  var destParsed, destInput;
+  if (detailDestParsed && detailDestParsed.city) {
+    destParsed = detailDestParsed;
+    destInput  = detailDestParsed;
+  } else {
+    logger.warn('patModal', 'openPostModal: detail dest address unparseable — falling back to boardStop', { destStop: destStop });
+    destParsed = parseBoardStop(destStop);
+    destInput  = destStop;
+  }
 
   // payoutNum is pre-parsed by _parsePayoutNum (strips $, commas) — same as parseNumStr.
   // Falls back to parsing the raw payout string directly when payoutNum is null
@@ -419,12 +462,7 @@ async function openPostModal(loadId) {
   var loadingTypeList = resolveLoadingType(loadingTypeStr);
   var loadingDispStr  = LOADING_TYPE_DISPLAY[loadingTypeStr] || loadingTypeStr;
 
-  // Times from first/last stop arrivals
-  var firstSeg  = detail.segments[0];
-  var lastSeg   = detail.segments[detail.segments.length - 1];
-  var firstStop = (firstSeg.stops && firstSeg.stops[0]) || null;
-  var lastStop  = (lastSeg.stops  && lastSeg.stops[lastSeg.stops.length - 1]) || null;
-
+  // Times from first/last stop arrivals (firstStop/lastStop declared in sync extraction above)
   var startTimeResult = firstStop ? parsePatStopTime(firstStop.arrival) : null;
   var endTimeResult   = lastStop  ? parsePatStopTime(lastStop.arrival)  : null;
 
@@ -775,8 +813,8 @@ async function openPostModal(loadId) {
 
   try {
     var cities = await Promise.all([
-      resolvePATCity(originStop),
-      resolvePATCity(destStop),
+      resolvePATCity(originInput),
+      resolvePATCity(destInput),
     ]);
     if (!overlay.isConnected) return; // modal closed during fetch
 
