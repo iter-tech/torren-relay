@@ -3,16 +3,62 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Amazon Relay Helper</title>
+  <title>Torren Relay</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="popup-container">
 
     <div class="popup-header">
-      <span class="popup-title">Amazon Relay Helper</span>
+      <span class="popup-title">Torren Relay</span>
       <span class="popup-version" data-testid="popup-version">v0.1.0</span>
     </div>
+
+    <div class="popup-section-title">Account</div>
+
+    <div class="popup-auth-gate-note" id="popup-auth-gate-note" data-testid="popup-auth-gate-note">Free access — sign in with your email to activate Torren Relay</div>
+
+    <div class="popup-auth-step" id="popup-auth-step-email" data-testid="popup-auth-step-email">
+      <div class="popup-auth-row">
+        <input type="email" id="popup-auth-email" data-testid="popup-auth-email"
+               class="popup-auth-input" placeholder="you@example.com" autocomplete="email">
+        <button type="button" id="popup-auth-send-code" data-testid="popup-auth-send-code"
+                class="popup-auth-btn">Send code</button>
+      </div>
+    </div>
+
+    <div class="popup-auth-step" id="popup-auth-step-code" data-testid="popup-auth-step-code" hidden>
+      <label class="popup-auth-field-label" for="popup-auth-code">Code from email</label>
+      <div class="popup-auth-row">
+        <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="10"
+               id="popup-auth-code" data-testid="popup-auth-code"
+               class="popup-auth-input popup-auth-input--code" placeholder="Digits only"
+               autocomplete="one-time-code">
+        <button type="button" id="popup-auth-verify" data-testid="popup-auth-verify"
+                class="popup-auth-btn">Verify</button>
+      </div>
+      <div class="popup-auth-links">
+        <button type="button" id="popup-auth-resend" data-testid="popup-auth-resend"
+                class="popup-auth-link">Resend code</button>
+        <button type="button" id="popup-auth-change-email" data-testid="popup-auth-change-email"
+                class="popup-auth-link">Use different email</button>
+      </div>
+    </div>
+
+    <div class="popup-auth-step" id="popup-auth-step-loggedin" data-testid="popup-auth-step-loggedin" hidden>
+      <div class="popup-auth-row popup-auth-row--loggedin">
+        <span class="popup-auth-email-display" id="popup-auth-email-display"
+              data-testid="popup-auth-email-display"></span>
+        <button type="button" id="popup-auth-logout" data-testid="popup-auth-logout"
+                class="popup-auth-link">Log out</button>
+      </div>
+    </div>
+
+    <div class="popup-auth-status" id="popup-auth-status" data-testid="popup-auth-status"></div>
+
+    <div class="popup-features" id="popup-features" data-testid="popup-features" hidden>
+
+    <div class="popup-divider"></div>
 
     <div class="popup-section-title">Display &amp; Alerts</div>
 
@@ -144,8 +190,22 @@
 
     <div class="popup-divider"></div>
 
+    <div class="popup-section-title">Booking</div>
+
+    <div class="popup-row">
+      <label class="popup-label" for="popup-fast-book">Fast Book</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="popup-fast-book" data-testid="popup-fast-book">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+
+    <div class="popup-divider"></div>
+
     <div class="popup-footer">
       <button type="button" id="popup-reset" data-testid="popup-reset" class="popup-reset">Reset to defaults</button>
+    </div>
+
     </div>
 
   </div>
@@ -153,6 +213,8 @@
   <script src="../utils/logger.js"></script>
   <script src="../utils/storage.js"></script>
   <script src="../utils/soundDefs.js"></script>
+  <script src="../vendor/supabase.min.js"></script>
+  <script src="../utils/supabaseConfig.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

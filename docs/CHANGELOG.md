@@ -2,6 +2,389 @@
 
 ## [Unreleased]
 
+### 2026-07-20 — TASK 2: Verification rules added to docs/CLAUDE.md
+
+New "Verification rules" section (between "Code rules" and "Communication"):
+1. **PROOF BEFORE REPORT** — never report "done" for a UI-affecting change without
+   actually exercising the flow; if the environment can't exercise it, say so explicitly
+   and list exactly what the user must test, never imply verification happened.
+2. **SMOKE CHECKLIST** — six items to run and report pass/fail on after any UI-affecting
+   change: (a) popup opens without console errors, (b) logged-out popup shows only the
+   login block, (c) full login flow works, (d) sidebar/panel activates on the load board,
+   (e) PAT modal opens and Confirm enables with valid data, (f) no errors in the page
+   console.
+
+Applying rule 1 to this very session: this working environment has no browser, so none of
+TASK 1 below has been exercised — see its entry for the explicit "what the user must test"
+list, and STATE.md for the standing limitation.
+
+### 2026-07-20 — TASK 1: activate/deactivate extension features on login/logout, no reload
+
+Files changed: `utils/tabState.js`, `utils/authGate.js`, `content/content.js`,
+`content/sidebar.js`, `content/inlinePanel.js`, `content/nightMode.js`,
+`content/filterSimilar.js`, `content/filterTags.js`.
+
+Previously the login gate (`utils/authGate.js`, added 2026-07-17/2026-07-20) was only
+evaluated at content-script startup and at the sidebar's play/pause toggle — logging in or
+out via the popup while a Relay tab was already open had no effect until that tab was
+reloaded (explicitly called out as a known limitation in the last several entries). Fixed
+via the storage-listener approach (preferred over `chrome.tabs.sendMessage` broadcast — no
+tab enumeration needed, and it's the same mechanism `popup.js` already uses to write the
+session).
+
+**`utils/authGate.js`** — `_handleGateResult()` now runs every `getAuthGate()`/
+`recheckAuthGate()` result through a transition check (`wasActive !== gate.active`) and
+fires newly-added `onAuthGateChange(callback)` listeners only on an actual active↔inactive
+flip — not on every session write (a silent mid-session token refresh keeps the gate active
+throughout and must not re-fire "activate"). New `chrome.storage.onChanged` listener in this
+file watches `SUPABASE_SESSION_KEY` and calls `recheckAuthGate()` on any write — this is what
+detects a login/logout that happened via the popup while this tab's content script is
+already running. New `isAuthGateActiveSync()` — a synchronous last-known-state read for call
+sites that can't await (a live click handler).
+
+**`content/content.js`** — startup logic split into `activateExtensionUI()` (idempotent:
+`tabState.init()` + `buildSidebar()` + `initManualToggle()`) and `deactivateExtensionUI()`
+(idempotent: stops the loop via `tabState.set('running', false)`, `removeInlinePanel()`,
+`clearHighlights()`, `clearSurgeHighlights()`, unsubscribes the sidebar's tabState listener
+and clears its memory-poll interval, then removes `#ext-sidebar` from the DOM entirely).
+Both registered with `onAuthGateChange()`, so a live login instantiates the sidebar/inline
+panel/loop exactly as if the page had loaded already logged in, and a live logout tears
+everything back down to the same untouched state as content-script startup gating.
+
+**`utils/tabState.js`** — added `unsubscribe(key, fn)`. Needed because `buildSidebar()`'s
+`tabState.subscribe('running', ...)` call would otherwise add one more permanent subscriber
+on every login (referencing an increasingly-detached chain of previous sidebar containers)
+across repeated login/logout cycles within the same page load — a real, reachable leak now
+that deactivate→reactivate is possible, whereas before this feature `buildSidebar()` only
+ever ran once per page load.
+
+**`content/sidebar.js`** — the running-subscriber is now a named function
+(`handleRunningSync`) stashed on the container as `container._runningSubscriber`, and the
+independent memory-poll `setInterval` is stashed as `container._memoryPollInterval` — both
+read and cleaned up by `deactivateExtensionUI()` before the container is removed, closing
+the leak above and an equivalent one for the interval (which would otherwise keep polling
+forever against detached DOM nodes after every logout).
+
+**`content/inlinePanel.js`** — `initManualToggle()`'s document-level click listener is
+registered exactly once per page load (existing `window.__extManualToggleInit` guard) and
+was never designed to be removed. Since it can no longer assume "if I exist, we're logged
+in" once live deactivation is possible, it now checks `isAuthGateActiveSync()` at the top of
+every click and bails out if the gate is currently closed.
+
+**`content/nightMode.js`, `content/filterSimilar.js`, `content/filterTags.js`** — each
+self-initializes independently of `content.js` (their own top-level IIFEs), so each gained
+an explicit `activate*()`/`deactivate*()` pair (idempotent, guarded by their existing
+`_...Authed` flags) and registered both with `onAuthGateChange()`. Deactivation goes further
+than just flipping the feature off: `deactivateNightMode()`/`deactivateFilterSimilar()`
+remove their injected `<style>` tags entirely (not just the triggering class), and
+`deactivateFilterTags()` un-hides everything and disconnects its `MutationObserver` — all
+three revert fully to the untouched-page state, matching content-script-startup gating
+rather than just "settings off."
+
+**Not exercised in a browser** — per the new Verification rules (this session's environment
+has no browser access). What the user must test manually, per TASK 1's own instructions:
+1. Open a Relay tab while logged out (sidebar should be absent).
+2. Log in via the popup (send code, verify) — **expected: sidebar/features appear on the
+   already-open tab immediately, no refresh.**
+3. Log out via the popup — **expected: sidebar disappears, loop stops if it was running, no
+   refresh.**
+4. Repeat the login→logout cycle 2–3 times in the same tab and check the console for
+   `[EXT][...][tabState] subscribe` / `[EXT][...][sidebar]` log volume — should not grow
+   per cycle (confirms the unsubscribe/clearInterval cleanup is actually working, not just
+   present in source).
+
+### 2026-07-20 — Investigated reported bug: email field restricted to 6-10 digits
+
+**No code change.** Reported: the previous entry's 6–10 digit `maxlength`/regex restriction
+was hitting the email input, not just the code input. Reread `popup/popup.html` and
+`popup/popup.js` line by line looking for this:
+
+- `popup-auth-email` (`popup.html:23`) — `type="email"`, no `maxlength`, no `pattern`. Read
+  by `popup.js:230` into a local `email` var, used only for `signInWithOtp`.
+- `popup-auth-code` (`popup.html:33`) — `type="text"`, `maxlength="10"`, `pattern="[0-9]*"`.
+  Read by `popup.js:258` into a local `code` var; the `/^\d{6,10}$/` check (`popup.js:262`)
+  runs only against this variable, only inside the Verify click handler.
+- They are already two separate `<input>` elements with distinct `id`/`data-testid`, inside
+  mutually-exclusive steps (`popup-auth-step-email` / `popup-auth-step-code`, toggled via
+  `hidden`). Checked `popup.css` for anything that could make them visually overlap despite
+  being distinct in the DOM (stray `position:absolute`, a rule defeating `[hidden]`) — found
+  nothing.
+
+Could not reproduce or locate the described bug in the current source. No browser is
+available in this working environment to test live, so this is a static-read finding, not a
+verified "no bug exists" — the most likely explanation is a stale unpacked-extension load in
+Chrome (extension files don't hot-reload on save; needs a manual reload via
+`chrome://extensions`). Added TC-AUTH-5 (`docs/TEST_CASES.md`) as a regression test —
+full-length realistic email address in, full round trip through to logged-in state — so this
+stays caught if it's a real, intermittent, or since-reintroduced issue. Flagged to the user to
+reload the extension and retest, or describe the exact symptom in more detail if it persists.
+
+### 2026-07-20 — OTP code length, popup login-only gating UI, PAT 10% markup
+
+**Fix 1 — OTP code length.** Files changed: `popup/popup.html`, `popup/popup.css`,
+`popup/popup.js`.
+
+Supabase sends 8-digit codes; the code input was hardcoded to `maxlength="6"` and validated
+only for non-empty, so an 8-digit code would get silently truncated to 6 characters by the
+input itself before the dispatcher could even submit it. `popup-auth-code` now has
+`maxlength="10"`, placeholder changed to "Digits only" (was "6-digit code"), and a new
+`<label for="popup-auth-code">Code from email</label>` (`.popup-auth-field-label`) added
+above the field. Verify-click validation replaced the "non-empty" check with
+`/^\d{6,10}$/.test(code)` — digits only, length 6–10, not a fixed length — with a matching
+error message ("Code must be 6-10 digits, numbers only.").
+
+**Fix 2 — popup shows only the login block when logged out.** Files changed:
+`popup/popup.html`, `popup/popup.css`, `popup/popup.js`.
+
+Previously the popup showed the Account/login section plus every feature control
+simultaneously regardless of login state (gating was content-script-side only, from the prior
+entry below). Every control from "Display & Alerts" through "Booking" and the "Reset to
+defaults" footer is now wrapped in one `popup-features` container. `showAuthStep()` — already
+the single place that toggles which of the three auth steps is visible — now also toggles
+`popup-features.hidden` in the same call, so login state and feature visibility can never
+drift apart. `popup-auth-gate-note`'s text changed to the requested headline: "Free access —
+sign in with your email to activate Torren Relay" (was "Sign in with your email to activate
+Torren Relay — free."), and its styling promoted from a small muted note to an actual
+headline (14px/700 weight) since it's now the only thing a logged-out dispatcher sees besides
+the form. Logged-in state is unchanged: email + Log out at top (`popup-auth-step-loggedin`),
+features below.
+
+**Fix 3 — PAT default markup: flat +$5000 → 10%.** Files changed: `content/patModal.js`,
+`docs/SAFETY.md`.
+
+`PAT_TEST_MARKUP_USD = 5000` replaced with `PAT_PAYOUT_MARKUP_RATE = 1.10`. Default
+`Payout = board payout × 1.10`, rounded to 2 decimals (`parseFloat((boardPayout * 1.10).toFixed(2))`).
+Dispatcher can still edit the field freely afterward — no change to that behavior.
+
+**Edge case (as specified):** if board payout is missing/unparseable (`payoutNum` null, or
+`parseNumStr` falls back to `0`), the modal does **not** prefill 10% of nothing:
+- `payoutMissing = !(boardPayout > 0)` computed once; when true, `ext-pat-payout` starts
+  **empty** (not `"0.00"` or any other placeholder value) and `ext-pat-permile` also starts
+  empty (can't derive $/mi from a missing payout).
+- New `ext-pat-payout-warning` element (red text, directly under the Payout field): "Board
+  payout could not be read — enter payout manually". Visibility and Confirm's disabled state
+  are both driven by one new `updateConfirmEnabled()` (defined in the footer section,
+  referenced from the payout-input listener and from the async city-resolution completion
+  block) — `confirmBtn.disabled = blockingErrors.length > 0 || !originCityObj || !destCityObj
+  || !currentPayoutValid()`. Typing a valid positive number into Payout live-clears the
+  warning and re-enables Confirm (once cities are also resolved) — this is a genuinely
+  recoverable state, unlike the pre-existing TZ/loading-type `blockingErrors`, which stay
+  disabled for the life of the modal instance.
+- The Confirm-click handler's existing `if (isNaN(payoutVal) || payoutVal <= 0)` check is
+  unchanged — kept as a second, redundant safety net.
+
+**`docs/SAFETY.md` updated** — the "Network write — PAT order upsert" section previously
+described the flat `+$5000` as a deliberate safety margin ("unrealistic price that will be
+rejected or immediately visible"). That property no longer holds: a 10% markup is a plausible
+real carrier offer, not an obviously-fake one. Rewrote that bullet to say so explicitly and to
+note the dispatcher-must-click-Confirm gate is now the primary safety control for this
+feature, plus documented the new missing-payout guard.
+
+**Also this session: fixed a real doc-hygiene bug.** A `docs/STATE.md` had been created and
+maintained for the past several turns of this session under the belief that no `STATE.md`
+existed — an earlier directory search only checked `docs/*.md` and missed the real,
+git-tracked `STATE.md` at the repo root (Ukrainian, last content-updated 2026-07-07, several
+commits behind actual repo state). The duplicate `docs/STATE.md` has been deleted; its content
+was merged into the real root `STATE.md`, which is now the single current-state file, written
+in English to match every other doc in `docs/`.
+
+### 2026-07-20 — Two OTP login fixes: pending-state persistence + full feature gating
+
+**Fix 1 — pending code state lost on popup close.** Files changed: `utils/storage.js`,
+`popup/popup.js`.
+
+`pendingAuthEmail` was an in-memory-only JS variable — closing the popup after "Send code"
+but before entering the code silently reset the flow back to the email step on reopen, even
+though the code was still valid server-side (forcing an unnecessary resend). New
+`AUTH_PENDING_KEY = 'authPendingEmail'` (`utils/storage.js`, deliberately outside
+`STORAGE_KEYS` for the same reason as `SUPABASE_SESSION_KEY` — "Reset to Defaults" must not
+disrupt an in-flight login) persists `{ pendingEmail, step: 'code' }` on successful
+`signInWithOtp`. New `restorePendingOrEmailStep()` in `popup.js`: called by `restoreSession()`
+whenever there is no valid/refreshable session — resumes the code step (pre-filled email,
+status message) if a pending email is stored, otherwise falls back to the email step. Cleared
+on successful verify, "Use different email", and logout.
+
+**Fix 2 — login gating of every extension feature.** Files changed: `manifest.json`,
+`content/content.js`, `content/sidebar.js`, `content/nightMode.js`, `content/filterSimilar.js`,
+`content/filterTags.js`. New file: `utils/authGate.js`.
+
+Every feature now requires an active Supabase session — resolves BACKLOG.md's "Login gating
+of features — later". New shared module `utils/authGate.js`, added to `manifest.json`
+`content_scripts` (after `utils/storage.js`, before `utils/tabState.js`, alongside newly
+content-script-loaded `utils/supabaseConfig.js` and `vendor/supabase.min.js`):
+
+- `getAuthGate()` — cached per page load. Reads `SUPABASE_SESSION_KEY`; if the session is
+  still valid, calls `auth.setSession()`; if expired, calls `auth.refreshSession()` and
+  writes the refreshed session back to storage (**silent refresh — edge case from the
+  instructions: an expired-but-refreshable session never closes the gate or logs anyone
+  out**). Only a missing session or a genuinely failed refresh reports the gate closed.
+  Content scripts never clear a bad session themselves — that stays `popup.js`'s job
+  (`restoreSession()`), so N open tabs can't race each other into logging the dispatcher out
+  over a transient refresh hiccup.
+- `recheckAuthGate()` — bypasses the cache for a fresh check; used at toggle-time.
+
+Two checkpoints wired in:
+1. **`content/content.js`'s startup IIFE** — gate checked before `tabState.init()`,
+   `buildSidebar()`, `initManualToggle()`. Closed gate ⇒ none of those run: no sidebar, no
+   inline panel, no click listeners of ours anywhere on the page. The Amazon Relay page itself
+   is completely untouched — same as the extension being uninstalled.
+2. **`content/nightMode.js`, `content/filterSimilar.js`, `content/filterTags.js`** — each
+   self-initializes independently of `content.js` (top-level `(async function(){...})()` in
+   each file, reading its own storage key on script load), so each needed its own gate check
+   in its init IIFE, plus an `_...Authed` flag guarding its live `chrome.storage.onChanged`
+   listener (otherwise a settings change from another popup instance could still apply Night
+   Mode etc. to a logged-out tab).
+3. **`content/sidebar.js`'s `toggleRunning()`** — turning the loop **on** (not off)
+   re-checks the gate via `recheckAuthGate()`, since a tab can stay open for hours past the
+   initial page-load check. Closed gate ⇒ refuses to start, briefly changes the play/pause
+   button's `title` to a sign-in prompt (reverts after 3s), never touches Amazon's DOM.
+
+`manifest.json`: `utils/supabaseConfig.js` and `vendor/supabase.min.js` added to
+`content_scripts` (previously popup-only) so `authGate.js` can use the same, already-vetted
+`supabase-js` client/config as `popup.js` rather than hand-rolling a second REST client.
+
+`popup/popup.html`/`popup.css`/`popup.js`: new `popup-auth-gate-note` line — "Sign in with
+your email to activate Torren Relay — free." — shown above the login form whenever not
+logged in, hidden once logged in.
+
+**Known limitation (documented, not fixed here):** no live cross-context reactivation —
+logging in/out via the popup does not retroactively affect an already-loaded Relay tab; a
+reload is required. See BACKLOG.md.
+
+**Not live-tested end-to-end** (no browser available in this session): the refresh-on-expiry
+path, the gate blocking an actual logged-out page load, and the pending-state popup
+reopen — all implemented per the design above and syntax-checked, but not manually driven
+through a loaded-unpacked Chrome session. See docs/TEST_CASES.md TC-AUTH-1/2/3.
+
+### 2026-07-20 — Stop tracking real Supabase credentials in git
+
+Files changed: `.gitignore`. New file: `utils/supabaseConfig.example.js`.
+
+`utils/supabaseConfig.js` (holds the real `SUPABASE_URL`/`SUPABASE_ANON_KEY`) added to
+`.gitignore` — it was still untracked/uncommitted, so this is a pre-emptive guard, not a
+history rewrite. `utils/supabaseConfig.example.js` committed instead, with placeholder
+values (`YOUR_PROJECT_REF`, `YOUR_ANON_OR_PUBLISHABLE_KEY`), so a fresh checkout has a
+documented file to copy from. No behavior change — `popup.html` still loads
+`utils/supabaseConfig.js` (not the `.example.js`), so login keeps working locally as long as
+that file exists on disk.
+
+### 2026-07-17 — Supabase login wired live + rebrand to "Torren Relay"
+
+Files changed: `manifest.json`, `popup/popup.html`, `popup/popup.js`. New file: `utils/supabaseConfig.js`.
+
+**Login wired live:** `utils/supabaseConfig.js` created with the real project's `SUPABASE_URL` / `SUPABASE_ANON_KEY` (publishable key — safe to ship; RLS is the actual access boundary), provided by the PM. This was the only missing piece from the login feature added earlier today (see the "Popup login via Supabase email OTP" entry below) — `supabaseClient` now initializes and the three-step OTP flow is functional. Verified reachable without sending any email: `GET /auth/v1/settings` on the project returned HTTP 200 with `email: true`, `mailer_autoconfirm: false` (confirmation emails are real, not auto-confirmed — matches the OTP flow as designed). `vendor/supabase.min.js` (v2.110.7 UMD, vendored the same session the feature was built) was already in place and re-verified unchanged.
+
+**Rebrand (partial, scoped):** extension name changed from "Amazon Relay Helper" to "Torren Relay" in `manifest.json` (`name`, `action.default_title`) and in the popup (`<title>`, `.popup-title`). `description` in `manifest.json` intentionally left as-is — full copy rewrite comes before Web Store submission. **Not changed:** `utils/constants.js`'s `EXT_NAME` constant (still "Amazon Relay Helper"), which feeds the on-page sidebar title (`content/sidebar.js` → `ext-sidebar-title`) — out of the requested scope, so the in-page sidebar still shows the old name for now. Flagging this seam since it's a visible inconsistency between the popup and the injected page UI until `EXT_NAME` is included in a later rebrand pass.
+
+### 2026-07-17 — FEATURE: Popup login via Supabase email OTP
+
+Files changed: `manifest.json`, `popup/popup.html`, `popup/popup.css`, `popup/popup.js`, `utils/storage.js`. New file: `vendor/supabase.min.js` (vendored `@supabase/supabase-js` v2.110.7 UMD build, pinned from jsdelivr's mirror of the npm package on 2026-07-17 — MV3 forbids remote-hosted scripts, so it is bundled rather than CDN-loaded).
+
+New "Account" section at the top of the popup, above "Display & Alerts": three-step flow, all elements `data-testid`'d —
+1. **`popup-auth-step-email`** — email input (`popup-auth-email`) + "Send code" (`popup-auth-send-code`) → `supabase.auth.signInWithOtp({ email })`.
+2. **`popup-auth-step-code`** — 6-digit code input (`popup-auth-code`) + "Verify" (`popup-auth-verify`) → `supabase.auth.verifyOtp({ email, token, type: 'email' })`, plus "Resend code" (`popup-auth-resend`) and "Use different email" (`popup-auth-change-email`).
+3. **`popup-auth-step-loggedin`** — email display (`popup-auth-email-display`) + "Log out" (`popup-auth-logout`) → `supabase.auth.signOut()`.
+
+Status/error line: `popup-auth-status` (all text via `textContent`, never `innerHTML`).
+
+**Session persistence:** on successful verify, the full Supabase session object is written to `chrome.storage.local` under `SUPABASE_SESSION_KEY = 'supabaseSession'` (`utils/storage.js`). This key is deliberately **not** added to `STORAGE_KEYS` — "Reset to Defaults" clears `Object.values(STORAGE_KEYS)` and must not log the dispatcher out as a side effect of resetting preferences.
+
+**Restore on popup open (`restoreSession()`):** reads the stored session; if `expires_at` is more than 30s out, calls `auth.setSession()` to rehydrate the client and shows the logged-in state; if expired (or inside the 30s buffer), calls `auth.refreshSession({ refresh_token })`, persists the refreshed session, and shows logged-in. Any failure (invalid/expired refresh token, network error) clears the stored session and falls back to the email step.
+
+**Client config:** `supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false })` in `popup.js`. `persistSession`/`autoRefreshToken` are off because we manage `chrome.storage.local` persistence and refresh manually (instructions 3–4) rather than relying on supabase-js's own `localStorage`-based session store, which wouldn't survive across popup instances predictably.
+
+**`SUPABASE_URL` / `SUPABASE_ANON_KEY`:** read from `utils/supabaseConfig.js`, loaded via `<script>` tag in `popup.html` between `vendor/supabase.min.js` and `popup.js`. **That file does not exist yet** — per explicit instruction, no placeholder credentials were invented or committed. Until it's created with real values, `supabaseClient` stays `null` and every auth action shows "Login not configured." — no other extension feature is affected. `manifest.json` `host_permissions` gained `https://*.supabase.co/*` (standard Supabase-hosted project domain — flag if the project uses a custom domain).
+
+**Gating:** none. Per instruction, login only collects the user list for now — every existing feature (detection loop, PAT Helper, Fast Book, etc.) works identically regardless of login state. See BACKLOG.md "Login gating of features — later".
+
+### 2026-07-17 — FEATURE: Multi-domain support (all Amazon Relay regional domains)
+
+Files changed: `manifest.json`.
+
+`host_permissions` and `content_scripts.matches` expanded from `https://relay.amazon.com/*` only to the full set of Amazon Relay regional domains: `relay.amazon.ca`, `relay.amazon.co.jp`, `relay.amazon.co.uk`, `relay.amazon.com`, `relay.amazon.cz`, `relay.amazon.de`, `relay.amazon.es`, `relay.amazon.fr`, `relay.amazon.it`, `relay.amazon.in`, `relay.amazon.pl`.
+
+Codebase audit for hardcoded `relay.amazon.com` strings outside `manifest.json`: none found. `content/patApi.js` (`PAT_UPSERT_PATH`, `CITY_SEARCH_BASE`) already uses relative paths passed to `fetch()`, so requests resolve against whatever regional domain the content script is running on — no code change needed there. Remaining hits were docs/test files and a README example URL (informational only, not touched).
+
+Deferred: non-US domains may return city/state data in different formats (locale-aware city normalization, address formats, currency). No behavior change made here — will be evaluated per-case once we have real captured data from a non-`.com` domain.
+
+### 2026-07-15 — FIX: Night Mode — shift dark ramp from near-black to navy-slate
+
+Files changed: `utils/designTokens.js`, `popup/popup.css`, `content/nightMode.js`.
+
+Retuned the entire dark-mode elevation ramp from a near-black neutral scale to a lighter dark-navy/slate scale, per explicit target values, across both color systems that make up Night Mode:
+
+**`utils/designTokens.js`** (feeds our own injected UI — inline panel, action bar, PAT modal, sidebar — via `--ext-*` CSS custom properties, `html.ext-night` block only):
+- `--ext-bar-bg` / `--ext-n100` (level 1): `#1c1f24`/`#23272d` → `#223140`.
+- `--ext-surface` (level 2 — panel/input/button surface): `#23272d` → `#2b3d4f`.
+- `--ext-n200` (border/hover token): `#2c313a` → `#3e5468`.
+- `--ext-n300`/`--ext-n400`: `#3a4250`/`#586070` → `#4a6278`/`#5b7690` (kept monotonic progression).
+- `--ext-n500` (secondary text): `#7a8c9c` → `#9fb3c8`.
+- `--ext-n700`: `#b0bcca` → `#c3d2df`.
+- `--ext-n900` (primary text): `#e5edf5` → `#e8eef4`.
+- `--ext-accent-bg` lightened `#172236` → `#1f3350` to stay visibly distinct from the new (lighter) base. `--ext-accent`/`--ext-accent-hover`/`--ext-accent-text` left unchanged, per "keep accent similar to current."
+
+**`popup/popup.css`**: same `html.ext-night` values applied, since this file is a documented duplicate of `designTokens.js`'s token block (popup is a separate document and can't read the content-script-injected `<style>`).
+
+**`content/nightMode.js`** (separate hardcoded hex ramp used to override Amazon's own page DOM — cards, filter bar, inputs, chips, buttons — does not read the CSS custom properties above):
+- `DK_BASE` (level 0 / page bg): `#16181c` → `#1a2634`.
+- `DK_RAISED` (level 1): `#1e2126` → `#223140`.
+- `DK_OVERLAY` (level 2): `#262a31` → `#2b3d4f`.
+- `DK_HIGH`: `#2e333b` → `#34495c`.
+- `DK_BORDER`/`DK_BORDER_STRONG`: switched from translucent white overlays (`rgba(255,255,255,.09/.14)`) to solid navy-slate hex (`#3e5468`/`#4a6278`) matching the explicit border target.
+- `DK_TEXT`/`DK_MUTED`/`DK_FAINT`: `#e8eaed`/`#a8b0b9`/`#6b7480` → `#e8eef4`/`#9fb3c8`/`#7488a0`.
+- `DK_ACCENT_BG`: `#172236` → `#1f3350` (kept in sync with `designTokens.js`).
+- New `DK_CHIP_BG` (`#2e4257`) / `DK_CHIP_BORDER` (`#4f6f88`) tokens: filter chips/pills now get a distinct fill + lighter border + `DK_ACCENT_TEXT` (light blue) label, instead of reusing the plain level-2 input/button styling, so they read as chips.
+
+Load card selectors (`.load-card`, `.wo-card-header`, `.load-card__selected`) were not touched directly — they continue to inherit `DK_RAISED`/`DK_BORDER_STRONG` from the ramp, so they lighten along with everything else without any layout change.
+
+---
+
+### 2026-07-15 — FIX: Night Mode — elevation contrast outside load cards
+
+Files changed: `content/nightMode.js`.
+
+Fixed a flat/boundary-less look in dark mode: everything except load cards (filter bar, left sidebar blocks, inputs, dropdowns, filter chips, buttons) had no explicit background rule and fell through to the universal "transparent" reset, rendering near-black against the page background. Load card styling is unchanged.
+
+- Added a level-1 (`DK_RAISED`) surface rule for the filter/search panel and sidebar blocks (`[role="search"]`, `[role="complementary"]`, `aside`, `[class*="filter" i]`, `[class*="search-panel" i]`) — Amazon uses hashed classes here so there's no stable selector to target directly; matches the existing role/class-substring pattern already used for header/nav/utility-bar.
+- Promoted inputs, selects, dropdown/field wrappers, filter chips/pills, and generic buttons from level 1 (`DK_RAISED`) to level 2 (`DK_OVERLAY`) so they read as distinct controls sitting on top of the level-1 panel, instead of blending into it.
+- Added a border to the dropdown/field wrapper and chip/pill rules, which previously had none.
+- Consolidated all touched borders onto the single `DK_BORDER` token (was a mix of `DK_BORDER` and `DK_BORDER_STRONG`) for a consistent subtle-gray boundary instead of invisible/none.
+- No new tokens introduced — reused the existing `DK_BASE`/`DK_RAISED`/`DK_OVERLAY`/`DK_BORDER` elevation ramp already defined in `nightMode.js`.
+
+---
+
+### 2026-07-14 — FEATURE: Fast Book
+
+Files changed: `utils/constants.js`, `utils/storage.js`, `popup/popup.html`, `popup/popup.js`, `content/inlinePanel.js`.
+
+Adds a 1-click "Fast Book" feature: a toggle in the popup enables a "Fast Book" button injected into every expanded load card's action bar. Clicking it executes Amazon's two-step booking sequence (Book → Confirm) programmatically, triggered only by dispatcher's explicit interaction.
+
+**`utils/constants.js`:**
+- `FORBIDDEN_SELECTORS` cleared (matches `docs/SAFETY.md` — the list is now intentionally empty).
+- `ALLOWED_CLICK_INTENTS.FAST_BOOK` added for the two booking DOM clicks.
+
+**`utils/storage.js`:**
+- `STORAGE_KEYS.FAST_BOOK_ENABLED = 'fastBookEnabled'` added.
+
+**`popup/popup.html`:**
+- New "Booking" section added (between Load Board Filters and footer divider) with a Fast Book toggle (`id="popup-fast-book"`, `data-testid="popup-fast-book"`).
+
+**`popup/popup.js`:**
+- `KEY_FAST_BOOK_ENABLED` key constant added.
+- Wired in all 4 places: initial load, change handler, Reset, and `chrome.storage.onChanged` live-sync.
+
+**`content/inlinePanel.js`:**
+- `_fastBookStorageListener` module-level variable tracks the storage change listener for cleanup.
+- CSS added for `.ext-action-btn--fastbook` (amber border+text, disabled state).
+- `executeFastBook(sheetLoadId, fastBookBtn)`: two-step booking sequence. Step 1 queries `#selected-work-sheet` for `#rlb-book-btn` (text fallback: button with `textContent === "Book"`), calls `isForbiddenElement()`, clicks. Step 2 polls up to 5s for `#rlb-book-trip-confirm-booking-btn` (text fallback: "Book"/"Confirm"/"Confirm booking" in a new button not equal to step 1), calls `isForbiddenElement()`, clicks. Button shows "Booking…" → "Booked!" on success, restores on error/timeout.
+- `buildActionBar()`: Fast Book button appended last, `display:none` initially.
+- `showInlinePanel()`: reads `fastBookEnabled` from storage to set initial button visibility; wires click handler; adds `chrome.storage.onChanged` listener for live popup-toggle sync. Previous listener is removed before re-attaching.
+- `removeInlinePanel()`: removes `_fastBookStorageListener` and clears it.
+
+**Safety:** `isForbiddenElement()` is called before each `.click()` per SAFETY.md. No auto-trigger path exists — booking only fires from dispatcher's explicit Fast Book button click. (Click 4 in SAFETY.md.)
+
+---
+
 ### 2026-07-14 — FEATURE: ext-action-post — enable 40' Container and 26' Truck
 
 Files changed: `content/patApi.js`, `content/patModal.js`.

@@ -177,13 +177,80 @@ tabState.subscribe('running', function (val) {
   }
 });
 
-// Async init: await tabState.init() so sidebar reads correct seeded values synchronously.
-(async function () {
-  await tabState.init();
+// --- Login gating: activate/deactivate without a page reload ---
+// TASK 1 (2026-07-20): previously the gate was only checked once at content-script
+// startup — logging in/out via the popup while a Relay tab was already open had no effect
+// on it until the tab was reloaded. Now utils/authGate.js's onAuthGateChange() fires
+// live whenever chrome.storage.local's SUPABASE_SESSION_KEY transitions active↔inactive
+// (popup.js writes it on verify/logout), so these two functions run immediately, no
+// reload required in either direction.
 
+var _extActivated = false; // idempotency guard — both functions are safe to call repeatedly
+
+async function activateExtensionUI() {
+  if (_extActivated) return;
+  _extActivated = true;
+  logger.log('content', 'activateExtensionUI called');
+
+  await tabState.init();
   buildSidebar();
   initManualToggle();
 
-  logger.log('content', 'page load — waiting for manual Start');
-  // tabState.running defaults to false — no action needed
+  logger.log('content', 'extension UI activated — waiting for manual Start');
+}
+
+// Stops the loop, removes every DOM node/timer/listener the extension owns, and reverts
+// the page to the same state as if the extension had never activated on this load —
+// mirrors the "never activates when logged out" guarantee from content-script startup.
+function deactivateExtensionUI() {
+  if (!_extActivated) return;
+  _extActivated = false;
+  logger.log('content', 'deactivateExtensionUI called');
+
+  // Stops via the tabState 'running' subscriber above (stopLoadObserver + stopOrchestrator)
+  // and — while the sidebar still exists — updates its play/pause visual one last time.
+  tabState.set('running', false);
+
+  removeInlinePanel();
+  clearHighlights();
+  clearSurgeHighlights();
+
+  var sidebarEl = document.getElementById('ext-sidebar');
+  if (sidebarEl) {
+    // Release the sidebar's tabState subscription + its independent memory-poll timer
+    // (both stored on the element by buildSidebar()) so a later reactivation's fresh
+    // buildSidebar() call doesn't leak a second copy of either alongside this one.
+    if (sidebarEl._runningSubscriber) tabState.unsubscribe('running', sidebarEl._runningSubscriber);
+    if (sidebarEl._memoryPollInterval) clearInterval(sidebarEl._memoryPollInterval);
+    sidebarEl.remove();
+  }
+
+  logger.log('content', 'extension UI deactivated — page reverted to untouched state');
+}
+
+if (typeof onAuthGateChange === 'function') {
+  onAuthGateChange(function (gate) {
+    if (gate.active) {
+      activateExtensionUI().catch(function (e) {
+        logger.error('content', 'activateExtensionUI (live gate change) failed', { error: e });
+      });
+    } else {
+      deactivateExtensionUI();
+    }
+  });
+}
+
+// Async init: gated on an active Supabase session (utils/authGate.js) at content-script
+// startup. If the dispatcher isn't logged in, none of our UI is built at all, and the
+// Amazon Relay page is left completely untouched — same as the extension being
+// uninstalled. Live login/logout after this point is handled by the onAuthGateChange
+// listener above, not this IIFE (which only ever runs once, at page load).
+(async function () {
+  var gate = await getAuthGate();
+  if (!gate.active) {
+    logger.log('content', 'auth gate closed — extension inactive on this page load', {});
+    return;
+  }
+  logger.log('content', 'auth gate open', { email: gate.email });
+  await activateExtensionUI();
 })();

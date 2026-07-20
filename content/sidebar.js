@@ -238,8 +238,24 @@ function buildSidebar() {
 
   // User intent — writes tabState (single source of truth for this tab).
   // The 'running' subscriber fires reflectRunning synchronously; no direct call needed.
-  function toggleRunning() {
+  // Starting (not stopping) re-checks the auth gate first — this sidebar only exists
+  // because the gate was open at page load, but a tab can sit open for hours, long
+  // enough for the session to need a refresh (or to have gone bad) since then. A
+  // failed refresh here silently refuses to start; it never logs the dispatcher out
+  // or touches Amazon's page. See utils/authGate.js.
+  async function toggleRunning() {
     var nowRunning = !tabState.get('running');
+    if (nowRunning) {
+      var gate = await recheckAuthGate();
+      if (!gate.active) {
+        logger.warn('sidebar', 'toggleRunning: blocked — no active session');
+        playpause.setAttribute('title', 'Sign in via the popup to activate Torren Relay — free.');
+        setTimeout(function () {
+          reflectRunning(tabState.get('running'));
+        }, 3000);
+        return;
+      }
+    }
     tabState.set('running', nowRunning);
     logger.log('sidebar', 'playpause toggled', { running: nowRunning });
   }
@@ -313,14 +329,24 @@ function buildSidebar() {
 
   reflectRunning(tabState.get('running'));
 
-  // Subscribe: orchestrator auto-stop flips the pill without a storage round-trip
-  tabState.subscribe('running', function (val) {
+  // Subscribe: orchestrator auto-stop flips the pill without a storage round-trip.
+  // Named (not anonymous) and stashed on the container so content.js's
+  // deactivateExtensionUI() can tabState.unsubscribe() it before removing the sidebar —
+  // otherwise a later login's fresh buildSidebar() call would add a second permanent
+  // subscriber referencing this (by-then detached) container, leaking one more on every
+  // login/logout cycle.
+  function handleRunningSync(val) {
     reflectRunning(val);
     logger.log('sidebar', 'running synced from tabState', { running: val });
-  });
+  }
+  tabState.subscribe('running', handleRunningSync);
+  container._runningSubscriber = handleRunningSync;
 
   updateMemoryIndicator();
-  setInterval(updateMemoryIndicator, MEMORY_POLL_MS); // independent of running state
+  // Independent of running state — also stashed on the container so it can be cleared on
+  // deactivation (see comment above); otherwise it would keep polling forever, invisibly,
+  // once removed from the DOM, and a reactivation would start a second one alongside it.
+  container._memoryPollInterval = setInterval(updateMemoryIndicator, MEMORY_POLL_MS);
 
   // --- Event listeners ---
   // CLAUDE.md rule 2: addEventListener only, never inline handlers

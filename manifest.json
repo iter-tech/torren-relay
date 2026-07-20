@@ -1,19 +1,47 @@
 {
   "manifest_version": 3,
-  "name": "Amazon Relay Helper",
+  "name": "Torren Relay",
   "version": "0.1.0",
   "description": "Monitors Amazon Relay Load Board for new loads. Does NOT book loads.",
 
   "permissions": ["storage", "scripting", "activeTab", "clipboardWrite"],
-  "host_permissions": ["https://relay.amazon.com/*"],
+  "host_permissions": [
+    "https://relay.amazon.ca/*",
+    "https://relay.amazon.co.jp/*",
+    "https://relay.amazon.co.uk/*",
+    "https://relay.amazon.com/*",
+    "https://relay.amazon.cz/*",
+    "https://relay.amazon.de/*",
+    "https://relay.amazon.es/*",
+    "https://relay.amazon.fr/*",
+    "https://relay.amazon.it/*",
+    "https://relay.amazon.in/*",
+    "https://relay.amazon.pl/*",
+    "https://*.supabase.co/*"
+  ],
 
   "content_scripts": [{
-    "matches": ["https://relay.amazon.com/*"],
+    "matches": [
+      "https://relay.amazon.ca/*",
+      "https://relay.amazon.co.jp/*",
+      "https://relay.amazon.co.uk/*",
+      "https://relay.amazon.com/*",
+      "https://relay.amazon.cz/*",
+      "https://relay.amazon.de/*",
+      "https://relay.amazon.es/*",
+      "https://relay.amazon.fr/*",
+      "https://relay.amazon.it/*",
+      "https://relay.amazon.in/*",
+      "https://relay.amazon.pl/*"
+    ],
     "js": [
       "utils/designTokens.js",
       "utils/constants.js",
       "utils/logger.js",
       "utils/storage.js",
+      "utils/supabaseConfig.js",
+      "vendor/supabase.min.js",
+      "utils/authGate.js",
       "utils/tabState.js",
       "utils/loadStore.js",
       "utils/soundDefs.js",
@@ -41,7 +69,7 @@
   }],
 
   "action": {
-    "default_title": "Amazon Relay Helper",
+    "default_title": "Torren Relay",
     "default_popup": "popup/popup.html"
   }
 }

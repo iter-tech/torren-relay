@@ -9,9 +9,10 @@
 
 var PAT_MODAL_ID = 'ext-pat-modal-overlay';
 
-// PAYOUT TEST MARKUP — silent. Default offer = board payout + $5000.
-// The $5000 margin ensures unrealistic pricing during testing (not exposed in the UI).
-var PAT_TEST_MARKUP_USD = 5000;
+// Default Payout markup: board payout × 1.10 (10%), rounded to 2 decimals. Dispatcher can
+// edit the Payout field freely afterward. See PAYOUT_MARKUP_RATE usage below for the
+// unparseable/missing-payout edge case — no silent fallback value is ever prefilled.
+var PAT_PAYOUT_MARKUP_RATE = 1.10;
 
 var LOADING_TYPE_DISPLAY = { 'Drop': 'Drop', 'Live': 'Live', 'Live/Drop': 'Drop & Live' };
 
@@ -83,6 +84,7 @@ function injectPatModalStyle() {
     '#ext-pat-modal .pat-num-field{display:flex;flex-direction:column;gap:3px;}' +
     '#ext-pat-modal .pat-num-label{font-size:10px;font-weight:600;color:var(--ext-n500);text-transform:uppercase;letter-spacing:.04em;}' +
     '#ext-pat-modal .pat-static-val{font-size:13px;font-weight:600;color:var(--ext-n900);padding:5px 0;}' +
+    '#ext-pat-modal .pat-payout-warning{font-size:10px;line-height:1.3;color:#c0392b;}' +
     '#ext-pat-modal input[type=number],' +
     '#ext-pat-modal select{' +
       'width:100%;border:1px solid var(--ext-n300);border-radius:var(--ext-radius-sm);' +
@@ -448,12 +450,23 @@ async function openPostModal(loadId) {
       loadId: loadId, payout: loadUnit.payout, resolvedTo: boardPayout,
     });
   }
-  var initPayout  = parseFloat((boardPayout + PAT_TEST_MARKUP_USD).toFixed(2));
+
+  // EDGE CASE: board payout missing/unparseable (parseNumStr falls back to 0 rather than
+  // null, so 0 means "unparseable" here too) — do NOT prefill 10% of nothing. Leave Payout
+  // empty; a visible warning + Confirm-disable are wired in below (payoutWarningEl /
+  // updateConfirmEnabled), cleared only once the dispatcher enters a valid amount manually.
+  var payoutMissing = !(boardPayout > 0);
+  if (payoutMissing) {
+    logger.warn('patModal', 'openPostModal: board payout missing/unparseable — Payout left empty', {
+      loadId: loadId, payout: loadUnit.payout, payoutNum: loadUnit.payoutNum,
+    });
+  }
+  var initPayout = payoutMissing ? null : parseFloat((boardPayout * PAT_PAYOUT_MARKUP_RATE).toFixed(2));
 
   var distMiles = parseNumStr(loadUnit.distance);
   var minMiles  = Math.max(0, Math.round(distMiles) - 25);
   var maxMiles  = Math.round(distMiles) + 25;
-  var initPermile = distMiles > 0 ? (initPayout / distMiles).toFixed(2) : '0.00';
+  var initPermile = (!payoutMissing && distMiles > 0) ? (initPayout / distMiles).toFixed(2) : '';
 
   var stopsCountStr = (detail.header && detail.header.stopsCount) || '';
   var stopCount     = parseInt(stopsCountStr, 10) || 0;
@@ -660,7 +673,25 @@ async function openPostModal(loadId) {
   payoutInput.setAttribute('data-testid', 'ext-pat-payout');
   payoutInput.setAttribute('min', '0');
   payoutInput.setAttribute('step', '1');
-  payoutInput.value = initPayout.toFixed(2);
+  payoutInput.value = payoutMissing ? '' : initPayout.toFixed(2);
+
+  // Visible warning for the missing/unparseable-board-payout edge case. Shown/hidden and
+  // wired into Confirm's enabled state by updateConfirmEnabled() (defined near the footer,
+  // below) rather than statically here — it must re-hide live once the dispatcher types a
+  // valid amount, not just at render time.
+  var payoutWarningEl = document.createElement('div');
+  payoutWarningEl.setAttribute('data-testid', 'ext-pat-payout-warning');
+  payoutWarningEl.className = 'pat-payout-warning';
+  payoutWarningEl.textContent = 'Board payout could not be read — enter payout manually';
+
+  var payoutField = document.createElement('div');
+  payoutField.className = 'pat-num-field';
+  var payoutLabel = document.createElement('div');
+  payoutLabel.className = 'pat-num-label';
+  payoutLabel.textContent = 'Payout ($)';
+  payoutField.appendChild(payoutLabel);
+  payoutField.appendChild(payoutInput);
+  payoutField.appendChild(payoutWarningEl);
 
   var stemSel = makeSelect('ext-pat-stem',
     [[5,'5 min'],[15,'15 min'],[30,'30 min'],[45,'45 min'],
@@ -668,7 +699,7 @@ async function openPostModal(loadId) {
      [210,'3.5 h'],[240,'4 h'],[480,'8 h'],[720,'12 h'],[1440,'24 h']], 30);
 
   numsB.appendChild(numField('$/mi', permileInput));
-  numsB.appendChild(numField('Payout ($)', payoutInput));
+  numsB.appendChild(payoutField);
   numsB.appendChild(numField('Stem Time', stemSel));
 
   // Per-mile ↔ payout linkage (board distance, not min/max miles)
@@ -678,9 +709,11 @@ async function openPostModal(loadId) {
     if (!isNaN(pm)) payoutInput.value = (pm * distMiles).toFixed(2);
   });
   payoutInput.addEventListener('input', function () {
-    if (distMiles <= 0) return;
-    var po = parseFloat(payoutInput.value);
-    if (!isNaN(po)) permileInput.value = (po / distMiles).toFixed(2);
+    if (distMiles > 0) {
+      var po = parseFloat(payoutInput.value);
+      if (!isNaN(po)) permileInput.value = (po / distMiles).toFixed(2);
+    }
+    updateConfirmEnabled();
   });
 
   // --- Exclude Swing Door checkbox ---
@@ -735,7 +768,20 @@ async function openPostModal(loadId) {
   confirmBtn.setAttribute('data-testid', 'ext-pat-confirm');
   confirmBtn.className = 'pat-btn pat-btn-confirm';
   confirmBtn.textContent = 'Confirm';
-  confirmBtn.disabled = true; // enabled after city resolution
+  confirmBtn.disabled = true; // enabled after city resolution + a valid payout
+
+  // Single source of truth for the missing-payout edge case: re-run on every payoutInput
+  // 'input' event and after city resolution finishes. blockingErrors (TZ / loading type)
+  // are permanent for this modal instance — nothing here can clear those.
+  function currentPayoutValid() {
+    var v = parseFloat(payoutInput.value);
+    return !isNaN(v) && v > 0;
+  }
+  function updateConfirmEnabled() {
+    var payoutOk = currentPayoutValid();
+    payoutWarningEl.hidden = payoutOk;
+    confirmBtn.disabled = blockingErrors.length > 0 || !originCityObj || !destCityObj || !payoutOk;
+  }
 
   footer.appendChild(statusEl);
   footer.appendChild(cancelBtn);
@@ -746,6 +792,7 @@ async function openPostModal(loadId) {
     setStatus(blockingErrors.join(' | '), 'err');
     // confirmBtn stays disabled
   }
+  updateConfirmEnabled(); // sets initial payout-warning visibility; confirmBtn stays disabled either way (cities unresolved)
 
   // Assemble and inject modal
   modal.appendChild(header);
@@ -837,11 +884,10 @@ async function openPostModal(loadId) {
 
     if (cityErrors.length > 0 || blockingErrors.length > 0) {
       setStatus((blockingErrors.concat(cityErrors)).join(' | '), 'err');
-      // confirmBtn stays disabled
     } else {
       statusEl.textContent = '';
-      confirmBtn.disabled  = false;
     }
+    updateConfirmEnabled(); // still gated on a valid payout even once cities resolve cleanly
   } catch (e) {
     logger.error('patModal', 'city resolution failed', { error: e });
     if (overlay.isConnected) setStatus('City resolution error — check logger output', 'err');

@@ -86,17 +86,51 @@ function applyHideSimilar(on) {
   if (on) enableHideSimilar(); else disableHideSimilar();
 }
 
+// See utils/authGate.js — features require an active session. Guards the live
+// onChanged listener below too, not just the startup apply. Set by
+// activate/deactivateFilterSimilar (idempotent), called both at startup and on live
+// login/logout (onAuthGateChange, TASK 1 2026-07-20).
+var _hideSimilarAuthed = false;
+
+function activateFilterSimilar() {
+  if (_hideSimilarAuthed) return;
+  _hideSimilarAuthed = true;
+  storage.get(STORAGE_KEYS.HIDE_SIMILAR, false).then(function (on) {
+    applyHideSimilar(on === true);
+  }).catch(function (e) {
+    logger.warn('filterSimilar', 'activateFilterSimilar failed', { error: e });
+  });
+}
+
+// Reverts to fully untouched — disables the feature AND removes the injected <style>
+// tag entirely, not just the html class.
+function deactivateFilterSimilar() {
+  if (!_hideSimilarAuthed) return;
+  _hideSimilarAuthed = false;
+  applyHideSimilar(false);
+  var style = document.getElementById(SIMILAR_STYLE_ID);
+  if (style) style.remove();
+  logger.log('filterSimilar', 'deactivated — session ended, reverted to untouched page');
+}
+
 (async function initHideSimilar() {
   try {
-    var on = await storage.get(STORAGE_KEYS.HIDE_SIMILAR, false);
-    applyHideSimilar(on === true);
+    var gate = await getAuthGate();
+    if (gate.active) activateFilterSimilar();
   } catch (e) {
     logger.warn('filterSimilar', 'init failed', { error: e });
   }
 })();
 
+if (typeof onAuthGateChange === 'function') {
+  onAuthGateChange(function (gate) {
+    if (gate.active) activateFilterSimilar(); else deactivateFilterSimilar();
+  });
+}
+
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== 'local') return;
+  if (!_hideSimilarAuthed) return;
   if (!changes[STORAGE_KEYS.HIDE_SIMILAR]) return;
   applyHideSimilar(changes[STORAGE_KEYS.HIDE_SIMILAR].newValue === true);
 });

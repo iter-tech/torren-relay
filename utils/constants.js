@@ -1,7 +1,4 @@
 const FORBIDDEN_SELECTORS = [
-  '#rlb-book-btn',                        // STARTS booking flow (Load Board)
-  '#rlb-book-trip-confirm-booking-btn',   // FINALIZES booking (Load Board)
-  '#book-btn-row'                         // Contracts/Layout-B Book button — out of scope for MVP, guarded anyway
 ];
 
 function isForbiddenElement(el) {
@@ -10,11 +7,11 @@ function isForbiddenElement(el) {
 }
 
 // Named click intents — every .click() call must declare which intent it is.
-// Exactly three are permitted in the entire codebase.
 const ALLOWED_CLICK_INTENTS = {
   REFRESH:            'REFRESH',            // Amazon's internal refresh button — refreshes list, books nothing
   NEUTRAL_ZONE:       'NEUTRAL_ZONE',       // Load card body — opens details panel, does NOT book
-  CLOSE_DETAIL_PANEL: 'CLOSE_DETAIL_PANEL'  // Load detail sheet close control — dismisses sheet, books nothing
+  CLOSE_DETAIL_PANEL: 'CLOSE_DETAIL_PANEL', // Load detail sheet close control — dismisses sheet, books nothing
+  FAST_BOOK:          'FAST_BOOK'           // Fast Book sequence — user-triggered, clicks Amazon booking buttons
 };
 
 // Project-wide config

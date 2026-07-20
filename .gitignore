@@ -1,3 +1,6 @@
 node_modules/
 .DS_Store
 *.log
+
+# Real Supabase project credentials — never commit. See utils/supabaseConfig.example.js.
+utils/supabaseConfig.js

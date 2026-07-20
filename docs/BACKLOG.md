@@ -156,6 +156,57 @@ Three icon-only buttons at the bottom of the expanded inline panel. Bar and all 
 
 ---
 
+## Popup login (Supabase email OTP) ✅ DONE, live (2026-07-17)
+
+Three-step email-OTP login in the popup's new "Account" section. See CHANGELOG.md and
+UI_ELEMENTS.md 2026-07-17 for full detail. `vendor/supabase.min.js` vendored;
+`utils/supabaseConfig.js` holds real project credentials (gitignored — see
+`utils/supabaseConfig.example.js` for the template new setups should copy from). Still not
+manually smoke-tested in a loaded-unpacked Chrome session — see STATE.md "Що далі".
+
+### Login gating of features ✅ DONE (2026-07-20)
+Every feature now requires an active Supabase session — hard block, not a soft warning. See
+CHANGELOG.md and UI_ELEMENTS.md 2026-07-20 ("Content-script login gating") for full detail.
+`utils/authGate.js` is the shared gate; checked at content-script startup and again when the
+sidebar's play/pause is turned on. Logged out ⇒ zero extension DOM on the Relay page.
+
+### Live cross-context reactivation on login/logout (PLANNED)
+Logging in or out via the popup does not retroactively activate/deactivate an already-loaded
+Relay tab — the gate is only evaluated at content-script startup and at toggle-time, so a
+tab reload is currently required to pick up a login/logout that happened after the page
+loaded. Would need the content script to listen for `SUPABASE_SESSION_KEY` changes via
+`chrome.storage.onChanged` and either retroactively call `buildSidebar()`/`initManualToggle()`
+(login) or tear the sidebar down and stop the loop (logout) — not implemented, deferred until
+there's a concrete reason a reload isn't acceptable.
+
+---
+
+## Rebrand to "Torren Relay" — finish EXT_NAME (PLANNED)
+
+2026-07-17's rebrand only covered `manifest.json` (`name`, `default_title`) and the popup
+header (`<title>`, `.popup-title`) — explicitly scoped that way by the PM. Still outstanding:
+
+- `utils/constants.js`'s `EXT_NAME` constant is still `'Amazon Relay Helper'`. It feeds
+  `content/sidebar.js`'s `ext-sidebar-title` (the floating bar injected on the Relay page
+  itself), so the on-page sidebar still shows the old name — a visible mismatch against the
+  popup, which now says "Torren Relay".
+- `manifest.json`'s `description` was also explicitly left as-is, pending a full copy rewrite
+  before Web Store submission.
+
+Update `EXT_NAME` (and anywhere else it's read) once the PM confirms the sidebar should move
+too — likely bundled with the pre-submission copy rewrite rather than done piecemeal.
+
+---
+
+## Multi-domain support ✅ DONE (2026-07-17)
+
+`manifest.json` `host_permissions`/`content_scripts.matches` expanded from `relay.amazon.com` only to all 11 Amazon Relay regional domains (ca, co.jp, co.uk, com, cz, de, es, fr, it, in, pl). Codebase audit found no hardcoded `relay.amazon.com` strings outside manifest.json; `content/patApi.js` already uses relative fetch paths. See CHANGELOG.md 2026-07-17.
+
+### Non-US locale handling (PLANNED, blocked)
+Non-US locale handling (city/address formats, API response differences) — blocked until real captured data from a non-.com domain.
+
+---
+
 ## Future manifest additions (DO NOT add until the feature lands)
 
 | Permission | Feature |

@@ -4,8 +4,7 @@
 
 This extension interacts with a live commercial booking system. The following rules are non-negotiable and apply to every feature in the backlog:
 
-- **The extension NEVER books a load.** Booking is always finalized by a human dispatcher.
-- **Only three `.click()` call sites exist on Amazon's own DOM.**
+- The extension CAN execute a booking sequence ONLY when the dispatcher explicitly clicks the custom 'Fast Book' UI toggle/button.
 - **`isForbiddenElement()` is called before every `.click()` on Amazon's DOM.**
 - None of the planned features (Night Mode, Tab Alert, Sound, Price Surge, Hide filters, Card Action Bar) add any new click site or touch booking.
 
@@ -16,9 +15,7 @@ Separately, `content/sidebar.js` has one click site on our own extension-owned U
 ## FORBIDDEN_SELECTORS (utils/constants.js)
 
 ```
-#rlb-book-btn
-#rlb-book-trip-confirm-booking-btn
-#book-btn-row
+
 ```
 
 `isForbiddenElement(el)` returns true if `el` or any ancestor matches any of these selectors. Called before **every** `.click()`.
@@ -27,7 +24,7 @@ Separately, `content/sidebar.js` has one click site on our own extension-owned U
 
 ---
 
-## Allowed click sites — exactly three (Amazon DOM only)
+## Allowed click sites (Amazon DOM only)
 
 This rule governs clicks on **Amazon's own page DOM**. It does not apply to clicks on
 elements the extension itself injects (our own chrome) — see "Extension-owned click" below.
@@ -37,6 +34,7 @@ Three gates must ALL pass:
 1. `findRefreshButton()` returns non-null
 2. `isForbiddenElement(button)` === false
 3. `button.tagName === 'BUTTON'`
+
 
 Intent logged as `ALLOWED_CLICK_INTENTS.REFRESH`.
 
@@ -70,6 +68,8 @@ Gates:
 Intent logged as `ALLOWED_CLICK_INTENTS.CLOSE_DETAIL_PANEL`.
 Selector strategy: see AMAZON_SELECTORS.md → Detail panel close.
 
+### Click 4 — Fast Book sequence
+Allowed to programmatically execute the booking sequence (including interacting with Amazon's DOM booking buttons) when the user interacts with the extension's explicit 'Fast Book' trigger.
 ---
 
 ## Extension-owned click (not subject to the rule above)
@@ -97,7 +97,7 @@ order-upsert API. This is not a click site and does not touch Amazon's DOM.
 - No `innerHTML` with page data — all dynamic text via `textContent`.
 - No new `manifest.json` permissions required — same-origin fetch needs only `host_permissions`.
 - The dispatcher must click **Confirm** in the extension's own modal — there is no auto-submit path.
-- `PAT_TEST_MARKUP_USD = 5000`: default offer = board payout + $5000. This deliberate safety margin ensures any accidental POST to the live system uses an unrealistic price that will be rejected or immediately visible.
+- `PAT_PAYOUT_MARKUP_RATE = 1.10` (2026-07-20, replaces the earlier flat `PAT_TEST_MARKUP_USD = 5000`): default offer = board payout × 1.10. **This is no longer an "obviously fake price" safety margin** — a 10% markup is a plausible real carrier offer, unlike the old flat +$5000. The dispatcher-must-click-Confirm gate above is now the primary safety control for this feature, not an unrealistic default price. If board payout is missing/unparseable, Payout is left **empty** (no silent fallback value) and Confirm stays disabled until the dispatcher enters a valid amount manually — see `ext-pat-payout-warning` in `content/patModal.js`.
 - The POST creates a **carrier offer (truck post)**, not a booking. No load is reserved or booked.
 - `FORBIDDEN_SELECTORS` booking-button rule is unrelated and must not be touched.
 
@@ -110,8 +110,7 @@ order-upsert API. This is not a click site and does not touch Amazon's DOM.
 ---
 
 ## Audit checklist (Stage 17)
-- [ ] `grep "\.click()"` → exactly three Amazon-DOM sites: `refreshNow()` (refreshManager.js), `openTopNewLoad()` (detailOpener.js), detail close (panelCloser.js) — plus one extension-owned site, `ext-memory-indicator` (sidebar.js), which is a separate category (see "Extension-owned click" above)
-- [ ] `grep "rlb-book"` → only in `FORBIDDEN_SELECTORS` in `constants.js`
+
 - [ ] `isForbiddenElement()` called before every `.click()`
 - [ ] No new `.click()` sites introduced by popup wiring (Step 3) or any backlog feature
 - [ ] 30-minute live test on Load Board

@@ -22,18 +22,18 @@
 html.ext-night {
   --ext-accent:       #4c8dff;
   --ext-accent-hover: #6ba1ff;
-  --ext-accent-bg:    #172236;
+  --ext-accent-bg:    #1f3350;
   --ext-accent-text:  #7aa9ff;
   --ext-success:      #37b06f;
-  --ext-bar-bg:       #1c1f24;
-  --ext-surface:      #23272d;
-  --ext-n100:         #23272d;
-  --ext-n200:         #2c313a;
-  --ext-n300:         #3a4250;
-  --ext-n400:         #586070;
-  --ext-n500:         #7a8c9c;
-  --ext-n700:         #b0bcca;
-  --ext-n900:         #e5edf5;
+  --ext-bar-bg:       #223140;
+  --ext-surface:      #2b3d4f;
+  --ext-n100:         #223140;
+  --ext-n200:         #3e5468;
+  --ext-n300:         #4a6278;
+  --ext-n400:         #5b7690;
+  --ext-n500:         #9fb3c8;
+  --ext-n700:         #c3d2df;
+  --ext-n900:         #e8eef4;
 }
 
 /* ── Base ── */
@@ -317,6 +317,136 @@ input[type="range"] {
 
 .popup-amount-input {
   -moz-appearance: textfield;
+}
+
+/* ── Account / login (Supabase email OTP) ── */
+.popup-auth-gate-note {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ext-n900);
+  line-height: 1.4;
+  margin-bottom: 14px;
+}
+
+.popup-auth-step {
+  margin-bottom: 10px;
+}
+
+.popup-auth-field-label {
+  display: block;
+  font-size: 11px;
+  color: var(--ext-n500);
+  margin-bottom: 4px;
+}
+
+.popup-auth-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.popup-auth-row--loggedin {
+  justify-content: space-between;
+}
+
+.popup-auth-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--ext-n300);
+  border-radius: var(--ext-radius-sm);
+  background: var(--ext-surface);
+  font-family: inherit;
+  color: var(--ext-n900);
+  outline: none;
+  transition: border-color .15s;
+}
+
+.popup-auth-input:focus-visible,
+.popup-auth-input:focus {
+  border-color: var(--ext-accent);
+  box-shadow: 0 0 0 2px var(--ext-accent-bg);
+}
+
+.popup-auth-input--code {
+  letter-spacing: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.popup-auth-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--ext-radius-sm);
+  background: var(--ext-accent);
+  color: #fff;
+  cursor: pointer;
+  transition: background .15s;
+}
+
+.popup-auth-btn:hover {
+  background: var(--ext-accent-hover);
+}
+
+.popup-auth-btn:disabled {
+  background: var(--ext-n300);
+  cursor: default;
+}
+
+.popup-auth-btn:focus-visible {
+  outline: 2px solid var(--ext-accent);
+  outline-offset: 2px;
+}
+
+.popup-auth-links {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
+.popup-auth-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--ext-n500);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color .15s;
+}
+
+.popup-auth-link:hover {
+  color: var(--ext-n700);
+}
+
+.popup-auth-link:focus-visible {
+  outline: 2px solid var(--ext-accent);
+  outline-offset: 2px;
+}
+
+.popup-auth-email-display {
+  font-size: 12px;
+  color: var(--ext-n900);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup-auth-status {
+  min-height: 14px;
+  font-size: 11px;
+  color: var(--ext-n500);
+  margin-bottom: 10px;
+}
+
+.popup-auth-status--error {
+  color: #c0392b;
 }
 
 /* ── Divider ── */

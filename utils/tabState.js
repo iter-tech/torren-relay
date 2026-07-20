@@ -67,6 +67,17 @@ var tabState = (function () {
     _subscribers[key].push(fn);
   }
 
+  // Needed once features can be deactivated + reactivated within the same page load
+  // (login/logout without reload — see utils/authGate.js) — without this, each
+  // reactivation's buildSidebar() would add another permanent subscriber referencing a
+  // detached DOM node from the previous activation.
+  function unsubscribe(key, fn) {
+    var subs = _subscribers[key];
+    if (!subs) return;
+    var idx = subs.indexOf(fn);
+    if (idx !== -1) subs.splice(idx, 1);
+  }
+
   // init() is async because seeding surgeThreshold may need one chrome.storage.local read
   // (only on the very first open of a tab that has no sessionStorage value yet).
   // Returns a Promise so callers can await it before building UI that reads tabState.
@@ -134,6 +145,6 @@ var tabState = (function () {
     });
   }
 
-  return { get: get, set: set, subscribe: subscribe, init: init };
+  return { get: get, set: set, subscribe: subscribe, unsubscribe: unsubscribe, init: init };
 
 })();

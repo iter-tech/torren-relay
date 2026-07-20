@@ -40,19 +40,20 @@
     'html.ext-night{' +
       '--ext-accent:#4c8dff;' +
       '--ext-accent-hover:#6ba1ff;' +
-      '--ext-accent-bg:#172236;' +
+      '--ext-accent-bg:#1f3350;' +
       '--ext-accent-text:#7aa9ff;' +
       '--ext-success:#37b06f;' +
       '--ext-success-bg:#0e2a1a;' +
-      '--ext-bar-bg:#1c1f24;' +
-      '--ext-surface:#23272d;' +
-      '--ext-n100:#23272d;' +
-      '--ext-n200:#2c313a;' +
-      '--ext-n300:#3a4250;' +
-      '--ext-n400:#586070;' +
-      '--ext-n500:#7a8c9c;' +
-      '--ext-n700:#b0bcca;' +
-      '--ext-n900:#e5edf5;' +
+      /* navy-slate elevation ramp — level0 (bar-bg) < level1 (n100) < level2 (surface) */
+      '--ext-bar-bg:#223140;' +
+      '--ext-surface:#2b3d4f;' +
+      '--ext-n100:#223140;' +
+      '--ext-n200:#3e5468;' +
+      '--ext-n300:#4a6278;' +
+      '--ext-n400:#5b7690;' +
+      '--ext-n500:#9fb3c8;' +
+      '--ext-n700:#c3d2df;' +
+      '--ext-n900:#e8eef4;' +
       '--ext-shadow-2:0 2px 8px rgba(0,0,0,.4);' +
     '}';
   document.head.appendChild(style);

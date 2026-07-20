@@ -108,21 +108,62 @@ function applyTagHiding() {
   }
 }
 
+// See utils/authGate.js — features require an active session. Guards the live
+// onChanged listener below too, not just the startup apply. Set by
+// activate/deactivateFilterTags (idempotent), called both at startup and on live
+// login/logout (onAuthGateChange, TASK 1 2026-07-20).
+var _filterTagsAuthed = false;
+
+function activateFilterTags() {
+  if (_filterTagsAuthed) return;
+  _filterTagsAuthed = true;
+  Promise.all([
+    storage.get(STORAGE_KEYS.HIDE_PROMOTED,      false),
+    storage.get(STORAGE_KEYS.HIDE_STARTING_SOON, false),
+    storage.get(STORAGE_KEYS.HIDE_TRAILER_READY, false),
+    storage.get(STORAGE_KEYS.HIDE_PAST_BOOK,     false),
+  ]).then(function (vals) {
+    tagState.promoted     = vals[0] === true;
+    tagState.startingSoon = vals[1] === true;
+    tagState.trailerReady = vals[2] === true;
+    tagState.pastBook     = vals[3] === true;
+    applyTagHiding();
+    logger.log('filterTags', 'activated', tagState);
+  }).catch(function (e) {
+    logger.error('filterTags', 'activateFilterTags failed', { error: e });
+  });
+}
+
+// Reverts to fully untouched — un-hides every tag/wrapper (all tagState flags false, same
+// codepath a dispatcher toggling all four filters off would hit) and disconnects the
+// MutationObserver.
+function deactivateFilterTags() {
+  if (!_filterTagsAuthed) return;
+  _filterTagsAuthed = false;
+  tagState.promoted = tagState.startingSoon = tagState.trailerReady = tagState.pastBook = false;
+  recomputeTagHiding();
+  disableTagObserver();
+  logger.log('filterTags', 'deactivated — session ended, reverted to untouched page');
+}
+
 (async function initFilterTags() {
   try {
-    tagState.promoted     = (await storage.get(STORAGE_KEYS.HIDE_PROMOTED,      false)) === true;
-    tagState.startingSoon = (await storage.get(STORAGE_KEYS.HIDE_STARTING_SOON, false)) === true;
-    tagState.trailerReady = (await storage.get(STORAGE_KEYS.HIDE_TRAILER_READY, false)) === true;
-    tagState.pastBook     = (await storage.get(STORAGE_KEYS.HIDE_PAST_BOOK,     false)) === true;
-    applyTagHiding();
-    logger.log('filterTags', 'init complete', tagState);
+    var gate = await getAuthGate();
+    if (gate.active) activateFilterTags();
   } catch (e) {
     logger.error('filterTags', 'initFilterTags failed', { error: e });
   }
 })();
 
+if (typeof onAuthGateChange === 'function') {
+  onAuthGateChange(function (gate) {
+    if (gate.active) activateFilterTags(); else deactivateFilterTags();
+  });
+}
+
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== 'local') return;
+  if (!_filterTagsAuthed) return;
   var changed = false;
   if (changes[STORAGE_KEYS.HIDE_PROMOTED] !== undefined) {
     tagState.promoted     = changes[STORAGE_KEYS.HIDE_PROMOTED].newValue === true;

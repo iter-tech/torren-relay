@@ -13,8 +13,20 @@ const STORAGE_KEYS = {
   HIDE_PAST_BOOK:     'hidePastBook',
   SURGE_ENABLED:      'surgeEnabled',
   SURGE_THRESHOLD:    'surgeThreshold',
+  FAST_BOOK_ENABLED:  'fastBookEnabled',
   PRICE_HISTORY:      'priceHistory'           // legacy — no longer written (moved to tabState); kept so Reset cleans old installs
 };
+
+// Supabase session — intentionally NOT in STORAGE_KEYS. "Reset to Defaults" clears
+// Object.values(STORAGE_KEYS) and must not log the dispatcher out as a side effect
+// of resetting extension preferences.
+const SUPABASE_SESSION_KEY = 'supabaseSession';
+
+// Pending OTP email — set when "Send code" succeeds, so the code-entry step survives
+// the popup closing before the dispatcher enters the code. Shape: { pendingEmail, step }.
+// Same reasoning as SUPABASE_SESSION_KEY: not in STORAGE_KEYS, Reset must not disrupt
+// an in-flight login.
+const AUTH_PENDING_KEY = 'authPendingEmail';
 
 const storage = {
 

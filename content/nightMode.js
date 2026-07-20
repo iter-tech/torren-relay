@@ -4,28 +4,36 @@
 // only RESTYLED. Surface ramp: base → raised → overlay → high (Material/Apple guidance).
 //
 // UNCOVERED BLOCKS (no stable selector — noted per spec, not silently added):
-//   - Left filter/search panel: Amazon uses hashed CSS classes for the filter column;
-//     it currently inherits base bg (transparent → base), which is correct at base level.
 //   - Load card hover state: `:hover` on Amazon card classes risks false positives.
 //     Cards stay at raised level on hover; no explicit hover-elevation rule added.
+//
+// Left filter/search panel (2026-07-15): previously left at base level because Amazon
+// uses hashed CSS classes for the filter column with no stable selector. That produced
+// near-black, boundary-less UI outside load cards. Now covered via role/semantic +
+// class-substring selectors (see "RAISED — filter/search panel" section below) since
+// no stable hashed class can be targeted directly.
 
 var NIGHT_STYLE_ID = 'ext-night-mode-style';
 
-// ── Elevation ramp ────────────────────────────────────────────────────────────
-var DK_BASE          = '#16181c';   // page bg — ONLY used here
-var DK_RAISED        = '#1e2126';   // cards, nav, footer, filter-area (inherits)
-var DK_OVERLAY       = '#262a31';   // selected card, detail sheet, popovers, inline panel
-var DK_HIGH          = '#2e333b';   // expanded rows, segment headers, modals
-var DK_BORDER        = 'rgba(255,255,255,.09)';
-var DK_BORDER_STRONG = 'rgba(255,255,255,.14)';
+// ── Elevation ramp — navy-slate, matches utils/designTokens.js dark values ────
+var DK_BASE          = '#1a2634';   // page bg — ONLY used here (level 0)
+var DK_RAISED        = '#223140';   // level 1 — cards, nav, footer, filter/search panel
+var DK_OVERLAY       = '#2b3d4f';   // level 2 — inputs, dropdowns, buttons, popovers
+var DK_HIGH          = '#34495c';   // expanded rows, segment headers, modals
+var DK_BORDER        = '#3e5468';   // subtle boundary for level-2 surfaces
+var DK_BORDER_STRONG = '#4a6278';   // stronger boundary — selected card, overlay panels, modals
+
+// Filter chips — distinct fill so removable pills read apart from plain inputs/buttons
+var DK_CHIP_BG     = '#2e4257';
+var DK_CHIP_BORDER = '#4f6f88';
 
 // ── Text scale ────────────────────────────────────────────────────────────────
-var DK_TEXT  = '#e8eaed';   // primary
-var DK_MUTED = '#a8b0b9';   // secondary / placeholder
-var DK_FAINT = '#6b7480';   // disabled / column-label headers
+var DK_TEXT  = '#e8eef4';   // primary
+var DK_MUTED = '#9fb3c8';   // secondary / placeholder
+var DK_FAINT = '#7488a0';   // disabled / column-label headers
 
 // ── Accent (matches designTokens.js dark values) ──────────────────────────────
-var DK_ACCENT_BG   = '#172236';
+var DK_ACCENT_BG   = '#1f3350';
 var DK_ACCENT_TEXT = '#7aa9ff';
 var DK_SUCCESS     = '#37b06f';
 
@@ -187,6 +195,17 @@ function buildNightCss() {
       'color:' + DK_TEXT + ' !important;' +
       '-webkit-text-fill-color:' + DK_TEXT + ' !important;' +
     '}',
+    // Fast Book button — always blue/white, immune to night-mode muting
+    'html.ext-night #ext-inline-panel .ext-action-btn--fastbook{' +
+      'background-color:#2563eb !important;' +
+      'color:#ffffff !important;' +
+      '-webkit-text-fill-color:#ffffff !important;' +
+    '}',
+    'html.ext-night #ext-inline-panel .ext-action-btn--fastbook:hover{' +
+      'background-color:#1d4ed8 !important;' +
+      'color:#ffffff !important;' +
+      '-webkit-text-fill-color:#ffffff !important;' +
+    '}',
 
     // Icon dot colors (Font Awesome circles in detail rows)
     'html.ext-night #ext-inline-panel i.fa-circle,' +
@@ -203,15 +222,28 @@ function buildNightCss() {
     '}',
     'html.ext-night #utility-bar *{background-color:transparent !important;}',
 
-    // ── 11. RAISED — inputs / selects / form fields (strong border) ──────────
+    // ── 10b. RAISED — filter/search panel & left sidebar blocks (level 1) ────
+    // No stable Amazon selector for the filter column (hashed classes), so this
+    // targets it the same way section 16 targets header/nav: role + generic
+    // class-substring matches. Sits one level above page bg, same as cards.
+    'html.ext-night [role="search"],' +
+    'html.ext-night [role="complementary"],' +
+    'html.ext-night aside,' +
+    'html.ext-night [class*="filter" i],' +
+    'html.ext-night [class*="search-panel" i]{' +
+      'background-color:' + DK_RAISED + ' !important;' +
+      'border:1px solid ' + DK_BORDER + ' !important;' +
+    '}',
+
+    // ── 11. OVERLAY — inputs / selects / form fields (level 2, sits above panel) ──
     'html.ext-night input,' +
     'html.ext-night textarea,' +
     'html.ext-night select{' +
-      'background-color:' + DK_RAISED + ' !important;' +
+      'background-color:' + DK_OVERLAY + ' !important;' +
       'background-image:none !important;' +
       'color:' + DK_TEXT + ' !important;' +
       '-webkit-text-fill-color:' + DK_TEXT + ' !important;' +
-      'border:1px solid ' + DK_BORDER_STRONG + ' !important;' +
+      'border:1px solid ' + DK_BORDER + ' !important;' +
       'outline:none !important;box-shadow:none !important;' +
     '}',
     'html.ext-night input::placeholder,' +
@@ -223,12 +255,23 @@ function buildNightCss() {
     'html.ext-night [class*="select" i],' +
     'html.ext-night [class*="field" i],' +
     'html.ext-night [class*="input" i]{' +
-      'background-color:' + DK_RAISED + ' !important;' +
+      'background-color:' + DK_OVERLAY + ' !important;' +
+      'border:1px solid ' + DK_BORDER + ' !important;' +
     '}',
 
-    // ── 12. RAISED — buttons (generic Amazon buttons) ─────────────────────────
+    // Filter chips — removable pill filters (e.g. "Payout (min): 500")
+    // Distinct fill + lighter border + accent text so chips read apart from plain inputs/buttons
+    'html.ext-night [class*="chip" i],' +
+    'html.ext-night [class*="pill" i]{' +
+      'background-color:' + DK_CHIP_BG + ' !important;' +
+      'border:1px solid ' + DK_CHIP_BORDER + ' !important;' +
+      'color:' + DK_ACCENT_TEXT + ' !important;' +
+      '-webkit-text-fill-color:' + DK_ACCENT_TEXT + ' !important;' +
+    '}',
+
+    // ── 12. OVERLAY — buttons (generic Amazon buttons, level 2 so they read as buttons) ──
     'html.ext-night button{' +
-      'background-color:' + DK_RAISED + ' !important;' +
+      'background-color:' + DK_OVERLAY + ' !important;' +
       'color:' + DK_TEXT + ' !important;' +
       '-webkit-text-fill-color:' + DK_TEXT + ' !important;' +
       'border:1px solid ' + DK_BORDER + ' !important;' +
@@ -351,17 +394,51 @@ function applyNightMode(on) {
   logger.log('nightMode', 'applied', { on: on === true });
 }
 
+// Guards the live onChanged listener below so a settings change from another popup
+// instance can't apply Night Mode while this tab is logged out. See utils/authGate.js —
+// features require an active session. Set by activate/deactivateNightMode (idempotent),
+// called both at startup and on live login/logout (onAuthGateChange, TASK 1 2026-07-20).
+var _nightModeAuthed = false;
+
+function activateNightMode() {
+  if (_nightModeAuthed) return;
+  _nightModeAuthed = true;
+  storage.get(STORAGE_KEYS.NIGHT_MODE, false).then(function (on) {
+    applyNightMode(on);
+  }).catch(function (e) {
+    logger.warn('nightMode', 'activateNightMode failed', { error: e });
+  });
+}
+
+// Reverts the page to fully untouched — removes both the html.ext-night class AND the
+// injected <style> tag, not just the class, so nothing of ours remains attached.
+function deactivateNightMode() {
+  if (!_nightModeAuthed) return;
+  _nightModeAuthed = false;
+  document.documentElement.classList.remove('ext-night');
+  var style = document.getElementById(NIGHT_STYLE_ID);
+  if (style) style.remove();
+  logger.log('nightMode', 'deactivated — session ended, reverted to untouched page');
+}
+
 (async function initNightMode() {
   try {
-    var on = await storage.get(STORAGE_KEYS.NIGHT_MODE, false);
-    applyNightMode(on);
+    var gate = await getAuthGate();
+    if (gate.active) activateNightMode();
   } catch (e) {
     logger.warn('nightMode', 'init failed', { error: e });
   }
 })();
 
+if (typeof onAuthGateChange === 'function') {
+  onAuthGateChange(function (gate) {
+    if (gate.active) activateNightMode(); else deactivateNightMode();
+  });
+}
+
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== 'local') return;
+  if (!_nightModeAuthed) return;
   if (!changes[STORAGE_KEYS.NIGHT_MODE]) return;
   applyNightMode(changes[STORAGE_KEYS.NIGHT_MODE].newValue === true);
 });

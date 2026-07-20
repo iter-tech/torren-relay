@@ -2,9 +2,10 @@
 // our own collapsible segmented summary panel injected below the clicked load card.
 // NO clicks on Amazon elements, NO booking, NO hiding or modifying the native sheet.
 
-var PANEL_ID         = 'ext-inline-panel';
-var SHEET_SELECTOR   = '#selected-work-sheet';
-var currentPanelCard = null; // owned by showInlinePanel (set on success) and removeInlinePanel (clear)
+var PANEL_ID                  = 'ext-inline-panel';
+var SHEET_SELECTOR            = '#selected-work-sheet';
+var currentPanelCard          = null; // owned by showInlinePanel (set on success) and removeInlinePanel (clear)
+var _fastBookStorageListener  = null; // storage.onChanged listener for Fast Book visibility — cleaned up in removeInlinePanel
 
 function injectPanelStyle() {
   if (document.getElementById('ext-inline-panel-style')) return;
@@ -87,8 +88,91 @@ function injectPanelStyle() {
     '}' +
     '.ext-action-btn:hover{background:var(--ext-n200);color:var(--ext-n900);}' +
     '.ext-action-btn:focus-visible{outline:2px solid var(--ext-accent);outline-offset:2px;}' +
-    '.ext-action-btn svg{width:15px;height:15px;display:block;}';
+    '.ext-action-btn svg{width:15px;height:15px;display:block;}' +
+    '.ext-action-btn--fastbook{' +
+      'width:auto;padding:0 8px;font-size:11px;font-weight:600;letter-spacing:0.02em;' +
+      'margin-left:auto;' +
+      'color:#ffffff;border:none;border-radius:4px;background:#2563eb;' +
+    '}' +
+    '.ext-action-btn--fastbook:hover{background:#1d4ed8;color:#ffffff;}' +
+    '.ext-action-btn--fastbook:disabled{opacity:0.6;cursor:not-allowed;}';
   document.head.appendChild(style);
+}
+
+// Executes the two-step Fast Book sequence: click Amazon's Book button, then click Confirm.
+// Triggered ONLY by user's explicit Fast Book button click (Click 4 in SAFETY.md).
+// isForbiddenElement() is called before each Amazon DOM click per the binding safety rule.
+function executeFastBook(sheetLoadId, fastBookBtn) {
+  logger.log('inlinePanel', 'executeFastBook called', { loadId: sheetLoadId, intent: ALLOWED_CLICK_INTENTS.FAST_BOOK });
+
+  if (fastBookBtn) {
+    fastBookBtn.disabled = true;
+    fastBookBtn.textContent = 'Booking...';
+  }
+
+  var sheet = document.querySelector(SHEET_SELECTOR);
+  if (!sheet) {
+    logger.error('inlinePanel', 'executeFastBook: sheet not found', { selector: SHEET_SELECTOR });
+    if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
+    return;
+  }
+
+  // Step 1: find Amazon's Book button
+  var bookBtn = sheet.querySelector('#rlb-book-btn');
+  if (!bookBtn) {
+    // Fallback: first <button> in sheet with exact text "Book"
+    var sheetBtns = sheet.querySelectorAll('button');
+    for (var i = 0; i < sheetBtns.length; i++) {
+      if (sheetBtns[i].textContent.trim() === 'Book') { bookBtn = sheetBtns[i]; break; }
+    }
+  }
+  if (!bookBtn) {
+    logger.error('inlinePanel', 'executeFastBook: Book button not found in sheet');
+    if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
+    return;
+  }
+  if (isForbiddenElement(bookBtn)) {
+    logger.error('inlinePanel', 'executeFastBook: bookBtn matched FORBIDDEN_SELECTORS — aborting', { id: bookBtn.id });
+    if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
+    return;
+  }
+
+  logger.log('inlinePanel', 'executeFastBook: clicking Book button', { id: bookBtn.id, intent: ALLOWED_CLICK_INTENTS.FAST_BOOK });
+  bookBtn.click();
+
+  // Step 2: poll for Amazon's confirm dialog button and click it
+  var MAX_WAIT_MS   = 5000;
+  var POLL_MS       = 100;
+  var elapsed       = 0;
+  var pollInterval  = setInterval(function () {
+    elapsed += POLL_MS;
+    var confirmBtn = document.querySelector('#rlb-book-trip-confirm-booking-btn');
+    if (!confirmBtn) {
+      // Fallback: button with text "Book" inside any modal/overlay that appeared after step 1
+      var allBtns = document.querySelectorAll('button');
+      for (var j = 0; j < allBtns.length; j++) {
+        var t = allBtns[j].textContent.trim();
+        if (t === 'Book' || t === 'Confirm' || t === 'Confirm booking') { confirmBtn = allBtns[j]; break; }
+      }
+    }
+    if (confirmBtn && confirmBtn !== bookBtn) {
+      clearInterval(pollInterval);
+      if (isForbiddenElement(confirmBtn)) {
+        logger.error('inlinePanel', 'executeFastBook: confirmBtn matched FORBIDDEN_SELECTORS — aborting', { id: confirmBtn.id });
+        if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
+        return;
+      }
+      logger.log('inlinePanel', 'executeFastBook: clicking confirm button', { id: confirmBtn.id, intent: ALLOWED_CLICK_INTENTS.FAST_BOOK });
+      confirmBtn.click();
+      if (fastBookBtn) {
+        fastBookBtn.textContent = 'Booked!';
+      }
+    } else if (elapsed >= MAX_WAIT_MS) {
+      clearInterval(pollInterval);
+      logger.error('inlinePanel', 'executeFastBook: confirm button not found within timeout', { elapsed: elapsed });
+      if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
+    }
+  }, POLL_MS);
 }
 
 // Returns a cheap string fingerprint of the currently open detail sheet.
@@ -578,6 +662,17 @@ function buildActionBar() {
     bar.appendChild(btn);
   });
 
+  // Fast Book button — text only, hidden until fastBookEnabled is confirmed
+  var fastBookBtn = document.createElement('button');
+  fastBookBtn.setAttribute('type', 'button');
+  fastBookBtn.setAttribute('data-testid', 'ext-action-fastbook');
+  fastBookBtn.setAttribute('aria-label', 'Fast Book — instantly book this load');
+  fastBookBtn.setAttribute('title', 'Fast Book — instantly book this load');
+  fastBookBtn.className = 'ext-action-btn ext-action-btn--fastbook';
+  fastBookBtn.textContent = 'Fast Book';
+  fastBookBtn.style.display = 'none';
+  bar.appendChild(fastBookBtn);
+
   return bar;
 }
 
@@ -810,6 +905,35 @@ function showInlinePanel(cardElement) {
     });
   }
 
+  // Wire ext-action-fastbook: read storage for initial visibility, attach click handler,
+  // and keep visibility in sync with popup toggle changes via chrome.storage.onChanged.
+  if (_fastBookStorageListener) {
+    chrome.storage.onChanged.removeListener(_fastBookStorageListener);
+    _fastBookStorageListener = null;
+  }
+
+  var fastBookBtn = panel.querySelector('[data-testid="ext-action-fastbook"]');
+  if (fastBookBtn) {
+    chrome.storage.local.get('fastBookEnabled', function (data) {
+      fastBookBtn.style.display = data.fastBookEnabled === true ? '' : 'none';
+    });
+
+    fastBookBtn.addEventListener('click', function () {
+      logger.log('inlinePanel', 'ext-action-fastbook clicked', { loadId: sheetLoadId });
+      executeFastBook(sheetLoadId, fastBookBtn);
+    });
+
+    _fastBookStorageListener = function (changes, area) {
+      if (area !== 'local' || changes.fastBookEnabled === undefined) return;
+      fastBookBtn.style.display = changes.fastBookEnabled.newValue === true ? '' : 'none';
+      if (changes.fastBookEnabled.newValue !== true) {
+        fastBookBtn.disabled = false;
+        fastBookBtn.textContent = 'Fast Book';
+      }
+    };
+    chrome.storage.onChanged.addListener(_fastBookStorageListener);
+  }
+
   cardElement.parentNode.insertBefore(panel, cardElement.nextSibling);
 
   // Update currentPanelCard here so both auto-open and manual paths stay in sync.
@@ -823,7 +947,11 @@ function showInlinePanel(cardElement) {
 function removeInlinePanel() {
   var old = document.getElementById(PANEL_ID);
   if (old) old.remove();
-  currentPanelCard = null; // clear ownership so toggle-off state stays consistent
+  currentPanelCard = null;
+  if (_fastBookStorageListener) {
+    chrome.storage.onChanged.removeListener(_fastBookStorageListener);
+    _fastBookStorageListener = null;
+  }
 }
 
 function initManualToggle() {
@@ -833,6 +961,13 @@ function initManualToggle() {
   document.addEventListener('click', function (ev) {
     var card = ev.target.closest('div.load-card, div.load-card__selected');
     if (!card) return;
+
+    // Login gate (2026-07-20): this listener is registered once and never removed
+    // (window.__extManualToggleInit guard above), so it must gate itself on every click
+    // rather than relying on being un-registered on logout. isAuthGateActiveSync() reads
+    // utils/authGate.js's last-known state synchronously — kept in sync live by
+    // onAuthGateChange, not just at page load.
+    if (typeof isAuthGateActiveSync === 'function' && !isAuthGateActiveSync()) return;
 
     // SAFETY: never react to clicks on forbidden elements (Book buttons etc.)
     if (isForbiddenElement(ev.target)) return;
