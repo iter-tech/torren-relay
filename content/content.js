@@ -44,6 +44,31 @@ function sortByPayoutDesc(loads) {
   });
 }
 
+// Single checkpoint used after every await inside runDetectionPipeline/orchestratorTick
+// (2026-07-20 fix): a tick already mid-flight when the login gate closes (live logout —
+// no reload needed, see utils/authGate.js) or the loop is otherwise stopped must not be
+// allowed to keep running — it was previously left to finish, which could still highlight
+// cards, play sound, auto-open a card, and re-create #ext-inline-panel after
+// deactivateExtensionUI() had already torn everything down.
+function shouldContinue() {
+  var gateActive = (typeof isAuthGateActiveSync === 'function') ? isAuthGateActiveSync() : false;
+  return gateActive && tabState.get('running');
+}
+
+// Wipes every DOM node this pipeline can create. Called both by deactivateExtensionUI()
+// (a real logout/gate-close) and by every shouldContinue()-failing checkpoint below — a
+// tick already mid-flight when logout happens can leave something behind in the gap
+// *before* the next checkpoint catches it (e.g. checkPriceSurge() applies surge highlights
+// internally, synchronously, before its own awaited playAlert() resolves — well before
+// runDetectionPipeline's first checkpoint runs). Safe to call at any time; every function
+// it calls is already a no-op when there is nothing to clear, so deactivate stays
+// authoritative regardless of exactly where a tick got bailed out.
+function clearPipelineDom() {
+  removeInlinePanel();
+  clearHighlights();
+  clearSurgeHighlights();
+}
+
 // Shared detection pipeline — called by both orchestratorTick (after a refresh) and
 // runObserverPipeline (DOM already changed, no refresh step).
 // sourceTag ('tick' | 'observer') is threaded through log lines to keep origin distinguishable.
@@ -57,13 +82,28 @@ async function runDetectionPipeline(sourceTag) {
   });
 
   var surgeLoads = await checkPriceSurge(loads);
+  if (!shouldContinue()) {
+    logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after checkPriceSurge' });
+    clearPipelineDom();
+    return;
+  }
 
   if (result.newCount > 0) {
     highlightNewLoads(result.newLoads); // highlight all, original DOM order
     await playAlert();
+    if (!shouldContinue()) {
+      logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after playAlert' });
+      clearPipelineDom();
+      return;
+    }
     if (typeof flashTabAlert === 'function') flashTabAlert(result.newCount);
 
     var autoOpen = await storage.get(STORAGE_KEYS.AUTO_OPEN, true);
+    if (!shouldContinue()) {
+      logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after AUTO_OPEN read' });
+      clearPipelineDom();
+      return;
+    }
     var opened   = false;
     // Sort by payout desc so openTopNewLoad always opens the highest-paying new load.
     var ordered  = sortByPayoutDesc(result.newLoads);
@@ -71,6 +111,11 @@ async function runDetectionPipeline(sourceTag) {
 
     if (autoOpen && opened) {
       await sleep(800);
+      if (!shouldContinue()) {
+        logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel' });
+        clearPipelineDom();
+        return;
+      }
       try {
         showInlinePanel(ordered[0]._element);
         logger.log('content', 'runDetectionPipeline: inline panel shown', { source: sourceTag, topPayout: ordered[0].payout });
@@ -85,12 +130,22 @@ async function runDetectionPipeline(sourceTag) {
     });
   } else if (surgeLoads.length > 0) {
     var surgeAutoOpen  = await storage.get(STORAGE_KEYS.AUTO_OPEN, true);
+    if (!shouldContinue()) {
+      logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after AUTO_OPEN read (surge)' });
+      clearPipelineDom();
+      return;
+    }
     var surgeOpened    = false;
     var orderedSurge   = sortByPayoutDesc(surgeLoads);
     if (surgeAutoOpen) surgeOpened = openTopNewLoad(orderedSurge);
 
     if (surgeAutoOpen && surgeOpened) {
       await sleep(800);
+      if (!shouldContinue()) {
+        logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel (surge)' });
+        clearPipelineDom();
+        return;
+      }
       try {
         showInlinePanel(orderedSurge[0]._element);
         logger.log('content', 'runDetectionPipeline: inline panel shown for surge', { source: sourceTag, topPayout: orderedSurge[0].payout });
@@ -116,6 +171,11 @@ async function orchestratorTick() {
     var refreshed = refreshNow();
     logger.log('content', 'orchestratorTick: refresh triggered', { refreshed: refreshed });
     await sleep(REFRESH_SETTLE_MS);
+    if (!shouldContinue()) {
+      logger.log('content', 'orchestratorTick: bailing — gate/running closed during refresh settle', {});
+      clearPipelineDom();
+      return;
+    }
     await runDetectionPipeline('tick');
   } catch (e) {
     logger.error('content', 'orchestratorTick: unexpected error', { error: e });
@@ -211,9 +271,10 @@ function deactivateExtensionUI() {
   // and — while the sidebar still exists — updates its play/pause visual one last time.
   tabState.set('running', false);
 
-  removeInlinePanel();
-  clearHighlights();
-  clearSurgeHighlights();
+  // Same cleanup shouldContinue()'s bail-out checkpoints in runDetectionPipeline use — kept
+  // as one shared function so this stays authoritative: whichever path (a real deactivate,
+  // or a mid-flight tick catching the closed gate) runs last, the result is identical.
+  clearPipelineDom();
 
   var sidebarEl = document.getElementById('ext-sidebar');
   if (sidebarEl) {

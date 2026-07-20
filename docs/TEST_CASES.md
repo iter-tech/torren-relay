@@ -396,3 +396,123 @@ Two relay.amazon.com tabs open simultaneously. All cases verified with both tabs
 10. **Expected visually, no reload:** `ext-sidebar` is completely removed from the DOM (`document.querySelector('[data-testid="ext-sidebar"]')` → `null`). The inline panel from step 7 is also removed. Any highlighted new-load cards and any Night Mode / tag-filter styling revert — the page looks exactly as it did in step 2. If the loop was running (step 6), it has stopped (no further console ticks).
 11. **Regression — repeat the full login→logout cycle 3 times in the same tab without reloading.** Expected: behaves identically each time — sidebar appears/disappears cleanly, no duplicate sidebars, no visually-doubled scanline/memory-indicator animation, no growing console log volume per cycle. This specifically checks the `tabState.unsubscribe()` / `clearInterval()` cleanup added alongside this feature — without it, each cycle would leak one more permanent `tabState` subscriber and one more orphaned `setInterval`, both invisible in normal use but detectable via repeated cycling.
 12. **Regression — the manual card-click listener respects the live gate too:** while logged out (post step 10), click a load card directly. **Expected:** nothing happens — no panel opens. This confirms `initManualToggle()`'s one-time-registered click listener is checking `isAuthGateActiveSync()` on every click, not just relying on the sidebar's absence.
+
+### TC-PAT-CITY-1 — Empty-city resolution failure shows the specific message, doesn't discard a resolving sibling
+
+Regression test for the `boardStopStr`-undefined crash fixed 2026-07-20 (found via the
+read-only logic audit). Logic-level fix confirmed via a Node `vm` harness (no DOM/network
+needed — see CHANGELOG.md); this test case is the still-outstanding real-browser check.
+
+1. Open a load whose origin or destination city will parse down to an empty string — e.g. a
+   board stop string that is only a station code with no city text after stripping (`"DNA4"`
+   with nothing following), or force it via `window.__EXT_DEBUG` / DevTools by calling
+   `resolvePATCity('')` directly in the console first to sanity-check step 2 before trying
+   the full modal.
+2. Click `ext-action-post` to open the PAT modal.
+3. **Expected — this is the regression:** `ext-pat-status` shows a **specific** message:
+   `Could not resolve city: «, » — check logger output` (or similar, with whatever
+   city/state text was actually parsed) — **not** the generic `City resolution error — check
+   logger output`. Confirm via the console that `[EXT][...][patApi] resolvePATCity: empty
+   city from parseBoardStop { input: ... }` was logged, with a real `input` value (not
+   `undefined`), and that no uncaught `ReferenceError` appears in the console.
+4. **Expected — sibling not discarded:** if only ONE of origin/destination has the
+   empty-city problem, the OTHER one still resolves and displays its city name normally
+   (`ext-pat-origin` or `ext-pat-dest`, whichever is the working one, shows "CITY, ST" with
+   `.resolving` class removed) — it must not also show an error or stay stuck on "resolving…"
+   just because its sibling failed.
+5. **Expected:** `ext-pat-confirm` stays disabled (city resolution failure is one of the
+   existing blocking conditions — unchanged behavior).
+6. **Regression — normal case unaffected:** open a load where both cities resolve
+   successfully. **Expected:** works exactly as before this fix — both city names display,
+   Confirm enables once other conditions are met.
+
+### TC-PAT-TIME-1 — Missing/unparseable load time blocks Confirm and shows a warning; manual entry unblocks it
+
+Regression test for the fabricated-time silent fallback fixed 2026-07-20 (found via the
+read-only logic audit). `makeTimeStepper()`'s core logic was verified via a Node `vm`
+harness (no DOM/network needed — see CHANGELOG.md); this test case is the still-outstanding
+real-browser check of the full modal.
+
+1. Open a load whose first or last stop has a missing or unrecognized-format arrival time
+   (`parsePatStopTime()` returns `null` — not a `tzError`, which is the separate,
+   already-covered case below). If none is available live, simulate via
+   `window.__EXT_DEBUG` / DevTools, or temporarily blank a stop's arrival text.
+2. Click `ext-action-post` to open the PAT modal.
+3. **Expected — this is the regression:** the affected stepper (`ext-pat-start` and/or
+   `ext-pat-end`) shows "Not set — click to enter" instead of a plausible-looking time. It
+   must **not** show a time computed from the current wall-clock (e.g. roughly "now" or "now
+   + a few hours") — that was the bug.
+4. **Expected:** the `±` step buttons on the affected stepper are disabled (nothing to step
+   from yet). The manual-entry date/time picker is visible immediately under it (not hidden
+   behind a click, since there's nothing to display).
+5. **Expected:** `ext-pat-times-warning` is visible: "Load times could not be read — enter
+   start/end time manually".
+6. **Expected:** `ext-pat-confirm` stays disabled even once both cities resolve successfully
+   and Payout holds a valid value — confirm this by checking `ext-pat-confirm.disabled ===
+   true` after city resolution completes.
+7. Enter a valid date/time into the affected picker. **Expected, live, no other interaction
+   needed:** `ext-pat-times-warning` disappears immediately, the stepper now shows the
+   entered time and its `±` buttons re-enable, and `ext-pat-confirm` becomes enabled
+   (assuming cities are resolved and Payout is valid — this is the "manual entry unblocks
+   it" requirement).
+8. Clear the picker back to empty. **Expected:** `ext-pat-times-warning` reappears and
+   `ext-pat-confirm` disables again — the gating is live/bidirectional in both directions,
+   not a one-time check.
+9. **Regression — Confirm-click safety net:** with the warning showing, bypass the disabled
+   button (e.g. via DevTools) and click Confirm anyway. **Expected:** "Enter both start and
+   end time — cannot submit." fires and nothing is submitted — same redundant-safeguard
+   pattern as the other fields (Payout, Min/Max Miles, city resolution).
+10. **Regression — tzError case unaffected in behavior, only in stepper display:** open a
+    load with an unrecognized timezone abbreviation in the arrival text. **Expected:**
+    `ext-pat-status` still shows the specific "Unrecognized timezone: «X» in start/end time"
+    message (unchanged), and Confirm remains **permanently** disabled for this modal instance
+    even if a time is manually entered afterward (tzError stays in the static
+    `blockingErrors` list, per "leave tzError handling as-is") — only the stepper's own
+    visual now shows "Not set" instead of a fabricated time, which is expected since the
+    shared fallback was removed entirely.
+11. **Regression — normal case unaffected:** open a load where both stop times parse
+    normally. **Expected:** works exactly as before this fix — both steppers show the real
+    time immediately, `±` buttons work, no warning, Confirm enables once other conditions
+    are met.
+
+### TC-AUTH-7 — Logout mid-tick leaves no extension DOM behind
+
+Regression test for the in-flight-tick-outlives-logout bug fixed 2026-07-20 (found via the
+read-only logic audit; complements TC-AUTH-6, which covers the non-racy activate/deactivate
+path). `shouldContinue()`'s bail-out logic was verified via a Node `vm` harness simulating
+the exact timing (see CHANGELOG.md); this test case is the still-outstanding real-browser
+check, and the hardest of the auth test cases to land deliberately by hand since it depends
+on timing a logout to hit one of two narrow windows in a live tab.
+
+1. Log in. On a Relay tab with real new loads available (or loads likely to trigger Auto-Open
+   Top Load / Price Surge — enable both in the popup beforehand to widen the window), start
+   the loop (Play).
+2. **Target window A (~1.2s):** the moment right after the sidebar's refresh countdown fires
+   — this is `REFRESH_SETTLE_MS`, the gap between `refreshNow()` and the detection pass in
+   `orchestratorTick`. Log out via the popup as close to that moment as you can.
+3. **Target window B (~800ms, the exact scenario from the bug report):** watch the console
+   for `runDetectionPipeline: inline panel shown` (or the surge variant) — if you can log out
+   in the ~800ms gap between a new load being detected/highlighted and that log line
+   appearing, you've hit the exact window the bug lived in. Since this is hard to time by
+   hand, try it across several ticks/reloads of the page until you land in the window at
+   least once — the console log lines added by this fix
+   (`runDetectionPipeline: bailing — gate/running closed { checkpoint: ... }`) make it
+   obvious when you have, even if the visual difference is subtle.
+4. **Expected, for either window, once you land in it:** the console shows a `bailing —
+   gate/running closed` log line naming the checkpoint it caught at. No inline panel
+   appears. No card is left highlighted (`.ext-new-load`). No surge badge
+   (`ext-surge-badge`)/highlight (`.ext-surge-price`) appears. `ext-sidebar` is fully removed
+   from the DOM (same as TC-AUTH-6) — nothing whatsoever is left over from the in-flight
+   tick.
+5. **Expected — sound:** if the bail-out happened at or before the `after playAlert`
+   checkpoint, no sound should have played; if it happened at a later checkpoint (e.g. `after
+   AUTO_OPEN read` or the `800ms settle` ones), the sound may already have played before the
+   bail — that's expected and out of scope for this fix (audio can't be "un-played"; the fix
+   is specifically about DOM the extension creates/restores, per the instruction's scope).
+6. **Regression — logout with the loop idle (not running):** log out with the loop paused.
+   **Expected:** unchanged from TC-AUTH-6 — sidebar disappears immediately, nothing else to
+   check since no tick was in flight.
+7. **Regression — normal ticks unaffected:** with the fix in place, start the loop and let
+   several ticks complete normally **without** logging out. **Expected:** identical behavior
+   to before this fix — new loads highlight, sound plays, top load auto-opens, inline panel
+   shows normally, no spurious "bailing" log lines appear.

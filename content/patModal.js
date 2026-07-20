@@ -69,6 +69,7 @@ function injectPatModalStyle() {
       'font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0;' +
     '}' +
     '#ext-pat-modal .pat-stepper-btn:hover{background:var(--ext-n100);}' +
+    '#ext-pat-modal .pat-stepper-btn:disabled{opacity:0.5;cursor:not-allowed;background:var(--ext-surface);}' +
     '#ext-pat-modal .pat-stepper-val{' +
       'flex:1;font-size:12px;color:var(--ext-n900);text-align:center;' +
       'cursor:pointer;text-decoration:underline dotted;user-select:none;' +
@@ -78,6 +79,7 @@ function injectPatModalStyle() {
       'padding:4px 6px;font-size:12px;background:var(--ext-surface);color:var(--ext-n900);' +
       'box-sizing:border-box;outline:none;' +
     '}' +
+    '#ext-pat-modal .pat-times-warning{font-size:10px;line-height:1.3;color:#c0392b;margin-top:-4px;}' +
     /* Numbers rows */
     '#ext-pat-modal .pat-nums-a{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;}' +
     '#ext-pat-modal .pat-nums-b{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}' +
@@ -171,14 +173,20 @@ function fromDatetimeLocalInTz(inputVal, tzOffset) {
 }
 
 // Build a ±15-min stepper control.
-// timeResult = { date: Date(UTC), tzName, tzOffset }
+// timeResult = { date: Date(UTC), tzName, tzOffset } OR null — null means the load's real
+// time could not be read (missing/unparseable arrival, or a tzError already nulled it out
+// upstream). No fake time is fabricated for a null input (no-silent-fallback rule, same as
+// Payout, 2026-07-20): the stepper starts empty, minus/plus are disabled until a value
+// exists, and the manual-entry input is shown immediately instead of hidden behind a click.
+// onChange (optional) fires whenever cur transitions between having a value and not (or the
+// value itself changes) — used by openPostModal to keep Confirm's gating live.
 // testidBase = e.g. "ext-pat-start"
-// Returns { el: HTMLElement, getDate: () => Date }
-function makeTimeStepper(timeResult, testidBase) {
-  logger.log('patModal', 'makeTimeStepper called', { testidBase: testidBase });
-  var cur     = timeResult.date;
-  var tzName  = timeResult.tzName;
-  var tzOff   = timeResult.tzOffset;
+// Returns { el: HTMLElement, getDate: () => Date|null }
+function makeTimeStepper(timeResult, testidBase, onChange) {
+  logger.log('patModal', 'makeTimeStepper called', { testidBase: testidBase, missing: !timeResult });
+  var cur    = timeResult ? timeResult.date     : null;
+  var tzName = timeResult ? timeResult.tzName   : 'UTC';
+  var tzOff  = timeResult ? timeResult.tzOffset  : 0;
 
   var wrap = document.createElement('div');
   wrap.className = 'pat-stepper';
@@ -209,21 +217,35 @@ function makeTimeStepper(timeResult, testidBase) {
   dtInput.setAttribute('type', 'datetime-local');
   dtInput.setAttribute('data-testid', testidBase + '-input');
   dtInput.className = 'pat-stepper-input';
-  dtInput.style.display = 'none';
 
   function updateDisplay() {
-    valSpan.textContent = formatTimeInTz(cur, tzOff, tzName);
-    dtInput.value       = toDatetimeLocalInTz(cur, tzOff);
+    if (cur) {
+      valSpan.textContent = formatTimeInTz(cur, tzOff, tzName);
+      dtInput.value       = toDatetimeLocalInTz(cur, tzOff);
+    } else {
+      valSpan.textContent = 'Not set — click to enter';
+      dtInput.value       = '';
+    }
+    minusBtn.disabled = !cur;
+    plusBtn.disabled  = !cur;
   }
+
+  // Missing time: show the manual-entry input right away — there is nothing to display
+  // behind a click yet. Present time: keep the original collapsed-by-default behavior.
+  dtInput.style.display = cur ? 'none' : '';
   updateDisplay();
 
   minusBtn.addEventListener('click', function () {
+    if (!cur) return;
     cur = new Date(cur.getTime() - 15 * 60000);
     updateDisplay();
+    if (onChange) onChange();
   });
   plusBtn.addEventListener('click', function () {
+    if (!cur) return;
     cur = new Date(cur.getTime() + 15 * 60000);
     updateDisplay();
+    if (onChange) onChange();
   });
 
   valSpan.addEventListener('click', function () {
@@ -240,14 +262,19 @@ function makeTimeStepper(timeResult, testidBase) {
   });
 
   dtInput.addEventListener('change', function () {
+    var hadValue = !!cur;
     if (dtInput.value) {
       var parsed = fromDatetimeLocalInTz(dtInput.value, tzOff);
       if (!isNaN(parsed.getTime())) { cur = parsed; updateDisplay(); }
     }
-    dtInput.style.display = 'none';
+    // Once a value exists, collapse back to the click-to-edit display, same as before.
+    // While still missing (dispatcher closed the picker without entering anything valid),
+    // keep it open — there is nothing else to show.
+    if (cur) dtInput.style.display = 'none';
+    if (onChange && !!cur !== hadValue) onChange();
   });
   dtInput.addEventListener('blur', function () {
-    setTimeout(function () { dtInput.style.display = 'none'; }, 200);
+    setTimeout(function () { if (cur) dtInput.style.display = 'none'; }, 200);
   });
 
   row.appendChild(minusBtn);
@@ -479,6 +506,12 @@ async function openPostModal(loadId) {
   var startTimeResult = firstStop ? parsePatStopTime(firstStop.arrival) : null;
   var endTimeResult   = lastStop  ? parsePatStopTime(lastStop.arrival)  : null;
 
+  // Missing/unparseable (not a recognized-but-unmapped tzError — that's handled separately
+  // below with its own specific message) — recorded before the tzError check runs, since
+  // that check also nulls the result out for a different reason.
+  var startTimeMissing = !startTimeResult;
+  var endTimeMissing   = !endTimeResult;
+
   // Collect blocking errors
   var blockingErrors = [];
   if (!loadingTypeList) blockingErrors.push('Unknown loading type: «' + loadingTypeStr + '»');
@@ -491,12 +524,21 @@ async function openPostModal(loadId) {
     endTimeResult = null;
   }
 
-  // Default time results if parse failed
-  function fallbackTime(plusHours) {
-    return { date: new Date(Date.now() + plusHours * 3600000), tzName: 'UTC', tzOffset: 0 };
+  // EDGE CASE (no-silent-fallback rule, same as Payout, 2026-07-20): a missing/unparseable
+  // load time must not be silently replaced with a fabricated "now +Nh" value — that was
+  // this function's previous behavior (fallbackTime()) and posted a fictional availability
+  // window to Amazon with no operator awareness. Leave it empty instead (makeTimeStepper
+  // renders "Not set — click to enter" for a null timeResult) and surface one shared warning
+  // (ext-pat-times-warning, wired up below). Deliberately NOT pushed into blockingErrors —
+  // unlike loadingType/tzError (permanent for this modal instance, per "leave tzError
+  // handling as-is"), a missing time IS recoverable: Confirm is gated on it live via
+  // updateConfirmEnabled()/timesValid(), so the dispatcher can still enter both times
+  // manually and proceed.
+  if (startTimeMissing || endTimeMissing) {
+    logger.warn('patModal', 'openPostModal: load time(s) missing/unparseable — left empty, no fabricated default', {
+      loadId: loadId, startTimeMissing: startTimeMissing, endTimeMissing: endTimeMissing,
+    });
   }
-  if (!startTimeResult) startTimeResult = fallbackTime(1);
-  if (!endTimeResult)   endTimeResult   = fallbackTime(4);
 
   // --- Build modal DOM ---
   injectPatModalStyle();
@@ -603,8 +645,11 @@ async function openPostModal(loadId) {
   var timesRow = document.createElement('div');
   timesRow.className = 'pat-times-row';
 
-  var startStepper = makeTimeStepper(startTimeResult, 'ext-pat-start');
-  var endStepper   = makeTimeStepper(endTimeResult,   'ext-pat-end');
+  // onChange: updateConfirmEnabled (defined below, in the footer section) is referenced
+  // here via closure — safe despite the textual order since it's a hoisted function
+  // declaration, and it's only ever invoked later, on user interaction.
+  var startStepper = makeTimeStepper(startTimeResult, 'ext-pat-start', function () { updateConfirmEnabled(); });
+  var endStepper   = makeTimeStepper(endTimeResult,   'ext-pat-end',   function () { updateConfirmEnabled(); });
   var timesArrow   = document.createElement('div');
   timesArrow.className = 'pat-route-arrow';
   timesArrow.textContent = '→';
@@ -612,6 +657,13 @@ async function openPostModal(loadId) {
   timesRow.appendChild(startStepper.el);
   timesRow.appendChild(timesArrow);
   timesRow.appendChild(endStepper.el);
+
+  // Visible warning for the missing/unparseable-load-time edge case — same pattern as
+  // ext-pat-payout-warning. Shown/hidden live by updateConfirmEnabled()/timesValid().
+  var timesWarningEl = document.createElement('div');
+  timesWarningEl.setAttribute('data-testid', 'ext-pat-times-warning');
+  timesWarningEl.className = 'pat-times-warning';
+  timesWarningEl.textContent = 'Load times could not be read — enter start/end time manually';
 
   // --- Row 3a: stops / min mi / max mi / driver ---
   var numsA = document.createElement('div');
@@ -737,6 +789,7 @@ async function openPostModal(loadId) {
   // Assemble body
   body.appendChild(routeRow);
   body.appendChild(timesRow);
+  body.appendChild(timesWarningEl);
   body.appendChild(numsA);
   body.appendChild(numsB);
   body.appendChild(swingRow);
@@ -770,17 +823,23 @@ async function openPostModal(loadId) {
   confirmBtn.textContent = 'Confirm';
   confirmBtn.disabled = true; // enabled after city resolution + a valid payout
 
-  // Single source of truth for the missing-payout edge case: re-run on every payoutInput
-  // 'input' event and after city resolution finishes. blockingErrors (TZ / loading type)
-  // are permanent for this modal instance — nothing here can clear those.
+  // Single source of truth for the missing-payout and missing-time edge cases: re-run on
+  // every payoutInput 'input' event, every time-stepper change, and after city resolution
+  // finishes. blockingErrors (TZ / loading type) are permanent for this modal instance —
+  // nothing here can clear those.
   function currentPayoutValid() {
     var v = parseFloat(payoutInput.value);
     return !isNaN(v) && v > 0;
   }
+  function timesValid() {
+    return !!(startStepper.getDate() && endStepper.getDate());
+  }
   function updateConfirmEnabled() {
     var payoutOk = currentPayoutValid();
+    var timesOk  = timesValid();
     payoutWarningEl.hidden = payoutOk;
-    confirmBtn.disabled = blockingErrors.length > 0 || !originCityObj || !destCityObj || !payoutOk;
+    timesWarningEl.hidden  = timesOk;
+    confirmBtn.disabled = blockingErrors.length > 0 || !originCityObj || !destCityObj || !payoutOk || !timesOk;
   }
 
   footer.appendChild(statusEl);
@@ -910,6 +969,7 @@ async function openPostModal(loadId) {
     if (!loadingTypeList) { setStatus('Unknown loading type — cannot submit.', 'err'); return; }
     if (!originCityObj)   { setStatus('Origin city not resolved — cannot submit.', 'err'); return; }
     if (!destCityObj)     { setStatus('Destination city not resolved — cannot submit.', 'err'); return; }
+    if (!startStepper.getDate() || !endStepper.getDate()) { setStatus('Enter both start and end time — cannot submit.', 'err'); return; }
 
     confirmBtn.disabled = true;
     setStatus('Submitting…', '');

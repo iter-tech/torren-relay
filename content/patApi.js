@@ -183,11 +183,11 @@ async function resolvePATCity(input) {
   }
   var city   = parsed.city;
   var state  = parsed.state;
-  if (!city) {
-    logger.error('patApi', 'resolvePATCity: empty city from parseBoardStop', { boardStopStr: boardStopStr });
-    return null;
-  }
   try {
+    if (!city) {
+      logger.error('patApi', 'resolvePATCity: empty city from parseBoardStop', { input: input });
+      return null;
+    }
     var csrf = getCsrfToken();
     var resp = await fetch(CITY_SEARCH_BASE + encodeURIComponent(city), {
       method: 'GET', credentials: 'include',

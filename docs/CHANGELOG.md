@@ -2,6 +2,160 @@
 
 ## [Unreleased]
 
+### 2026-07-20 — FIX: in-flight detection tick no longer outlives a logout
+
+Files changed: `content/content.js`.
+
+From the read-only logic audit: `runDetectionPipeline` (spans `await checkPriceSurge`,
+`await playAlert`, `await storage.get`, `await sleep(800)`) and `orchestratorTick` (spans
+`await sleep(REFRESH_SETTLE_MS)`) never re-checked the login gate or `tabState.get('running')`
+after entry. Since logout became live (no reload needed — see the 2026-07-20 TASK 1 entry
+below), a logout landing mid-tick let the in-flight tick finish anyway: it could still
+highlight cards, play sound, auto-open a card, and call `showInlinePanel()` — creating a
+fresh `#ext-inline-panel` — **after** `deactivateExtensionUI()` had already torn everything
+down.
+
+Fix:
+
+- New `shouldContinue()` — the single shared helper requested, checking both
+  `isAuthGateActiveSync()` (login gate) and `tabState.get('running')`. Used at every
+  checkpoint below instead of duplicating the condition.
+- A checkpoint was added after **every** `await` inside `runDetectionPipeline` (after
+  `checkPriceSurge`, after `playAlert`, after each `storage.get(AUTO_OPEN)` read in both the
+  new-loads and surge branches, after each `sleep(800)` settle in both branches — the exact
+  spot the bug report identifies, right before `showInlinePanel()`) and inside
+  `orchestratorTick` (after `sleep(REFRESH_SETTLE_MS)`, before calling
+  `runDetectionPipeline`). Each bails out (`return`, no further side effects) the moment
+  `shouldContinue()` is false.
+- New `clearPipelineDom()` — wipes `removeInlinePanel()` + `clearHighlights()` +
+  `clearSurgeHighlights()`. Called both by every bail-out checkpoint above **and** by
+  `deactivateExtensionUI()` (replacing its three separate calls). This is what makes
+  deactivate authoritative per instruction 3: `checkPriceSurge()` applies surge highlights
+  *internally*, synchronously, before its own awaited `playAlert()` resolves — i.e. before
+  `runDetectionPipeline`'s very first checkpoint even runs — so a bail-out there could
+  otherwise leave a surge highlight/badge behind. Every function `clearPipelineDom()` calls
+  is already a no-op when there's nothing to clear, so it's safe to call unconditionally at
+  every checkpoint regardless of whether that particular checkpoint's gap actually left
+  anything behind.
+- `runDetectionPipeline` is shared by both `orchestratorTick` (tick path) and
+  `runObserverPipeline` (loadObserver.js, MutationObserver path) — adding the checkpoints
+  inside the shared function protects both callers without touching `loadObserver.js`.
+
+**Verified** (no browser needed — pure async-timing logic, not DOM-rendering-dependent):
+loaded the real `content/content.js` in a Node `vm` context with `tabState`/
+`isAuthGateActiveSync`/`checkPriceSurge`/`openTopNewLoad`/`showInlinePanel`/etc. stubbed, and
+ran the exact bug scenario — called `runDetectionPipeline('tick')`, let it reach the 800ms
+settle wait (past `checkPriceSurge`, `highlightNewLoads`, `playAlert`, and a successful
+`openTopNewLoad`), then flipped the auth gate closed partway through that wait, simulating a
+logout landing mid-tick. Confirmed: `showInlinePanel` is **not** called, while
+`removeInlinePanel`/`clearHighlights`/`clearSurgeHighlights` all fire from the bail-out.
+Also confirmed: the normal case (gate stays active) is completely unaffected —
+`showInlinePanel` still fires exactly as before; a gate already closed *before* the tick
+starts bails at the very first checkpoint (no highlighting at all); and `tabState.get('running')`
+flipping false (a sidebar pause, not just a logout) triggers the same bail-out, since
+`shouldContinue()` checks both conditions.
+
+**Still needs manual browser testing** (not exercised here — this only proves the
+async-control-flow logic, not real DOM/timing behavior in a live tab): log in, start the
+loop on a real Relay tab, and log out via the popup at a moment timed to land mid-tick
+(the ~1.2s refresh-settle window or the ~800ms post-open-settle window are the two
+realistic targets). Confirm nothing appears afterwards — no inline panel, no highlighted
+cards, no surge badge — and that this holds up across several repeated attempts, since the
+exact timing window is hard to land deliberately by hand. See docs/TEST_CASES.md.
+
+No other finding from the audit was touched.
+
+### 2026-07-20 — FIX: PAT modal no longer fabricates a load's start/end time
+
+Files changed: `content/patModal.js`.
+
+From the read-only logic audit: when `parsePatStopTime()` returned `null` (missing or
+unrecognized-format arrival time — distinct from the already-handled `tzError` case),
+`startTimeResult`/`endTimeResult` were silently replaced with `fallbackTime(1)` /
+`fallbackTime(4)` — i.e. "now +1h" / "now +4h" — with no warning, and Confirm stayed enabled.
+This posted a fabricated availability window unrelated to the load's real pickup/delivery
+time, with no operator awareness. Applied the same no-silent-fallback rule already used for
+Payout:
+
+- `fallbackTime()` removed entirely — a missing/unparseable time is no longer given any
+  default value.
+- `makeTimeStepper()` now accepts `timeResult === null`: renders "Not set — click to enter"
+  in place of a time, disables the ±15min step buttons (nothing to step from), and shows the
+  manual-entry `datetime-local` input immediately (previously hidden behind a click) since
+  there's nothing to display yet. The normal (non-null) path is unchanged — same collapsed
+  display, same step behavior.
+- New `ext-pat-times-warning` element under the time-steppers row: "Load times could not be
+  read — enter start/end time manually". Shown/hidden live by `timesValid()` (new — checks
+  `startStepper.getDate() && endStepper.getDate()`), wired into `updateConfirmEnabled()`
+  alongside the existing payout/city checks.
+- Confirm is gated on `timesValid()` **live**, not via the static `blockingErrors` array —
+  unlike `loadingType`/`tzError` (permanent for the modal instance, left as instructed), a
+  missing time is recoverable: `makeTimeStepper()` gained an optional `onChange` callback,
+  fired on every stepper interaction, wired to `updateConfirmEnabled()` from both time
+  steppers' construction call sites. The dispatcher can type both times manually and Confirm
+  re-enables once every other condition is also met.
+- Confirm-click handler gained the same redundant safety-net check already used for the
+  other fields: `if (!startStepper.getDate() || !endStepper.getDate()) { ...; return; }`.
+- tzError handling itself is unchanged (still its own specific "Unrecognized timezone: «X»"
+  message, still permanently blocking) — removing the shared `fallbackTime()` means a
+  tzError-nulled time now also renders as "Not set" instead of a fabricated time, which is a
+  side effect of removing the fallback, not a change to tzError detection/messaging.
+
+**Verified** (no browser needed — this is DOM-structure logic, not page-dependent): loaded
+the real `content/patModal.js` in a Node `vm` context with a minimal hand-rolled fake DOM
+element (`createElement`/`setAttribute`/`style`/`addEventListener`/`appendChild`/`value`/
+`disabled` — no jsdom available in this environment) and exercised `makeTimeStepper()`
+directly. 15/15 checks passed: a `null` input never fabricates a date and doesn't throw;
+the empty-state label and disabled step buttons render correctly; stepping while empty is a
+no-op; manually entering a datetime-local value correctly sets the date, fires `onChange`
+exactly once, and collapses the input back to the normal display; and — critically — the
+**normal (real time present) path is provably unaffected**: same immediate correct date,
+enabled step buttons, and default-collapsed input as before this change.
+
+**Still needs manual browser testing** (not exercised here): the full modal integration —
+does `ext-pat-times-warning` actually render with correct placement/styling in the live PAT
+modal; does `ext-pat-confirm` genuinely stay disabled/re-enable in the real DOM once a real
+load with a missing/malformed arrival time is opened; does typing into the real
+`datetime-local` picker (not a simulated `change` event) behave the same as the simulated
+one; and interaction timing between `timesValid()`, `currentPayoutValid()`, and the async
+city-resolution completion. See docs/TEST_CASES.md for the exact steps.
+
+No other finding from the audit was touched.
+
+### 2026-07-20 — FIX: resolvePATCity crash on empty city (undefined `boardStopStr`)
+
+Files changed: `content/patApi.js`.
+
+From the read-only logic audit: `resolvePATCity()`'s empty-city guard logged
+`{ boardStopStr: boardStopStr }` — `boardStopStr` was never declared anywhere in the
+function (the parameter is `input`), and this line sat **before** the function's own `try`
+block starts. Any city that parsed down to an empty string (reachable — the function already
+has three layered fallback strategies for messy board text, implying this happens in
+practice) threw an uncaught `ReferenceError` at that point. Since `patModal.js` calls this via
+`Promise.all([resolvePATCity(origin), resolvePATCity(dest)])`, one rejected promise failed the
+whole `Promise.all` — discarding a sibling city that may have resolved successfully — and
+replaced the specific "Could not resolve city: «X, ST»" message with the generic "City
+resolution error — check logger output" from `patModal.js`'s outer catch.
+
+Fix: the log call now references `input` (the real parameter), and the empty-city check was
+moved from before the `try` block to just inside it, so a failure in the logging call itself
+(however unlikely) can no longer break city resolution — it falls through to the function's
+existing `catch (e) { logger.error(...); return null; }` instead of propagating uncaught.
+
+**Verified** (no browser needed — this is pure JS logic, not DOM-dependent): loaded the real
+`content/patApi.js` in a Node `vm` context with `fetch`/`document` stubbed, and ran the exact
+scenario from the audit — `Promise.all([resolvePATCity('') /* empty city */,
+resolvePATCity({ city: 'MEMPHIS', state: 'TN' }) /* sibling */])`. Confirmed: no throw;
+`resolvePATCity('')` resolves to `null` with exactly one `logger.error` call carrying
+`{ input: '' }`; the sibling still resolves to a full match object (`displayValue: 'MEMPHIS, TN'`)
+— it is no longer discarded. Traced (not executed — no browser) through `patModal.js`'s
+unmodified `cityErrors` branch to confirm this now surfaces the specific "Could not resolve
+city: «X, ST»" message instead of the generic fallback; this specific downstream
+rendering was not exercised in an actual popup/modal, per docs/CLAUDE.md's Verification
+rules — see docs/TEST_CASES.md for the manual browser check still needed.
+
+No other finding from the audit was touched.
+
 ### 2026-07-20 — TASK 2: Verification rules added to docs/CLAUDE.md
 
 New "Verification rules" section (between "Code rules" and "Communication"):
