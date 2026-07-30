@@ -2,6 +2,380 @@
 
 ## [Unreleased]
 
+### 2026-07-30 — Accordion leg cards: full-width action bar, light leg-header colour, fixed-column route alignment
+
+**Ask (CSS-only — no HTML/JS changes):** (1) the bottom action bar had a 10px horizontal
+inset instead of spanning the card edge-to-edge; (2) the leg-header bar was dark navy —
+replace with a light grey-green-blue and invert its text/icon colors accordingly; (3) the
+route group (badge/code/arrow/badge/code) had no fixed column structure, so arrows landed at
+different x-positions leg to leg depending on city-name length; (4) map every new color to
+an existing dark token and report any leaks.
+
+**State reported before changing (per instruction):**
+- Leg-header background token: `var(--ext-leg-navy)`, `utils/designTokens.js:44`,
+  `#1B3A57`, `:root`-only (deliberately no dark override — see its own comment: `nightMode.js`
+  already overrides `.ext-seg-header`'s background directly).
+- Action bar spacing: `.ext-action-bar{padding:5px 10px;...width:100%;box-sizing:border-box;...}`
+  — already full-width at the box level; the 10px was a content inset, not a width shortfall.
+- Route group markup: `.ext-seg-route` (flex, `gap:8px`) contains, in DOM order, `.ext-stop-num`
+  (origin badge) → `.ext-route-origin` (code) → `.ext-route-arrow` → `.ext-stop-num` (dest
+  badge — **same class as the origin badge, no distinct class**) → `.ext-route-dest` (code).
+  No fixed widths; a short code shifts everything after it.
+
+**Implementation (`content/inlinePanel.js`, `content/nightMode.js`, `utils/designTokens.js`):**
+- **Action bar:** `.ext-action-bar` horizontal padding `10px → 0`; the wrapper's own
+  background/border already spanned full width (`width:100%`/`border-box`), so this was
+  purely a content-inset fix, not a width fix. New
+  `.ext-action-bar > .ext-action-btn:first-child{margin-left:16px;}` puts the first icon
+  16px from the card's left edge, per spec ("icons keep their own internal padding" —
+  `.ext-action-btn` itself, 28×28/`padding:0`, is untouched). **Judgment call, flagged:**
+  the right edge (where Fast Book sits, via its own `margin-left:auto`) is now flush against
+  the card's right border with zero gutter — it had the same 10px as the left side before.
+  Not compensated, since only the left-start position was specified; revisit if symmetric
+  spacing is wanted.
+- **Leg-header colour:** token renamed `--ext-leg-navy` → `--ext-leg-header-bg` (no longer
+  navy) and recolored `#1B3A57 → #DCE6E9` in `designTokens.js`. `.ext-seg-header` gets a new
+  `border-bottom:1px solid #C4D2D6` and its base `color` flips `#ffffff → #1F3A45`. Per-element
+  colors set explicitly: `.ext-route-origin`/`.ext-route-dest` → `#1F3A45`/`font-weight:600`;
+  `.ext-seg-dist` → `#4A6570`; chevron (`.ext-seg-header .ext-seg-arrow`) → `#4A6570` (new —
+  previously unset, relying on inheriting the header's own color). `.ext-route-arrow` (the
+  connecting "→", not spec'd explicitly) inferred to `#4A6570` to match the distance/duration
+  weight — **flagged as a judgment call**, easy to change if a different tone was intended.
+  Status pills (`.ext-seg-action`/`.ext-seg-loaded`/`.ext-seg-empty`) intentionally
+  **untouched** per spec ("keep their existing pill colours") — **flagged for manual visual
+  check**: the Empty pill's background (`#F3F4F6`) is close in lightness to the new header
+  background (`#DCE6E9`) and may read as low-contrast without a border; not added since it
+  wasn't asked for.
+- **Route group alignment:** `.ext-seg-route` converted from flex to `display:grid;
+  grid-template-columns:170px 28px 170px` (origin / arrow / destination), `margin-left:24px`
+  (on top of `.ext-seg-header`'s own 16px padding = 40px total from the card edge, per spec).
+  Since the two badges share one class, they're disambiguated by DOM position —
+  `.ext-seg-route > .ext-stop-num:nth-child(1)` (origin) and `:nth-child(4)` (destination) —
+  each placed in the SAME grid-column as its adjacent code span (badge + code = one visual
+  170px cell), with `.ext-seg-route > *{grid-row:1}` forcing every child onto one row (without
+  it, the grid auto-placement algorithm bumps a same-column item to a new row instead of
+  layering it into the shared cell). The code spans keep default `justify-self:stretch` +
+  `margin-left:26px` (18px badge + 8px gap), which resolves to a definite `144px` box — that's
+  what makes `overflow:hidden;text-overflow:ellipsis;white-space:nowrap` actually truncate
+  long names ("GAHANNA, OH") instead of overflowing; replaces the old multi-line
+  `overflow-wrap`/`word-break`. The arrow gets its own `28px` column, `justify-self:center` —
+  this is what makes every leg's arrow land in one vertical line, the core ask. Removed the
+  now-dead `.ext-seg-route .ext-stop-num{margin-right:0}` override (existed only to cancel
+  the old flex gap; the grid's spacing comes from the code span's margin, so it did nothing
+  either way once the flex gap was gone).
+  **Known trade-off, flagged:** the route group's minimum content width is now a fixed
+  `170+28+170+24(indent)=392px`, inside a header column that's `34%` of the card's width — it
+  only fits without overlapping the adjacent header columns on cards ≥ ~1150-1200px wide.
+  This is an inherent consequence of "fixed pixel alignment inside a fluid header," not a bug;
+  needs the manual narrow-card check below.
+- **Dark mode (`content/nightMode.js`):** `.ext-seg-header`'s background/border/color,
+  `.ext-route-arrow`, `.ext-seg-dist`, the status pills, and `.ext-action-bar` already had
+  `!important` overrides from the earlier 2026-07-30 redesign — untouched, still correct.
+  **Two NEW overrides added**, because a plain (non-`!important`) light-mode rule beats
+  inheritance in every theme, not just light — without these, the new hex would have leaked
+  straight into dark mode:
+  - `.ext-route-origin`/`.ext-route-dest` → `DK_TEXT` (previously these had no explicit color
+    at all and simply inherited the header's; now that light mode gives them one, dark mode
+    needs its own or it would inherit the new `#1F3A45` — near-unreadable dark-on-dark against
+    the `DK_HIGH` header background).
+  - chevron (`.ext-seg-header .ext-seg-arrow`) → `DK_MUTED` (same leak risk, same fix,
+    mapped to the same token already used for the connecting arrow — both are secondary
+    glyphs, not primary text).
+
+**Verified (no browser in the build environment — see TEST_CASES.md for the manual list):**
+44/44 on a harness that runs the ACTUAL `injectPanelStyle()`/`buildNightCss()` functions (not
+re-implementations) and asserts on the real generated CSS string: brace balance; the token
+rename is complete (`--ext-leg-header-bg` present, `--ext-leg-navy` fully gone); every color
+value listed above appears on the correct selector; the 170/28/170 grid template and 24px
+margin math; every child's exact `grid-column`/`grid-row` placement; the dead badge-margin
+rule's removal; the action-bar padding and first-icon margin; and — the main risk in a
+CSS-only, no-DOM-inspection task — a simulated cascade proof that each of the two new
+`nightMode.js` overrides actually wins against its corresponding light-mode rule (not just
+"a rule exists somewhere," but that it resolves to the dark token, not the light hex).
+
+**Ask:** the paused banner read `"Paused — Amazon rate limit. Retrying in 278s"`. That number
+is misleading — it is *our own* backoff timer, not Amazon's unblock time. It restarted from
+scratch on every page reload, and reaching zero changed nothing visible. Remove the number,
+keep the retry/backoff machinery untouched, replace the copy, add an "i" tooltip with the
+fuller explanation, and keep the banner up until a request actually succeeds.
+
+**Where the countdown came from (reported before changing it):**
+`content/sidebar.js` → `updateRateLimitDisplay()` built the string as
+`'Paused — Amazon rate limit. Retrying in ' + formatCountdown(backoffUntil - now)`, redrawn
+every second by a dedicated `setInterval(updateRateLimitDisplay, 1000)` stashed on the
+container as `_rateLimitPollInterval`. `backoffUntil` is written by `background.js`
+`reportResult()` — `Date.now() + jitter(5/10/20/40/80s, capped 300s)`.
+
+**Implementation:**
+- **`background.js`** — new `rateLimited` boolean on the `extRateLimiterState` record. Set
+  `true` on every reported failure, `false` only on a reported 2xx. It is a **display flag
+  only**: no pacing, permit, or backoff code path reads it. Needed because `backoffUntil`
+  answers a different question than the banner does — the timer expiring means "we may retry
+  now", never "Amazon lifted the block". **Backoff timing itself is unchanged** (verified by
+  A/B against the committed file, see below).
+- **`content/sidebar.js`**
+  - `formatCountdown()` deleted; banner text is now static and split into
+    `ext-rate-limit-text` (the sentence, ellipsised when cramped) plus a trailing
+    `ext-rate-limit-info` "i" carrying `ext-rate-limit-tooltip`. The banner became a flex
+    container so the icon sits immediately after the sentence instead of being pushed to the
+    far right by `flex:1`.
+  - New `isRateLimitPaused()` reads the sticky flag, with a fallback to the old timer test
+    for state written by a build predating the field (transient — `background.js` writes the
+    field on the next reported result). `adoptRateLimitState()` is now the single copy point
+    shared by the async seed and the `onChanged` listener, so the two cannot drift.
+  - **The 1s `setInterval` is gone**, along with `_rateLimitPollInterval`. Nothing needs a
+    clock any more: every paused-state transition arrives as a `chrome.storage.onChanged`
+    event. `content.js`'s `deactivateExtensionUI()` dropped the matching `clearInterval`.
+  - `renderSharedRateStatus()` now shares `isRateLimitPaused()` instead of computing its own
+    `backoffActive`, so row 2 and the banner can never disagree about being paused.
+  - **`#ext-sidebar` changed from `overflow:hidden` to `overflow:visible`.** Both info
+    tooltips are absolutely positioned *below* the bar and were being clipped away entirely
+    — meaning the pre-existing `ext-memory-tooltip` has never actually been visible either;
+    this fixes that too. `position:fixed` would not have escaped the clip, because the bar's
+    `transform` makes it the containing block for fixed descendants. Nothing depended on the
+    clip (the scanline has its own `overflow:hidden`). Also added
+    `max-width:calc(100vw - 16px)`, since the much longer banner text would otherwise grow
+    the auto-width, centre-anchored bar off both edges of a narrow viewport.
+  - Info-icon geometry, `:focus-visible` ring, tooltip box, and the night-mode tooltip
+    override are now shared selectors covering both icons rather than duplicated rules. The
+    rate-limit "i" overrides fill/border to `currentColor` so it reads as part of the amber
+    banner (and therefore needs no night-mode override — that amber is already
+    theme-independent by design).
+- **`utils/storage.js`** — documented the full `extRateLimiterState` shape including the new
+  field.
+
+**Behaviour change beyond the literal ask, flagged deliberately:** play/pause now **stays
+visible** while paused (it used to be hidden alongside the slider). Forced by requirement 5:
+once the banner only clears on a successful response, and a stopped extension issues no
+requests, hiding the one control that can restart it could strand the dispatcher with a
+permanent banner and no way to act on it. Slider and slider-value still hide as before.
+
+**Verified (no browser in the build environment — logic only, see TEST_CASES.md):** 50/50 on
+a DOM-stub harness driving the real `buildSidebar()` (exact banner and tooltip copy, no
+digits-plus-`s` anywhere in the banner, show on failure / **stay shown after the backoff
+timestamp passes** / hide on the success record, reload re-seed, legacy-state fallback,
+hover + focus + tap tooltip toggling, testids/roles, and that exactly one interval — the 7s
+memory poll — is still created). 13/13 on `background.js`, including an A/B that runs the
+identical failure sequence against the committed file and this one with jitter pinned:
+schedules match exactly (5/10/20/40/80s → capped 300s → reset to step −1), and the sticky
+flag provably does not gate permits. **CSS layout/appearance is not machine-verifiable
+here** — see the manual list in TEST_CASES.md TC-RATELIMIT-3.
+
+### 2026-07-30 — Shared-limit UX: mode-aware slider label + live "Active tabs: N" status line
+
+**Ask:** the refresh-speed slider showed e.g. "2.0s" regardless of shared-limit mode, even
+though shared mode paces tabs differently (each tab's real cadence is `interval × N`, not
+`interval`) — confusing. Make the slider's meaning explicit per mode, and add a live status
+line showing N and the derived per-tab cadence, sourced from wherever the permit system
+already tracks N.
+
+**Wiring reported before coding (per instruction) — and a real gap found:**
+- The slider's visible text was just the bare number (`sliderValue.textContent =
+  seconds.toFixed(1) + 's'`), written in 3 places (async seed, live cross-tab sync, the
+  slider's own `input` handler) — no descriptive label existed; only `title`/`aria-label`
+  tooltips carried any context.
+- **"The same source the permit system uses for N" doesn't exist.** Re-read `background.js`
+  in full — there was, and is, zero tab-count tracking. The previous pacing fix
+  (2026-07-30, earlier same-day entry) deliberately achieves `interval × N` per-tab cadence
+  through pure FIFO contention on one shared floor, with no tab count anywhere. Built a new
+  registry now, specifically for this display — pacing itself is untouched.
+- `#ext-sidebar` was a fixed single-row, 40px bar with `overflow:hidden` — no capacity for a
+  second line. Restructured into a 2-row flex-column layout.
+
+**Implementation:**
+- **`background.js`** — new active-tab registry, `{tabId: lastSeenAt}` under
+  `extActiveTabs`, persisted (survives SW eviction, same reasoning as `RATE_LIMITER_KEY`).
+  Heartbeated on every existing `REQUEST_PERMIT` call (`sender.tab.id` — no new message
+  needed for this). Immediate removal on `chrome.tabs.onRemoved` (tab closed) and on a new
+  `RELEASE_TAB` message. A 20s stale-entry prune is a safety net only (crash/navigate-away
+  without a clean event) — primary removal is always immediate. Serialized through its own
+  queue-tail (mirroring `permitQueueTail`) to avoid a read-modify-write race between two
+  tabs heartbeating near-simultaneously. Derived count written to `extActiveTabCount`
+  (`{count:N}`) on every registry change — this is the ONE thing content scripts read;
+  nothing recomputes N independently.
+- **`content.js`** — `stopOrchestrator()` now sends `{type:'RELEASE_TAB'}` (fire-and-forget).
+  **Judgment call, flagged for review:** this fires on BOTH logout AND the dispatcher
+  manually pausing (Play/Pause off) — the task only named open/close/logout, but a paused
+  tab isn't in the round-robin, so counting it would make "each tab refreshes every X.Xs"
+  wrong. `deactivateExtensionUI()` now also `document.body.style.removeProperty('padding-
+  top')`, since the bar's height (and thus body padding) is now set via inline JS style, not
+  purely the injected `<style>` tag — removing just the tag would no longer fully revert
+  the page.
+- **`utils/storage.js`** — new `ACTIVE_TAB_COUNT_KEY = 'extActiveTabCount'` (matching
+  `background.js`'s own duplicated constant, same reasoning as `RATE_LIMITER_KEY`: live
+  coordination state, not a preference, not in `STORAGE_KEYS`, not cleared by Reset).
+- **`content/sidebar.js`** — `#ext-sidebar` is now `display:flex;flex-direction:column`
+  (was a single fixed-height row): row 1 (`.ext-sidebar-row1`, all existing controls,
+  unchanged) plus row 2 (`data-testid="ext-shared-rate-status"`, new, hidden by default).
+  Bar height is two discrete states (40px, or 40+20px) rather than a measured
+  `getBoundingClientRect()`, so body padding can be set synchronously with no reflow-timing
+  race. `renderModeLabel()`: OFF → `"Refresh every X.Xs"`, ON → `"Shared rate: 1 refresh /
+  X.Xs"`. `renderSharedRateStatus()`: visible only when mode ON **and** backoff is not
+  active — **requirement 4 interpreted as**: during backoff, row 2 hides rather than
+  literally hosting the countdown text, since row 1's existing banner already fully takes
+  over the messaging (showing the same information in two places at once would be
+  redundant/conflicting). N===1 gets the singular phrasing exactly as specified ("1 active
+  tab → refreshing every X.Xs"); N>1 gets "Active tabs: N → each tab refreshes every X.Xs".
+  `_sharedLimitEnabled`/`_activeTabCount` are new local caches (sidebar.js didn't
+  previously know the mode at all), seeded + live-synced via the same
+  `chrome.storage.onChanged` pattern already used for the interval and backoff state — no
+  polling message added; `extActiveTabCount` changes push instantly, same as backoff does.
+  **Bug found and fixed while implementing, not requested but necessary**: the file still
+  had a static `body{padding-top:44px!important}` CSS rule from the original single-row
+  design — removed it (redundant/misleading now that JS always sets this dynamically) and
+  added a synchronous `syncBodyPadding(false)` call right after the DOM is built, so the
+  page is never unpadded even for the brief window before the async storage seed resolves.
+
+**Verified (Node `vm`, real logic — no browser available, see Verification rules):**
+- 14/14 functional checks on `background.js`'s new registry: heartbeat registers/dedupes a
+  tab; `chrome.tabs.onRemoved` and `RELEASE_TAB` both drop count immediately (not just
+  decrement — confirmed the actual tab id is gone from the registry); stale-entry pruning
+  works; pacing math is provably unaffected by the registry's presence (still ~5s/~300ms
+  waits as before, per the earlier pacing-fix tests).
+- **17/17 real functional checks against the actual `sidebar.js` source**, not just
+  structural/regex checks: built a minimal but functioning fake DOM, ran the real
+  `buildSidebar()`, and asserted on the real elements it created — OFF-mode label text,
+  ON-mode label text, N=1 singular phrasing, N>1 plural phrasing with correct `interval×N`
+  math, live re-render on `extActiveTabCount` changes (N: 1→4→1, catching any stale-text
+  bug), live mode toggle with no reload, and backoff correctly hiding row 2 while showing
+  the existing banner — plus body padding transitioning between 44px/64px correctly in
+  every scenario.
+
+**NOT verified — needs manual browser testing (no browser available in this environment):**
+1. Visual check of the two-row bar — spacing, alignment, no clipping/overlap with the
+   memory indicator/tooltip, in both themes (Night Mode on/off).
+2. **The core ask**: open 2+ real tabs, confirm "Active tabs: N" updates live as tabs are
+   opened and closed, with no stale/lagging count and no page reload needed.
+3. Confirm N also updates live when a tab logs out or the dispatcher pauses it (Play/Pause
+   off) — the paused-tab exclusion is a judgment call flagged above; if that's not the
+   intended behavior, it's a small, isolated change (drop the `RELEASE_TAB` send from the
+   pause path, keep it for logout only).
+4. Confirm page content doesn't visibly jump/flicker when row 2 appears/disappears (mode
+   toggle, entering/leaving backoff) — the height-swap is instant in the model, but real
+   paint/reflow timing hasn't been observed.
+5. Confirm `document.body`'s padding-top is fully cleared (page reverts to untouched) after
+   a real logout, not just structurally confirmed via source inspection.
+
+### 2026-07-30 — Leg header redesign (CSS-only): dark navy bar, pill badges, column-aligned grid
+
+**Ask:** CSS-only polish pass on the segment leg header and expanded body, matching a
+mockup goal (dark navy header, white body, pill status badges), with no HTML/JS structure
+changes — all elements already exist.
+
+**Wiring reported before coding (per instruction):**
+- `.ext-seg-header` was `display:flex`, no grid — `margin-left:auto` on `.ext-seg-dist`
+  consumed all free space between the left route group and everything after it, clustering
+  distance/duration + load-type + status + chevron at the right edge and leaving an empty
+  gap in the middle on wide cards. That's the reported bug.
+- `.ext-inline-panel__table` uses 4 fixed `nth-child` percentage columns: Stop 34% /
+  Equipment-Id 18% / Arrival 24% / Departure 24% (sums to 100%, no chevron column).
+- The header's 5 DOM children (`.ext-seg-route`, `.ext-seg-dist`, `.ext-seg-action`,
+  `.ext-seg-status`, `.ext-seg-arrow`) already line up 1:1 with the table's 4 columns plus
+  a trailing chevron, in DOM order — so a matching grid needed zero HTML changes.
+- **Gap flagged, not fixed:** no "LEG N" text element exists anywhere in the DOM (a
+  `.ext-seg-title` that may have held something like it was removed in the 2026-07-20
+  polish pass — see inlinePanel.js's own code comment at the time). Only a numeric badge
+  circle (`.ext-stop-num`) exists. Requirement 2's "uppercase the LEG N label" has nothing
+  to apply to — not implemented, since fabricating one via CSS `content` would need a data
+  attribute that doesn't exist (and arguably strains "no HTML structure changes"). Flagged
+  for the user to decide: add the element (JS/HTML change, out of scope for this CSS-only
+  pass) or drop the requirement.
+
+**Implementation (`content/inlinePanel.js`, `content/nightMode.js`, `utils/designTokens.js`
+— all CSS-only, no `buildPanelElement()`/`buildSegmentTable()` changes):**
+- **`.ext-seg-header` → `display:grid`**, `grid-template-columns:34% 18% 24% calc(24% -
+  24px) 24px`. Columns 1-3 exactly mirror the table's own percentages; column 4's *left*
+  edge still lines up with the table's Departure column (only its right edge is trimmed by
+  24px, carved out via `calc()`), and that 24px becomes column 5 — a genuinely separate,
+  narrow trailing cell for the chevron, which the table has no equivalent of. `justify-
+  items:start` keeps every item left-aligned/content-sized in its cell (matching the
+  table's own left-aligned cell text) instead of stretching to fill it. Verified with real
+  arithmetic (not just visual guessing) at 600px/900px/2000px card widths: header and table
+  column edges land within floating-point tolerance of each other at every width, and the
+  grid's total width matches the container exactly (no overflow) — see verification below.
+  **Why the alignment actually works:** `.ext-seg-header` (`padding:10px 16px`) and
+  `.ext-seg-body` (`padding:0 16px 12px`, see below) now share the exact same 16px
+  left/right inset, so their content boxes — against which grid/percentage widths resolve —
+  start at the same x-offset and have the same width.
+- Background `var(--ext-leg-navy)` (new token, `#1B3A57`, added to `utils/designTokens.js`'s
+  `:root` — deliberately no `html.ext-night` counterpart, see that file's comment: dark mode
+  already themes this element via `nightMode.js`'s own `DK_HIGH` token with `!important`,
+  which is documented there as "segment headers" in its own elevation ramp). Text white,
+  weight 600, size 12px, letter-spacing 0.3px, padding `10px 16px`.
+- Left group (`.ext-seg-route`): gap 6px → 8px per spec; dropped `flex:0 1 auto` (meaningless
+  on a grid item, was flex-only).
+- **Contrast fix required by the background change:** `.ext-route-arrow` and `.ext-seg-dist`
+  both had dark-grey `var(--ext-n400)`/`var(--ext-n500)` text, correct against the old light
+  grey header but unreadable against the new dark navy — changed to muted-white `rgba(255,
+  255,255,.55)` / `rgba(255,255,255,.72)`. `.ext-route-origin`/`.ext-route-dest` had no
+  explicit color and correctly inherit the new white from the container — no change needed.
+- **`.ext-seg-body`**: `background:#FFFFFF` (explicit now, was previously only implicit via
+  inherited `var(--ext-surface)`, which happens to already equal white in light mode —
+  making it explicit matches the literal ask and doesn't depend on that coincidence
+  continuing), `padding:0 16px 12px` — `.ext-seg-body` is the table's direct (and only)
+  parent, so it doubles as "the table wrapper"; no separate wrapper element exists to target.
+- **Pill badges**: `.ext-seg-action` (Live/Drop) `background:#E1EFFE;color:#1E429F`;
+  `.ext-seg-loaded` `background:#DEF7EC;color:#03543F`; `.ext-seg-empty`
+  `background:#F3F4F6;color:#374151`; shared mechanics (`border-radius:9999px;padding:2px
+  10px;font-size:11px;font-weight:600`) on `.ext-seg-action`/`.ext-seg-status` (the base
+  class `.ext-seg-loaded`/`.ext-seg-empty` share). Light pill on the dark header bar is the
+  intended look — these are exact spec hex, not theme tokens, deliberately.
+- **Table typography**: `th` → 11px, letter-spacing 0.5px, color `#6B7280`, background
+  `#F9FAFB`, border-bottom `#E5E7EB` (was 10px/0.4px/`var(--ext-n500)`/`var(--ext-n100)`/
+  `var(--ext-n200)`). `td` border-bottom → `#F3F4F6` (was `var(--ext-n200)`) — still no
+  vertical column borders (none were ever added, unchanged). Stop code `<b>` → 15px/600/
+  `#111827` (was 13px/`var(--ext-n700)`). `.ext-stop-addr` → 13px/400/`#6B7280` (was
+  11px/`var(--ext-n500)`).
+- **Night Mode (`content/nightMode.js`)**: verified per requirement 6.
+  - Already correct, no change needed: `.ext-seg-header` (background/text via `DK_HIGH`/
+    `DK_TEXT`), `.ext-stop-num`, `.ext-route-arrow`, `thead th`, `tbody tr`/`td` — all
+    pre-existing `!important` overrides, confirmed to still apply cleanly against the new
+    light-mode hex (they don't reference the light values at all, so nothing to break).
+    `.ext-seg-body`'s new explicit `#FFFFFF` is caught by the existing blanket
+    `body *{background-color:transparent !important}` universal reset — no leak, renders
+    transparent over the panel's own dark overlay background in dark mode.
+  - **Two real gaps found and fixed** (pre-existing, not introduced by this pass, but
+    directly relevant to the "typography hierarchy" ask): `.ext-seg-dist` and
+    `.ext-stop-addr` had no dark-mode color override at all, so they fell through to the
+    universal rule's primary `DK_TEXT` instead of a muted secondary tone — added explicit
+    `DK_MUTED` overrides for both.
+  - **New elements needing coverage** (didn't exist as pill badges before): added
+    `.ext-seg-loaded`/`.ext-seg-empty`/`.ext-seg-action` background overrides, reusing
+    existing dark tokens only — `rgba(55,176,111,.18)` (derived directly from the existing
+    `DK_SUCCESS` RGB, not a new arbitrary color) for Loaded, `DK_OVERLAY` (already the
+    panel's own surface color) for Empty, `DK_ACCENT_BG`/`DK_ACCENT_TEXT` (already used for
+    the stop-number badge circles) for the Live/Drop pill.
+  - **No hardcoded hex leaks through in dark mode** — every new light-mode color introduced
+    by this pass is either (a) explicitly overridden by an existing or newly-added
+    `!important` dark rule, or (b) caught by the universal transparent/text-color reset.
+
+**Verified (Node `vm` structural/source-text checks + real box-model arithmetic — no
+browser available, see Verification rules):** 30/30 structural checks (exact CSS values
+present, old hacks removed, Night Mode overrides present/correct). Separately, real
+coordinate-geometry arithmetic (not visual guessing) confirms the header's grid column
+edges land within floating-point tolerance of the table's column edges at 600px, 900px, and
+2000px card widths (the exact width cited in the bug report), and the header grid's total
+width exactly fills its container with no overflow.
+
+**NOT verified — needs manual browser testing (no browser available in this environment):**
+1. Visual confirmation the header now renders as a solid dark navy bar with no gap in the
+   middle, at a realistic card width (including ~2000px, the width cited in the report).
+2. Visual confirmation the left group, distance/duration, Live/Drop pill, and Loaded/Empty
+   pill each sit directly above their corresponding table column when expanded — the math
+   proof above is necessary but not sufficient (assumes no unaccounted browser rendering
+   quirk, e.g. scrollbar width stealing from the content box).
+3. Pill badges render as true rounded pills (not stretched/squashed) at both minimum and
+   maximum realistic segment counts/text lengths (e.g. "Preloaded" in the Live/Drop slot,
+   which is longer than "Live"/"Drop").
+4. Night Mode toggle on/off with the panel expanded — confirm the navy header, white body,
+   and pill badges all repaint correctly with no light-mode hex visibly leaking through
+   (the "verify no hex leaks" ask can only be checked by rule presence here, not by looking
+   at actual pixels).
+5. Multi-segment loads — confirm alignment holds consistently across every segment's header/
+   body pair, not just the first.
+6. The "LEG N" label gap flagged above — needs a product decision (add the element, or drop
+   the requirement) before any further work there.
+
 ### 2026-07-30 — Shared-limit pacing bug fix: 1 tab at 2s was actually refreshing every ~3.5s
 
 **Bug report (with real measured data):** with the "Shared refresh limit" toggle ON and

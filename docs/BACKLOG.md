@@ -17,8 +17,12 @@ contained per-tab issue.
 
 **Code-complete** — `background.js` (new service worker, permit dispenser + backoff state
 machine), `content/networkObserver.js` (new, MAIN-world 503 detection), global refresh
-interval (was per-tab), visible "Paused — Amazon rate limit. Retrying in Xs" countdown in
-every tab's sidebar. See CHANGELOG.md 2026-07-20 for full detail — including 18/18 real
+interval (was per-tab), and a paused banner in every tab's sidebar (originally a "Retrying in
+Xs" countdown; **the countdown was removed 2026-07-30** — that number was our own backoff
+timer, not Amazon's unblock time, so it was replaced with static copy plus an "i" explainer
+tooltip, and the banner now clears only on an observed success rather than on timer expiry.
+See CHANGELOG.md 2026-07-30 and TEST_CASES.md TC-RATELIMIT-5). See CHANGELOG.md 2026-07-20
+for full detail — including 18/18 real
 functional tests on the core permit/backoff algorithm (pure logic, no DOM needed) and 4/4
 on the content-script integration.
 

@@ -341,6 +341,17 @@ function stopOrchestrator() {
     clearTimeout(orchTimer);
     orchTimer = null;
   }
+  // 2026-07-30: tell background.js this tab is no longer in the round-robin — covers both
+  // logout (deactivateExtensionUI) and the dispatcher manually pausing (Play/Pause off).
+  // Fire-and-forget; the sidebar's "Active tabs: N" display is best-effort UI, not
+  // correctness-critical, so a failed/unreachable service worker here is not fatal.
+  try {
+    chrome.runtime.sendMessage({ type: 'RELEASE_TAB' }).catch(function (e) {
+      logger.warn('content', 'stopOrchestrator: RELEASE_TAB failed (service worker unreachable?)', { error: e });
+    });
+  } catch (e) {
+    logger.warn('content', 'stopOrchestrator: RELEASE_TAB threw synchronously', { error: e });
+  }
   logger.log('content', 'stopOrchestrator: loop stopped');
 }
 
@@ -398,16 +409,22 @@ function deactivateExtensionUI() {
 
   var sidebarEl = document.getElementById('ext-sidebar');
   if (sidebarEl) {
-    // Release the sidebar's tabState subscription, its independent memory-poll timer,
-    // its rate-limit countdown timer, and its global-storage change listener (all four
-    // stored on the element by buildSidebar()) so a later reactivation's fresh
-    // buildSidebar() call doesn't leak a second copy of any of them alongside this one.
+    // Release the sidebar's tabState subscription, its independent memory-poll timer, and
+    // its global-storage change listener (all three stored on the element by
+    // buildSidebar()) so a later reactivation's fresh buildSidebar() call doesn't leak a
+    // second copy of any of them alongside this one. 2026-07-30: the fourth entry here, the
+    // rate-limit countdown timer, was dropped — buildSidebar() no longer creates it (the
+    // paused banner is now purely storage-event-driven; see sidebar.js).
     if (sidebarEl._runningSubscriber) tabState.unsubscribe('running', sidebarEl._runningSubscriber);
     if (sidebarEl._memoryPollInterval) clearInterval(sidebarEl._memoryPollInterval);
-    if (sidebarEl._rateLimitPollInterval) clearInterval(sidebarEl._rateLimitPollInterval);
     if (sidebarEl._rateLimitStorageListener) chrome.storage.onChanged.removeListener(sidebarEl._rateLimitStorageListener);
     sidebarEl.remove();
   }
+  // 2026-07-30: the shared-rate status row (see sidebar.js) sets body padding-top via
+  // inline style (JS, not the injected <style> tag) since it varies with mode/tab-count —
+  // removing the <style> tag alone would NOT revert this. Explicit cleanup keeps the
+  // "revert to fully untouched" guarantee intact.
+  document.body.style.removeProperty('padding-top');
 
   logger.log('content', 'extension UI deactivated — page reverted to untouched state');
 }

@@ -46,7 +46,18 @@ const AUTH_PENDING_KEY = 'authPendingEmail';
 // STORAGE_KEYS — it is not a user preference, it is live coordination state; "Reset to
 // Defaults" clearing it mid-backoff would let every tab immediately hammer Amazon again
 // right when the extension is most likely to be freshly reinstalled/reset after trouble.
+// Shape: { lastGrantedAt, backoffUntil, backoffStepIndex, lastFailureAt, rateLimited }.
+// `rateLimited` (2026-07-30) is a boolean DISPLAY flag consumed only by sidebar.js's paused
+// banner — set on every reported failure, cleared only on a reported 2xx, so it outlives
+// backoffUntil (which is our own retry timer, not Amazon's unblock time). See background.js
+// reportResult().
 const RATE_LIMITER_KEY = 'extRateLimiterState';
+
+// Derived count from background.js's active-tab registry (2026-07-30) — {count:N}. Same
+// reasoning as RATE_LIMITER_KEY: coordination/telemetry state, not a user preference, not
+// in STORAGE_KEYS, not cleared by Reset. This is the ONLY source content scripts read for
+// "how many tabs are active" — see background.js's ACTIVE_TABS_KEY comment.
+const ACTIVE_TAB_COUNT_KEY = 'extActiveTabCount';
 
 const storage = {
 

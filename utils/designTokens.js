@@ -36,6 +36,14 @@
       '--ext-radius-pill:20px;' +
       '--ext-radius-card:8px;' +
       '--ext-radius-sm:4px;' +
+      /* 2026-07-30: segment leg-header bar. Was a fixed dark navy (#1B3A57) — replaced
+         with a light grey-green-blue per spec; renamed from --ext-leg-navy since that name
+         is no longer accurate. Deliberately with NO html.ext-night override below:
+         content/nightMode.js already themes .ext-seg-header's background via its own
+         DK_HIGH token (documented there as the segment-header level of its elevation ramp)
+         with !important, so this var's dark value would never be exercised — giving it one
+         anyway would be dead/misleading. */
+      '--ext-leg-header-bg:#DCE6E9;' +
     '}' +
     'html.ext-night{' +
       '--ext-accent:#4c8dff;' +

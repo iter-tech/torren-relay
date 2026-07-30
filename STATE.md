@@ -158,8 +158,13 @@ injection this codebase hasn't used before) observes real HTTP status on
 `/api/loadboard/search` read-only, for 503/backoff detection. The refresh-interval slider
 moved from per-tab (`utils/tabState.js`) to a global `chrome.storage.local` setting.
 Backoff: 5/10/20/40/80s capped at 5min, ±20% jitter, reset only on a real 200. Every tab's
-sidebar shows a synchronized "Paused — Amazon rate limit. Retrying in Xs" countdown while
-backed off. `GLOBAL_MIN_PERMIT_INTERVAL_MS = 5000` is explicitly marked empirical/unverified
+sidebar shows a synchronized amber paused banner while blocked. **Countdown removed
+2026-07-30** — it displayed our own backoff timer, which is not Amazon's unblock time, reset
+on page reload, and meant nothing on reaching zero; the banner is now static copy plus an "i"
+explainer tooltip, and it is gated on a new sticky `rateLimited` display flag (set on any
+reported failure, cleared only on a reported 2xx) rather than on `backoffUntil`, so it
+survives both timer expiry and a page reload and disappears on the first real success. The
+backoff/permit machinery itself is unchanged (A/B verified). `GLOBAL_MIN_PERMIT_INTERVAL_MS = 5000` is explicitly marked empirical/unverified
 in its own comment, per instruction — not a confirmed safe rate. **Verified with real
 functional tests** (not structural checks — `background.js` has zero DOM dependency): 18/18
 on the core permit/backoff algorithm (pacing, FIFO fairness, jitter, backoff schedule,

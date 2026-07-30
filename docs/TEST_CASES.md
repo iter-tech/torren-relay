@@ -667,6 +667,70 @@ renders for multi-segment loads); single-segment loads only exercise steps 4–7
     width (the fix from the immediately preceding pass) — this task explicitly did not touch
     `display:table`/`width` and should have zero effect on it.
 
+### TC-PANEL-POLISH-2 — Leg header redesign: dark navy grid-aligned bar, pill badges
+
+**Colour superseded 2026-07-30 (later same day) by TC-PANEL-POLISH-3 below** — the header
+background flipped from dark navy to a light grey-green-blue. Steps 1 and 3's "dark navy
+background, white text" wording is stale; the GRID/alignment mechanics they otherwise
+describe (no gap in the middle, column alignment, 16px inset) are unaffected by the color
+change and still apply — just read them with the new light-mode colors from
+TC-PANEL-POLISH-3 substituted in. Left as originally written (not rewritten) so this stays
+an accurate record of what was tested at the time; step 8 (Night Mode) is fully unaffected
+either way, since night mode's own header colors never used the navy value in the first
+place.
+
+CSS-only redesign of `.ext-seg-header`/`.ext-seg-body` (2026-07-30) — see CHANGELOG.md for
+the full before/after. **Supersedes TC-PANEL-POLISH-1 steps 2-3**: the header no longer
+clusters items at the right edge with a gap in the middle — that was the bug this pass
+fixes. Steps 1, 4-12 of TC-PANEL-POLISH-1 (route grouping, table typography baseline,
+zebra striping, single-segment regression, action bar, table width) still apply and are not
+retested here except where their expected values changed (typography hex/sizes — see step 4
+below). **Not yet run in a browser** — verified with Node `vm` structural checks (30/30) and
+real coordinate-geometry arithmetic proving column-edge alignment at 600/900/2000px card
+widths — not visual proof. Requires a **multi-segment** load (the header only renders for
+multi-segment loads; single-segment loads only exercise the table typography, step 4).
+
+1. **No gap in the middle (the reported bug):** open a multi-segment load's inline panel on
+   a wide window/card (ideally close to the ~2000px width from the original report).
+   **Expected:** the header reads as one continuous dark navy bar with content spread across
+   its full width — no large empty gap between a left cluster and a right cluster.
+2. **Column alignment:** with the segment expanded (table visible), visually compare the
+   header's item positions against the table's column boundaries directly below.
+   **Expected:** the left group (badge+codes) starts above "Stop"; distance/duration starts
+   above "Equipment/Id"; the Live/Drop pill starts above "Arrival"; the Loaded/Empty pill
+   starts above "Departure"; the chevron sits in its own narrow space at the far right,
+   distinct from the Loaded/Empty pill.
+3. **Header styling:** dark navy background, white text, bold-ish weight, small uppercase-
+   feeling caps (the numbers/route codes won't visibly change case, that's expected — there's
+   no literal "LEG N" label to uppercase, see the flagged gap in CHANGELOG.md). Comfortable
+   height, nothing touching the card's left/right edges (16px inset visible on both sides).
+4. **Expanded body:** background is pure white, visually distinct from the navy header above
+   it (this is the core "everything greyish and blends together" fix) — and the table itself
+   has a visible ~16px gap from the card's left/right edges, not flush against them.
+5. **Stop code / address typography:** station code (bold, primary) is noticeably larger and
+   darker than the address line beneath it (secondary, lighter grey) — check this still holds
+   with the updated exact hex (`#111827` / `#6B7280`) versus TC-PANEL-POLISH-1's original
+   values.
+6. **Table header row:** small uppercase column labels, light grey-blue background,
+   visible thin bottom border — check this still holds with the updated exact hex
+   (`#F9FAFB` background, `#E5E7EB` border) versus TC-PANEL-POLISH-1's original values.
+7. **Pill badges:** the Live/Drop value and the Loaded/Empty value each render as a rounded
+   pill (fully rounded ends, not a rectangle) with a light background and readably-contrasting
+   colored text — light green for Loaded, light grey for Empty, light blue for Live/Drop/
+   Preloaded — sized to their own text, not stretched to fill their grid cell.
+8. **Regression — Night Mode:** toggle Night Mode on, repeat steps 1-7. **Expected:** the
+   header/body still contrast clearly (both are intentionally dark now, at different
+   elevation levels — not "everything the same navy"); the three pill badges still render
+   as pills with a visible background fill (not just colored text on nothing — this is the
+   part most likely to break if a dark-mode override is missing, since the universal
+   transparent-background reset would otherwise strip the pill fill entirely); distance/
+   duration and the stop address read as visibly muted/secondary compared to the stop code
+   and route text, not equally bright.
+9. **Regression — no HTML/JS behavior change:** clicking a segment header still expands/
+   collapses it (chevron rotates), Fast Book / action bar still work, single-segment loads
+   still render their table normally with no console errors — this was a CSS-only pass, no
+   `buildPanelElement()`/`buildSegmentTable()` changes.
+
 ### TC-RATELIMIT-1 — Cross-tab rate limiting: global budget + synchronized backoff
 
 **PRE-LAUNCH BLOCKER — see docs/BACKLOG.md.** Nothing in this test case has been run in an
@@ -697,30 +761,34 @@ link, or `chrome://inspect/#service-workers`).
    throttle to "Offline" briefly, to produce a failed/blocked request that
    `content/networkObserver.js` should observe and report as a failure.
 5. **Expected — all tabs pause together:** within moments of the failure being reported,
-   **every one of the 4 tabs'** sidebars should switch from the normal play/pause+slider
-   view to the amber "Paused — Amazon rate limit. Retrying in Xs" banner — not just the
-   tab where the failure was simulated. This is the core "one shared state, not per-tab
-   backoff" requirement.
-6. **Expected — synchronized countdown:** the displayed countdown in all 4 tabs should
-   count down together (allow a second or two of visual drift between tabs, since each
-   runs its own local 1-second display timer, but the underlying `backoffUntil` target
-   must be identical across all of them).
-7. **Expected — synchronized resume:** once the countdown reaches 0 (or a real successful
-   200 is observed, whichever the implementation is actually gated on), all 4 tabs should
-   return to normal play/pause+slider view together and resume requesting — again subject
-   to the shared global pacing from step 2, not all 4 firing at once.
+   **every one of the 4 tabs'** sidebars should switch from the slider view to the amber
+   paused banner — not just the tab where the failure was simulated. This is the core "one
+   shared state, not per-tab backoff" requirement. **Updated 2026-07-30:** the banner text
+   is now static ("Paused — Amazon has temporarily limited your IP…", see TC-RATELIMIT-5);
+   there is no longer a countdown, and `ext-playpause` now stays visible next to it.
+6. **Expected — identical banner everywhere:** all 4 tabs show the same banner with no
+   per-tab variation. (Superseded step: this used to check that a per-tab 1-second
+   countdown stayed roughly in sync — both the countdown and its timer are gone as of
+   2026-07-30, so there is nothing left that could drift.)
+7. **Expected — synchronized resume:** once a real 200 is observed, all 4 tabs should
+   return to the normal slider view together and resume requesting — again subject to the
+   shared global pacing from step 2, not all 4 firing at once. **Note (2026-07-30):** the
+   banner is gated on an observed success only. The backoff timer merely expiring no longer
+   clears it — that is the point of the change (see TC-RATELIMIT-5 step 4).
 8. **Expected — exponential backoff on repeated failures:** if you can simulate multiple
    consecutive failures (e.g., keep the URL blocked across several retry attempts), the
    wait time between attempts should visibly grow (~5s → ~10s → ~20s → ~40s → ~80s →
    capped at 5 minutes), not stay flat or reset on each failure.
 9. **Regression — persistence across popup reopen:** while a tab is showing the paused
-   banner, open the extension popup, close it again. **Expected:** the countdown in the
-   sidebar did not reset or jump — it continues from where it was.
+   banner, open the extension popup, close it again. **Expected:** the sidebar banner is
+   unaffected — still shown, unchanged.
 10. **Regression — persistence across tab reload:** while paused, reload one of the 4
     tabs. **Expected:** after the page (and extension) reloads, that tab's sidebar
-    immediately shows the paused banner with the countdown continuing from the correct
-    remaining time (not reset to a fresh full backoff, and not showing the normal
-    play/pause as if nothing were wrong).
+    immediately shows the paused banner again (not the normal slider view as if nothing
+    were wrong). **Updated 2026-07-30:** this is now genuinely honest — the old countdown
+    restarted from a fresh full backoff on reload, which was one of the reasons it was
+    removed. The banner survives the reload because it reads a persisted sticky flag, not a
+    timestamp.
 11. **Regression — single-tab behavior unaffected by the new floor:** with only 1 tab
     open and the slider set well above the global floor (e.g. 8s), confirm normal
     operation is completely unaffected — requests still happen roughly every 8s, no
@@ -768,13 +836,13 @@ Alerts, right after Auto-Open Top Load, defaulting to ON (checked).
    turning the toggle off.
 5. **OFF mode — backoff still applies (core requirement):** with the toggle OFF, force/
    simulate a 503 in one tab (see TC-RATELIMIT-1 step 4 for how). **Expected:** exactly as
-   in ON mode — that tab's sidebar (and every other open tab's sidebar) shows the "Paused —
-   Amazon rate limit. Retrying in Xs" banner and stops refreshing until the countdown
-   clears, even though pacing coordination is off. This is the one thing the toggle must
-   NOT be able to disable.
+   in ON mode — that tab's sidebar (and every other open tab's sidebar) shows the paused
+   banner and stops refreshing until access returns, even though pacing coordination is
+   off. This is the one thing the toggle must NOT be able to disable. (Banner wording as of
+   2026-07-30 — see TC-RATELIMIT-5.)
 6. **Toggle OFF → ON while paused:** while a tab is in backoff with the toggle OFF, switch
-   the toggle to ON. **Expected:** no disruption to the in-progress backoff countdown (it's
-   shared/global state, unaffected by the toggle); once the countdown clears, tabs resume
+   the toggle to ON. **Expected:** no disruption to the in-progress backoff (it's
+   shared/global state, unaffected by the toggle); once a request succeeds, tabs resume
    under the now-ON shared pacing.
 7. **Reset restores default:** click "Reset to Defaults" in the popup. **Expected:**
    "Shared refresh limit" returns to ON (checked).
@@ -829,3 +897,207 @@ Have DevTools Network tab open, filtered to `/api/loadboard/search`.
    pause with a synchronized countdown and resume together) — this fix only touches the
    pacing floor computation, not the backoff check, which still runs first in
    `grantOrDenyPermit()`.
+
+### TC-RATELIMIT-4 — Shared-limit UX: mode-aware label + live "Active tabs: N" status line
+
+**Not yet run in a browser.** `background.js`'s new active-tab registry was verified with
+real functional tests (14/14, pure logic, no DOM); `sidebar.js`'s label/status-line
+rendering was verified by running the ACTUAL `buildSidebar()` source against a minimal fake
+DOM and asserting on the real elements it created (17/17) — this is real logic coverage,
+not just structural/regex checks, but it is still not a substitute for seeing it render in
+an actual browser. See CHANGELOG.md 2026-07-30 for exactly what those covered.
+
+**Setup:** log in, open the load board. Confirm "Shared refresh limit" is ON (default) in
+the popup.
+
+1. **OFF mode label:** turn "Shared refresh limit" OFF in the popup. **Expected:** the
+   sidebar's slider text reads exactly `"Refresh every 2.0s"` (or whatever the slider is
+   currently set to) — no second status line below it, bar stays its original single-row
+   height.
+2. **ON mode label, 1 tab:** with only this one tab open, turn "Shared refresh limit" ON.
+   **Expected:** the slider text changes to `"Shared rate: 1 refresh / 2.0s"`, and directly
+   below it a new line reads `"1 active tab → refreshing every 2.0s"` — note the singular
+   phrasing and that X equals the slider value exactly (nothing is being slowed down with
+   only 1 tab).
+3. **N tabs — live count:** open 3 more tabs (4 total), all logged in and running.
+   **Expected:** within a moment of each tab starting, EVERY open tab's status line updates
+   to read `"Active tabs: 4 → each tab refreshes every 8.0s"` (2.0s × 4) — check this in
+   more than one tab's sidebar, not just the one that just opened.
+4. **Closing a tab updates N live, no reload:** close one of the 4 tabs. **Expected:**
+   within a moment, the remaining 3 tabs' status lines update to `"Active tabs: 3 → each tab
+   refreshes every 6.0s"` — no page reload needed anywhere.
+5. **Logging out updates N live:** with 3+ tabs still open and running, log out in ONE of
+   them (via the popup). **Expected:** that tab's sidebar disappears entirely (existing
+   logout behavior); the REMAINING tabs' status lines update N downward accordingly, live.
+6. **Pausing updates N live (flagged judgment call — confirm this is the intended
+   behavior):** with 3+ tabs open and running, click Play/Pause to pause ONE of them
+   (without logging out). **Expected:** the paused tab's own sidebar reverts to normal
+   play/pause+slider display; the OTHER tabs' status lines update N downward, since a
+   paused tab is not part of the round-robin. If this is NOT the desired behavior (i.e., a
+   paused-but-logged-in tab should still count toward N), that's a one-line change to
+   revert — flag it either way.
+7. **Backoff hides the status line:** with shared mode ON and 2+ tabs, force/simulate a 503
+   (see TC-RATELIMIT-1 step 4). **Expected:** the paused banner appears as before, and the
+   shared-rate status line disappears while paused (not shown alongside the banner) —
+   reappears with the correct N once a request succeeds. **2026-07-30:** both now read the
+   same `isRateLimitPaused()`, so a state where the banner and the status line are visible
+   simultaneously is not reachable.
+8. **Live slider change updates X immediately:** with shared mode ON and N>1 tabs, change
+   the slider value in any tab. **Expected:** every open tab's status line recomputes X
+   (interval × N) immediately using the new interval, with no reload.
+9. **No visual jump/clipping:** watch the page content just below the sidebar as the status
+   line appears/disappears (mode toggle, entering/leaving backoff). **Expected:** the page
+   content shifts down/up smoothly with the bar's height change, no overlap, no flash of
+   unpadded content.
+10. **Regression — logout reverts the page fully:** log out entirely (last/only tab).
+    **Expected:** the sidebar and all its DOM are removed, AND the page's top padding
+    reverts to its original (pre-extension) value — inspect via DevTools that
+    `document.body`'s inline `padding-top` style is gone, not left over from the shared-rate
+    row.
+
+### TC-RATELIMIT-5 — Paused banner: no countdown, honest copy, "i" tooltip, sticky until success
+
+**Automated coverage already run (2026-07-30, no browser in the build environment):** 50/50
+on a DOM-stub harness driving the real `buildSidebar()` — exact banner and tooltip copy, no
+digits-plus-`s` anywhere in the banner text, show-on-failure / stay-shown-after-the-backoff-
+timestamp-passes / hide-on-success, reload re-seed, legacy-state fallback, hover + focus +
+tap tooltip toggling, testids and roles, and that the 1s countdown interval is gone (exactly
+one interval is still created: the 7s memory poll). 13/13 on `background.js` including an
+A/B against the committed file proving the backoff schedule is unchanged. **What follows is
+therefore the CSS/visual and real-browser half only — none of it has been run.**
+
+**Setup:** log in, open the load board, start the loop. Force a failure the same way as
+TC-RATELIMIT-1 step 4 (DevTools → Network → right-click a `/api/loadboard/search` request →
+Block request URL, or throttle to Offline briefly).
+
+1. **Banner copy — exact text.** **Expected**, on one line, in amber:
+   "Paused — Amazon has temporarily limited your IP due to frequent refreshes. Access
+   returns on its own; the extension will resume automatically."
+2. **No number anywhere.** Confirm there is no "Retrying in Xs", no seconds value, and no
+   digit that ticks. The banner text must be completely static for as long as it is shown —
+   watch it for a full minute.
+3. **Controls while paused.** **Expected:** the refresh slider and its label are hidden;
+   **play/pause remains visible and clickable** (this changed on 2026-07-30 — confirm you
+   can still pause and restart the loop while the banner is up); the memory dot and its "i"
+   are still in place at the right.
+4. **Sticky past the old countdown (the core behaviour change).** Keep the request blocked
+   long enough for at least one backoff step to elapse (5s, then 10s…). **Expected:** the
+   banner does **not** flicker off and back on as each backoff window expires — it stays up
+   continuously. Previously it disappeared the moment the countdown hit zero even though
+   nothing had actually recovered.
+5. **Clears on the first real success.** Unblock the URL. **Expected:** on the first
+   successful `/api/loadboard/search` response the banner disappears in **every** open tab
+   and the slider + slider-label return. Note this can be triggered by Amazon's own page
+   request, not only by an extension-driven refresh.
+6. **Survives a reload while paused.** With the URL still blocked and the banner showing,
+   reload the page. **Expected:** the banner is showing again as soon as the sidebar builds
+   — no normal-looking slider view first, and no fresh countdown.
+7. **Tooltip — hover.** Hover the circled "i" at the end of the banner. **Expected:** a
+   tooltip appears below the bar with exactly:
+   "Amazon limits how often the load board can be refreshed from a single IP address. When
+   the limit is hit, the whole site stops loading for a while — this is not an account issue
+   and nothing is wrong with your extension. It clears by itself. To avoid it, turn on
+   Shared refresh limit in the extension settings: it spreads one refresh budget across all
+   your open tabs instead of each tab refreshing on its own."
+   Move the mouse away — it disappears.
+8. **Tooltip — keyboard.** Tab to the "i" without hovering. **Expected:** the same tooltip
+   appears instantly on focus (with a visible focus ring), disappears on blur. Confirm it is
+   the custom tooltip, not a native `title` (no hover delay).
+9. **Tooltip — not clipped (specifically re-check this).** `#ext-sidebar` changed from
+   `overflow:hidden` to `overflow:visible` for this. **Expected:** the tooltip renders fully
+   below the bar, is not cut off at the bar's bottom edge, and is not hidden behind Amazon's
+   own page content (it carries the max z-index). Check in both light and night mode.
+10. **The memory "i" tooltip now renders too.** It was clipped by the same rule and had
+    never actually been visible. **Expected:** hovering `ext-memory-info` now shows its
+    tooltip properly. Confirm it does not overlap or collide with the rate-limit tooltip
+    when the banner is showing.
+11. **Narrow viewport.** Shrink the window to ~800px wide while the banner is showing.
+    **Expected:** the bar stays within the viewport (it now has `max-width:calc(100vw -
+    16px)`), the sentence truncates with an ellipsis, and **the "i" icon is never truncated
+    away** — it must remain visible and hoverable at every width, since it is the only route
+    to the full explanation.
+12. **Night mode.** Toggle night mode with the banner showing. **Expected:** the banner
+    stays the same amber (it is deliberately theme-independent), the "i" ring/glyph follow
+    that amber, and the tooltip flips to the light-on-dark treatment used by the memory
+    tooltip.
+13. **Regression — backoff timing untouched.** With the URL blocked across several retries,
+    confirm from the service-worker console that the gaps still grow ~5s → ~10s → ~20s →
+    ~40s → ~80s → capped at 5 min, and reset after a success. The banner change must not
+    have altered any of this.
+
+### TC-PANEL-POLISH-3 — Full-width action bar, light leg-header colour, fixed-column route alignment
+
+CSS-only pass (2026-07-30, later same day than TC-PANEL-POLISH-2) over `.ext-action-bar`,
+`.ext-seg-header`, and `.ext-seg-route` — see CHANGELOG.md for the full before/after,
+including the exact hex values and the two required `nightMode.js` additions.
+
+**Automated coverage already run (no browser in the build environment):** 44/44 on a harness
+that runs the real `injectPanelStyle()`/`buildNightCss()` and asserts on the generated CSS
+string — every color on the correct selector, the grid template and margin math, every
+child's exact grid placement, the dead-rule removal, and a simulated-cascade proof that both
+new `nightMode.js` overrides actually beat their light-mode counterpart rather than merely
+existing somewhere. **None of this is visual proof** — layout/alignment/contrast must be
+checked in an actual browser. Requires a **multi-segment (3+ leg) load with mixed-length
+city names** (e.g. one leg "OH → GAHANNA, OH" alongside one with two short codes) — the
+whole point of the route-alignment fix only shows up under exactly that condition.
+
+1. **Action bar reaches the card edges.** Open any inline panel, scroll to the bottom grey
+   icon bar. **Expected:** the grey background now runs edge-to-edge with the card (no
+   longer inset ~10-15px on either side); bottom corners still match the card's rounding.
+2. **First icon sits 16px from the left edge.** **Expected:** the screenshot icon (first of
+   the three) starts at the same horizontal x-position as the header/body/table content
+   above it (all inset 16px), not flush against the very edge.
+3. **Right edge — note, not a bug report.** With Fast Book visible (a load where it's
+   enabled), confirm it now sits flush against the card's right edge with no gutter (this is
+   the flagged, not-explicitly-requested trade-off in CHANGELOG.md — confirm it's visually
+   acceptable, or flag if symmetric spacing is wanted).
+4. **Leg header colour.** Collapse a segment (or view a header not currently expanded).
+   **Expected:** background is a light, soft grey-blue-green (not white, not the old dark
+   navy), with a thin, slightly darker bottom edge line separating it from whatever is below.
+5. **Leg header text/icon contrast.** On that same light header: the route codes (e.g. "OH",
+   "GAHANNA, OH") are dark, bold, and easily readable; the distance/duration text is a
+   visibly lighter/secondary grey-blue than the route codes (not the same weight); the
+   collapse/expand chevron on the far right is visible and roughly the same secondary tone
+   as the distance text — none of the text is white-on-light (the old white text would be
+   near-invisible now if this regressed).
+6. **Status pills still readable.** Loaded (green), Empty (grey), Live/Drop (blue) pills
+   still show their own pill background clearly against the new lighter header — **this is
+   a flagged manual check**: the Empty pill in particular (`#F3F4F6` bg) is close in
+   lightness to the new header (`#DCE6E9`) and may look washed out or borderless; report if
+   it's hard to distinguish where the pill ends and the header begins.
+7. **Arrows line up in one vertical column — the core fix.** On a 3+ leg load where leg
+   names differ substantially in length (short "OH" vs long "GAHANNA, OH"), collapse all
+   headers and look straight down the stack. **Expected:** the "→" between origin and
+   destination sits at the EXACT same x-position in every leg, regardless of how long or
+   short the adjacent city names are — this was the reported bug (arrows drifting leg to
+   leg) and is what the fixed 170/28/170px grid is specifically for.
+8. **Long city names truncate, don't wrap or overflow.** Find or note a leg with a long
+   destination name (e.g. "GAHANNA, OH"). **Expected:** the text stays on ONE line and ends
+   in an ellipsis (…) if it doesn't fit in its cell — it must NOT wrap to a second line
+   (that would push the row's height and misalign it against neighboring legs) and must NOT
+   visibly overflow past its column into the arrow's space.
+9. **Badge alignment.** Across the same multi-leg load, confirm the small circular stop-
+   number badges (before each code) also land in one consistent vertical column on both the
+   origin side and the destination side — not just the arrows.
+10. **40px left indent.** Compare the route group's start position against the header's own
+    edge. **Expected:** noticeably more inset than the icons in row 1 of the top sidebar bar
+    or other 16px-inset content — the route group now starts ~40px from the card's left
+    edge, not 16px.
+11. **Narrow-card check (flagged architectural trade-off).** Shrink the browser window (or
+    view on a smaller display) until the load-board cards are noticeably narrower — ideally
+    below ~1150-1200px card width. **Expected finding, not necessarily a bug:** the route
+    group's fixed 368px+24px-indent content may start overlapping the distance/duration or
+    status-pill columns to its right, since those still flex with the header's percentage
+    grid while the route group no longer does. Report exactly how narrow it gets before this
+    happens, so it's known whether real-world card widths ever hit it.
+12. **Regression — Night Mode.** Toggle Night Mode on, repeat steps 4-10. **Expected:**
+    header background/border return to the existing dark elevation ramp (unaffected by
+    today's light-mode color, since nightMode.js's `!important` overrides always win); route
+    codes and chevron read as primary/muted dark-mode text respectively, NOT as the light
+    mode's `#1F3A45`/`#4A6570` hex bleeding through — if either looks like a dark, low-
+    contrast smudge against the dark header, the corresponding `nightMode.js` override
+    (`.ext-route-origin`/`.ext-route-dest`, or the chevron) isn't taking effect.
+13. **Regression — no HTML/JS behavior change.** Segment header click still expands/
+    collapses (chevron rotates), Fast Book and the three icon buttons still work, single-
+    segment loads render normally. This was a CSS-only pass — no `buildPanelElement()` or
+    `buildActionBar()` changes.

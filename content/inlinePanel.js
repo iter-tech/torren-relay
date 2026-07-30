@@ -23,53 +23,169 @@ function injectPanelStyle() {
       // border from pushing total rendered width past the card's width.
       'width:100%;box-sizing:border-box;' +
       'border:1px solid var(--ext-n200);border-radius:4px;margin:0 0 12px 0;' +
-      'font-family:Arial,sans-serif;font-size:13px;background:var(--ext-surface);overflow:hidden;' +
+      'font-family:Arial,sans-serif;font-size:13px;overflow:hidden;' +
+      // FLOATING-CARDS SURFACE (2026-07-30): was var(--ext-surface) (white/card-colored) —
+      // the panel is now the GREY SURFACE the individual cards (load header, each leg)
+      // float on top of, not a card itself. #F1F3F5 per spec, not a token — see
+      // content/nightMode.js for why no dark counterpart is needed (its existing
+      // DK_OVERLAY background already serves the same "surface, one step below the
+      // raised cards" role in the dark elevation ramp).
+      'background:#F1F3F5;' +
     '}' +
+    // LOAD HEADER (2026-07-30) — styled per spec, but currently DEAD CSS: no element with
+    // this class is ever created anywhere in this file (grep confirms zero matches outside
+    // this rule). Flagged in CHANGELOG.md — left styled here so it's correct the moment
+    // it's ever wired into buildPanelElement(), but has NO visible effect right now; that
+    // would be a JS change, out of scope for this CSS-only task.
     '.ext-inline-panel__header{' +
       'background:var(--ext-accent-bg);color:var(--ext-accent-text);padding:8px 14px;' +
       'display:flex;gap:14px;align-items:center;font-size:12px;' +
+      'border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.12);margin-bottom:8px;' +
     '}' +
     '.ext-inline-panel__header .ext-payout{' +
       'margin-left:auto;font-weight:bold;' +
     '}' +
-    // CSS POLISH (2026-07-20): switched from CSS Grid to Flexbox. The badge+code+arrow+
-    // badge+code route group used to be split across two separate grid columns/elements
-    // (a 40px badge column, then a route column) — they read as drifting apart. Now
-    // .ext-seg-route is the ONE flex item holding all five pieces (JS restructured to match
-    // — see buildPanelElement()), sized to its content (flex:0 1 auto, not a fixed
-    // fraction), pinned left. margin-left:auto on .ext-seg-dist (the first of the
-    // remaining group) pushes distance/duration + load type + status + chevron into a
-    // compact cluster at the right — see that rule below.
+    // LEG HEADER REDESIGN (2026-07-30, CSS-only — no HTML/JS changes; see CHANGELOG.md).
+    // Was display:flex with margin-left:auto on .ext-seg-dist clustering everything from
+    // "distance" onward at the right edge, leaving an empty gap in the middle on wide
+    // cards. Now display:grid, with grid-template-columns DELIBERATELY matching
+    // .ext-inline-panel__table's own 34%/18%/24%/24% column widths (see that rule below)
+    // so each header item sits directly above its corresponding table column — this only
+    // works because .ext-seg-header's own padding (10px 16px) and .ext-seg-body's padding
+    // (0 16px 12px, below) give both the SAME horizontal inset, so their content boxes
+    // (against which grid/percentage widths resolve) start at the same x-offset and have
+    // the same width. The 5th, 24px track is genuinely extra — the table has no chevron
+    // column — carved out of the last 24% via calc() so column 4's LEFT edge (where the
+    // Loaded/Empty pill sits) still lines up with the table's Departure column, while the
+    // chevron gets its own narrow trailing cell instead of overlapping it.
+    // LEG HEADER COLOUR (2026-07-30, CSS-only): background flipped from a fixed dark navy
+    // to a light grey-green-blue (var(--ext-leg-header-bg), see designTokens.js — renamed
+    // from --ext-leg-navy since it's no longer navy). base `color` becomes the primary text
+    // hex (#1F3A45) — everything that doesn't get its own explicit color below inherits
+    // this instead of the old white. New 1px bottom border (#C4D2D6) per spec, separating
+    // the header from the body/next card. No dark-mode work needed for either — see the
+    // 2026-07-30 nightMode.js entry in CHANGELOG.md for why (background/border-color are
+    // already covered by existing !important overrides there).
     '.ext-seg-header{' +
-      'background:var(--ext-n100);border-top:1px solid var(--ext-n200);padding:10px 14px;' +
-      'display:flex;align-items:center;gap:8px;' +
-      'font-size:12px;font-weight:600;color:var(--ext-n900);cursor:pointer;user-select:none;' +
+      'background:var(--ext-leg-header-bg);color:#1F3A45;padding:10px 16px;' +
+      'border-bottom:1px solid #C4D2D6;' +
+      'display:grid;grid-template-columns:34% 18% 24% calc(24% - 24px) 24px;' +
+      'align-items:center;justify-items:start;column-gap:0;' +
+      'font-size:12px;font-weight:600;letter-spacing:0.3px;cursor:pointer;user-select:none;' +
+      // FLOATING CARD (2026-07-30): no shared per-leg wrapper exists in the DOM (see
+      // CHANGELOG.md), so the header/body pair approximate one card independently, keyed
+      // off the .ext-open class JS already toggles on both. width:100%+box-sizing:
+      // border-box forces this to match .ext-seg-body's width exactly regardless of the
+      // reported overflow's exact cause (unconfirmed without a browser — see report).
+      // overflow:hidden clips this element's own content to its own rounded corners.
+      // Collapsed (no .ext-open): this IS the whole visible card — full radius, the
+      // card's shadow, and the gap before the next leg. .ext-open below overrides all
+      // three once the body becomes the card's visible bottom half.
+      'width:100%;box-sizing:border-box;overflow:hidden;' +
+      'border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.10);margin-bottom:8px;' +
     '}' +
+    '.ext-seg-header.ext-open{border-radius:8px 8px 0 0;box-shadow:none;margin-bottom:0;}' +
+    // Last leg — no gap before the action bar, per spec ("no gap above it"). :has() is
+    // Chrome 105+; this codebase already assumes Chrome 111+ elsewhere (networkObserver.js's
+    // "world":"MAIN" content script), so it's safe here.
+    '.ext-seg-header:not(:has(~ .ext-seg-header)){margin-bottom:0;}' +
+    // ROUTE GROUP ALIGNMENT (2026-07-30, CSS-only — no HTML/JS changes). Was flex with a
+    // flat 8px gap across all 5 children (badge/code/arrow/badge/code); a short code (e.g.
+    // "OH") vs a long one ("GAHANNA, OH") shifted every element after it, so arrows landed
+    // in different x-positions leg to leg. Now a 3-TRACK grid — 170px origin / 28px arrow /
+    // 170px destination — with the 5 DOM children explicitly placed onto those 3 tracks so
+    // two children can share one track (badge + code = one visual "cell"). This requires
+    // `grid-row:1` on every child: without it, the grid auto-placement algorithm sees a
+    // track already occupied (by the badge) and bumps the next same-track item (the code
+    // span) onto a NEW row instead of layering it into the same cell — see the child rules
+    // below. margin-left:24px on top of .ext-seg-header's own 16px padding = 40px total
+    // inset from the card's left edge, per spec. column-gap:0 because the 170/28/170 widths
+    // are exact — the internal badge↔code and arrow spacing comes from the children's own
+    // margins/centering, not a track gap (see below).
     '.ext-seg-route{' +
-      'display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;' +
+      'display:grid;grid-template-columns:170px 28px 170px;column-gap:0;' +
+      'align-items:center;min-width:0;margin-left:24px;' +
     '}' +
+    '.ext-seg-route > *{grid-row:1;}' +
+    // Origin/destination badges (.ext-stop-num) — both children share one class (see
+    // buildPanelElement() in this file), so position (1st vs 4th child) is what
+    // distinguishes them for grid placement; class is included too so this only matches if
+    // BOTH the position AND the badge class line up, in case a sibling is ever reordered.
+    // No justify-self needed: badge width is an explicit 18px (not auto), and a grid item
+    // with a definite size in its axis resolves default 'stretch' as 'start' per spec — it
+    // already sits at the cell's left edge.
+    '.ext-seg-route > .ext-stop-num:nth-child(1){grid-column:1;}' +
+    '.ext-seg-route > .ext-stop-num:nth-child(4){grid-column:3;}' +
+    // Origin/destination code text — SAME grid-column as their badge (both occupy the same
+    // 170px cell). Left at default justify-self:stretch (auto width), so each resolves to
+    // exactly (170px cell − 26px margin) = 144px of definite, clipped width — that's what
+    // makes overflow:hidden/ellipsis below actually trigger instead of just growing past
+    // the cell. margin-left:26px = 18px badge + 8px gap, reproducing the old flex gap
+    // without a wrapper element. Replaces the old overflow-wrap/word-break (multi-line
+    // wrap) with single-line + ellipsis per spec ("GAHANNA, OH" truncates instead of
+    // wrapping or pushing the arrow off its column).
     '.ext-route-origin{' +
+      'grid-column:1;margin-left:26px;' +
       'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11px;' +
-      'overflow-wrap:break-word;word-break:break-word;min-width:0;' +
+      'color:#1F3A45;font-weight:600;' +
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;' +
     '}' +
     '.ext-route-dest{' +
+      'grid-column:3;margin-left:26px;' +
       'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11px;' +
-      'overflow-wrap:break-word;word-break:break-word;min-width:0;' +
+      'color:#1F3A45;font-weight:600;' +
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;' +
     '}' +
-    '.ext-route-arrow{font-size:1.15em;font-weight:700;color:var(--ext-n400);}' +
-    // margin-left:auto — the "right-align remaining columns in a compact group" mechanism:
-    // consumes all free space between the route group and this item, pushing dist/duration,
-    // load type, status, and the chevron together at the right edge. gap:8px on the flex
-    // container (above) provides the tight spacing between them after that point.
-    '.ext-seg-dist{color:var(--ext-n500);font-size:11px;white-space:nowrap;margin-left:auto;}' +
-    '.ext-seg-action{font-size:11px;color:var(--ext-n700);white-space:nowrap;}' +
-    '.ext-seg-status{font-size:11px;white-space:nowrap;}' +
-    '.ext-seg-loaded{color:var(--ext-success);font-weight:500;}' +
-    '.ext-seg-empty{color:var(--ext-n500);}' +
-    '.ext-seg-header .ext-seg-arrow{transition:transform .15s;text-align:center;padding:0 4px;}' +
+    // Own 28px cell, centred — this (fixed track + justify-self:center) is what makes every
+    // leg's arrow land in the same vertical line, the core ask of this task. Color changed
+    // from muted-white (rgba(255,255,255,.55), for the old dark header) to a muted slate —
+    // not spec'd explicitly for this element, inferred to match the secondary/connector
+    // weight of the distance/duration text below; flagged in CHANGELOG.md as a judgment
+    // call. Night mode is unaffected either way — already has its own DK_MUTED override.
+    '.ext-route-arrow{' +
+      'grid-column:2;justify-self:center;' +
+      'font-size:1.15em;font-weight:700;color:#4A6570;' +
+    '}' +
+    // Own grid cell (column 2 of the OUTER 5-col header grid — no more margin-left:auto).
+    // LEG HEADER COLOUR (2026-07-30): #4A6570 per spec (was rgba(255,255,255,.72), muted-
+    // white for the old dark header).
+    '.ext-seg-dist{color:#4A6570;font-size:11px;white-space:nowrap;}' +
+    // Pill badges (STATUS BADGES, 2026-07-30) — .ext-seg-action (Live/Drop, column 3) and
+    // .ext-seg-status (base for Loaded/Empty, column 4) share the same pill mechanics;
+    // .ext-seg-loaded/.ext-seg-empty supply only background+text per variant. Exact colors
+    // as specified — deliberately NOT theme tokens: a light pill on the dark header is the
+    // intended look in both themes (content/nightMode.js overrides these explicitly for
+    // dark mode — see that file).
+    '.ext-seg-action{' +
+      'font-size:11px;font-weight:600;white-space:nowrap;border-radius:9999px;' +
+      'padding:2px 10px;background:#E1EFFE;color:#1E429F;' +
+    '}' +
+    '.ext-seg-status{' +
+      'font-size:11px;font-weight:600;white-space:nowrap;border-radius:9999px;padding:2px 10px;' +
+    '}' +
+    '.ext-seg-loaded{background:#DEF7EC;color:#03543F;}' +
+    '.ext-seg-empty{background:#F3F4F6;color:#374151;}' +
+    // LEG HEADER COLOUR (2026-07-30): color:#4A6570 added per spec — was unset, relying on
+    // inheriting .ext-seg-header's own `color` (white, then #1F3A45 now). Needs its own
+    // nightMode.js override (added — see CHANGELOG.md) since this new explicit rule would
+    // otherwise leak the light-mode hex into dark mode instead of inheriting DK_TEXT.
+    '.ext-seg-header .ext-seg-arrow{' +
+      'transition:transform .15s;text-align:center;justify-self:center;padding:0 4px;' +
+      'color:#4A6570;' +
+    '}' +
     '.ext-seg-header.ext-open .ext-seg-arrow{transform:rotate(180deg);}' +
-    '.ext-seg-body{display:none;}' +
-    '.ext-seg-body.ext-open{display:block;}' +
+    '.ext-seg-body{' +
+      'display:none;background:#FFFFFF;padding:0 16px 12px;' +
+      'width:100%;box-sizing:border-box;overflow:hidden;' +
+    '}' +
+    // Visible (expanded): this is the card's bottom half — bottom-only radius, the card's
+    // shadow (only rendered here, not duplicated on the header, so the header/body seam
+    // doesn't get a stray shadow line — see .ext-seg-header.ext-open above), and the gap
+    // before the next leg (0 for the last leg — see the :has() rule below).
+    '.ext-seg-body.ext-open{' +
+      'display:block;border-radius:0 0 8px 8px;box-shadow:0 1px 3px rgba(0,0,0,.10);margin-bottom:8px;' +
+    '}' +
+    '.ext-seg-body.ext-open:not(:has(~ .ext-seg-body)){margin-bottom:0;}' +
     // display:table + width:100% MUST be !important here — Amazon has a global rule that
     // sets <table> to display:block on the page. A block-level table ignores width:100%
     // for its own internal layout (the browser builds an anonymous shrink-to-fit table
@@ -85,24 +201,26 @@ function injectPanelStyle() {
     '.ext-inline-panel__table th:nth-child(3),.ext-inline-panel__table td:nth-child(3){width:24%;}' +
     '.ext-inline-panel__table th:nth-child(4),.ext-inline-panel__table td:nth-child(4){width:24%;}' +
     '.ext-inline-panel__table th{' +
-      // CSS POLISH (2026-07-20): smaller uppercase label style (was 11px/bold, no
-      // transform), padding reduced 10px 14px → 6px 12px (was "too tall"). Background
-      // unchanged (var(--ext-n100) was already "one step darker than data rows").
-      'text-align:left;font-size:10px;color:var(--ext-n500);font-weight:600;' +
-      'text-transform:uppercase;letter-spacing:0.4px;' +
-      'padding:6px 12px;background:var(--ext-n100);vertical-align:middle;' +
-      'border-bottom:1px solid var(--ext-n200);' +
+      // TYPOGRAPHY HIERARCHY (2026-07-30): exact spec values, not the neutral-scale
+      // tokens — #6B7280/#F9FAFB/#E5E7EB are close to but not identical to
+      // var(--ext-n500)/var(--ext-n100)/var(--ext-n200), and the ask was specific hex.
+      // Dark mode is unaffected: content/nightMode.js's existing
+      // `#ext-inline-panel thead th` rule already overrides all three with !important.
+      'text-align:left;font-size:11px;color:#6B7280;font-weight:600;' +
+      'text-transform:uppercase;letter-spacing:0.5px;' +
+      'padding:6px 12px;background:#F9FAFB;vertical-align:middle;' +
+      'border-bottom:1px solid #E5E7EB;' +
     '}' +
     '.ext-inline-panel__table td{' +
-      // CSS POLISH (2026-07-20): padding 10px 14px → 8px 12px; vertical-align top → middle.
-      // border-right column separators REMOVED per this pass — "they add noise, keep only
-      // horizontal separators" (were added in the immediately preceding layout-only pass).
-      'padding:8px 12px;border-bottom:1px solid var(--ext-n200);vertical-align:middle;word-break:break-word;' +
+      // Data-row border now #F3F4F6 per spec (was var(--ext-n200)) — no vertical column
+      // borders (none were ever added — "border-right REMOVED" from an earlier pass).
+      'padding:8px 12px;border-bottom:1px solid #F3F4F6;vertical-align:middle;word-break:break-word;' +
     '}' +
     // Primary line (station code / city) — the <b> element built in buildSegmentTable().
     // No class on that element (tag selector, scoped to this table, is precise enough —
-    // avoided touching buildSegmentTable() for a rule this simple).
-    '.ext-inline-panel__table td b{font-weight:600;color:var(--ext-n700);font-size:13px;}' +
+    // avoided touching buildSegmentTable() for a rule this simple). TYPOGRAPHY HIERARCHY
+    // (2026-07-30): 13px/var(--ext-n700) → 15px/#111827 per spec.
+    '.ext-inline-panel__table td b{font-weight:600;color:#111827;font-size:15px;}' +
     // Zebra striping (CSS POLISH, 2026-07-20): reuses var(--ext-n100) — the same subtle
     // tint already established for the header — rather than inventing a new shade, per
     // "existing CSS custom properties only". content/nightMode.js's existing
@@ -110,13 +228,26 @@ function injectPanelStyle() {
     // mode (blanket !important on every cell); a matching dark-mode counterpart was added
     // there (reusing the panel's own existing DK_OVERLAY, not a new color) — see that file.
     '.ext-inline-panel__table tbody tr:nth-child(even) td{background:var(--ext-n100);}' +
+    // Last-row radius per spec — the VISIBLE rounded bottom corners of an expanded leg
+    // card actually come from .ext-seg-body.ext-open's own box-radius above (the table
+    // sits inset by .ext-seg-body's 16px/12px padding, not flush against its edges, so the
+    // table's own corners aren't what the card's silhouette shows). Included anyway,
+    // literally as specified, so nothing regresses if that padding is ever reduced.
+    '.ext-inline-panel__table tbody tr:last-child td:first-child{border-radius:0 0 0 8px;}' +
+    '.ext-inline-panel__table tbody tr:last-child td:last-child{border-radius:0 0 8px 0;}' +
     '.ext-stop-num{' +
       'display:inline-flex;width:18px;height:18px;border-radius:50%;' +
       'background:var(--ext-accent-bg);color:var(--ext-accent-text);font-size:11px;' +
       'align-items:center;justify-content:center;margin-right:8px;' +
     '}' +
-    '.ext-seg-route .ext-stop-num{margin-right:0;}' +
-    '.ext-stop-addr{color:var(--ext-n500);font-size:11px;margin-top:2px;}' +
+    // 2026-07-30: the `.ext-seg-route .ext-stop-num{margin-right:0}` override that used to
+    // live here is REMOVED — it existed only to cancel the base 8px margin-right so it
+    // wouldn't double up with the old flex `gap:8px`. Now that .ext-seg-route is a grid and
+    // spacing comes from the code span's own margin-left (see .ext-route-origin/-dest
+    // above), the badge's margin-right has no visual effect either way — kept it removed
+    // rather than leaving dead CSS behind.
+    // TYPOGRAPHY HIERARCHY (2026-07-30): 11px/var(--ext-n500) → 13px/400/#6B7280 per spec.
+    '.ext-stop-addr{color:#6B7280;font-size:13px;font-weight:400;margin-top:2px;}' +
     '.ext-dot-loaded{' +
       'display:inline-block;width:11px;height:11px;border-radius:50%;' +
       'background:var(--ext-n900);margin-right:6px;vertical-align:middle;' +
@@ -125,10 +256,36 @@ function injectPanelStyle() {
       'display:inline-block;width:11px;height:11px;border-radius:50%;' +
       'border:1.5px solid var(--ext-n900);margin-right:6px;vertical-align:middle;' +
     '}' +
+    // ATTACHED TO LAST LEG CARD (2026-07-30): this is always .ext-inline-panel's last
+    // child (appended once, after every segment — see buildPanelElement()), and the last
+    // leg's header/body now have margin-bottom:0 (above), so there's no gap between them
+    // and this bar already. width:100%+box-sizing:border-box, same reasoning as the
+    // header/body width fix above. Only the BOTTOM corners round — this sits flush under
+    // whatever leg card is above it, not floating as its own separate card.
+    // NOTE (per instruction, not changed here): this bar's DOM presence/visibility is
+    // controlled by JS render logic (showInlinePanel() rebuilds the whole panel on every
+    // call), not by CSS — see CHANGELOG.md. Nothing in this rule affects that.
+    // BOTTOM ACTION BAR (2026-07-30): horizontal padding dropped from 10px to 0 per spec —
+    // the bar's outer box (background/border) was ALREADY width:100%/border-box (i.e.
+    // already spanning the full card edge-to-edge before this change); the 10px was purely
+    // a CONTENT inset, not a width shortfall. Bottom corners keep the card radius,
+    // unchanged. Left inset for the icons themselves now comes from the first icon's own
+    // margin-left (see .ext-action-bar > .ext-action-btn:first-child below), not from
+    // wrapper padding — per spec, "icons keep their own internal padding." Vertical
+    // padding (5px) is untouched.
     '.ext-action-bar{' +
-      'border-top:1px solid var(--ext-n200);padding:5px 10px;' +
+      'border-top:1px solid #E5E7EB;padding:5px 0;' +
       'display:flex;gap:4px;background:var(--ext-n100);' +
+      'width:100%;box-sizing:border-box;border-radius:0 0 8px 8px;' +
     '}' +
+    // Only the FIRST icon needs an explicit offset — the rest already sit 4px apart via the
+    // bar's own flex `gap`. Judgment call, flagged: the ask only specified the icons' LEFT
+    // start position; with the wrapper's own right padding now also 0, the Fast Book button
+    // (pushed to the far right via its own margin-left:auto) sits flush against the card's
+    // right edge with zero gutter — previously it had the same 10px the icons had on the
+    // left. Not addressed here since it wasn't asked for; flagged in CHANGELOG.md in case
+    // symmetric spacing is wanted on that side too.
+    '.ext-action-bar > .ext-action-btn:first-child{margin-left:16px;}' +
     '.ext-action-btn{' +
       'width:28px;height:28px;border:none;background:none;border-radius:4px;' +
       'cursor:pointer;color:var(--ext-n400);display:inline-flex;align-items:center;' +

@@ -147,14 +147,58 @@ function buildNightCss() {
       '-webkit-text-fill-color:' + DK_MUTED + ' !important;' +
     '}',
 
-    // Segment Loaded / Empty status text
+    // Station codes / route text (2026-07-30 leg-header colour redesign): light mode gave
+    // these their own explicit color (#1F3A45, dark slate) for the first time — previously
+    // unset, so they simply inherited .ext-seg-header's own color (white, then dark-mode's
+    // DK_TEXT). An explicit rule beats inheritance in EVERY theme, not just light, so
+    // without this override the light hex would leak straight into dark mode and render as
+    // near-unreadable dark-on-dark against the DK_HIGH header background. Restores the
+    // original (primary-text) look dark mode already had.
+    'html.ext-night #ext-inline-panel .ext-route-origin,' +
+    'html.ext-night #ext-inline-panel .ext-route-dest{' +
+      'color:' + DK_TEXT + ' !important;' +
+      '-webkit-text-fill-color:' + DK_TEXT + ' !important;' +
+    '}',
+
+    // Chevron (2026-07-30): same leak risk as the route origin/dest override just above —
+    // light mode gave the collapse/expand chevron its own explicit color (#4A6570) for the
+    // first time, which would otherwise leak into dark mode (and read as low-contrast on
+    // the dark DK_HIGH header). Mapped to DK_MUTED — same treatment as the route arrow,
+    // since both are secondary/decorative glyphs rather than primary text.
+    'html.ext-night #ext-inline-panel .ext-seg-header .ext-seg-arrow{' +
+      'color:' + DK_MUTED + ' !important;' +
+      '-webkit-text-fill-color:' + DK_MUTED + ' !important;' +
+    '}',
+
+    // Distance/duration — muted secondary (2026-07-30: leg-header redesign gave this its
+    // own grid cell with a light-mode rgba(255,255,255,.72) color for contrast against the
+    // new dark-navy header; without this rule it would fall through to the blanket
+    // primary-text reset below and read as full-bright instead of secondary).
+    'html.ext-night #ext-inline-panel .ext-seg-dist{' +
+      'color:' + DK_MUTED + ' !important;' +
+      '-webkit-text-fill-color:' + DK_MUTED + ' !important;' +
+    '}',
+
+    // Segment Loaded / Empty / Live-Drop pills (2026-07-30: now filled pill badges, not
+    // plain text — see inlinePanel.js). Backgrounds reuse EXISTING dark tokens rather than
+    // the light-mode hex, so they stay pill-shaped but dark-mode-appropriate: DK_SUCCESS
+    // tinted (its own RGB at low alpha, not a new color) for Loaded, DK_OVERLAY (already
+    // the panel's own next-level-up surface) for Empty, DK_ACCENT_BG/DK_ACCENT_TEXT
+    // (already used for the stop-number badge circles) for the Live/Drop pill.
     'html.ext-night #ext-inline-panel .ext-seg-loaded{' +
+      'background-color:rgba(55,176,111,.18) !important;' +
       'color:' + DK_SUCCESS + ' !important;' +
       '-webkit-text-fill-color:' + DK_SUCCESS + ' !important;' +
     '}',
     'html.ext-night #ext-inline-panel .ext-seg-empty{' +
+      'background-color:' + DK_OVERLAY + ' !important;' +
       'color:' + DK_MUTED + ' !important;' +
       '-webkit-text-fill-color:' + DK_MUTED + ' !important;' +
+    '}',
+    'html.ext-night #ext-inline-panel .ext-seg-action{' +
+      'background-color:' + DK_ACCENT_BG + ' !important;' +
+      'color:' + DK_ACCENT_TEXT + ' !important;' +
+      '-webkit-text-fill-color:' + DK_ACCENT_TEXT + ' !important;' +
     '}',
 
     // Column-label row — disabled text, same treatment as Amazon's
@@ -166,6 +210,19 @@ function buildNightCss() {
       'text-transform:none !important;letter-spacing:0 !important;' +
       'line-height:1 !important;white-space:nowrap !important;' +
       'padding-top:2px !important;padding-bottom:2px !important;border:none !important;' +
+    '}',
+
+    // Segment body — the CARD's bottom half in the floating-cards redesign (2026-07-30).
+    // Without this, .ext-seg-body falls through to the blanket transparent-background
+    // reset (section 3 above), revealing the PANEL's own DK_OVERLAY behind it — while its
+    // child table cells (tbody td, below) carry an explicit DK_HIGH. That mismatch would
+    // show as a DK_HIGH table sitting inside a DK_OVERLAY-colored padding margin within
+    // the same nominal card — most visible at .ext-seg-body.ext-open's own rounded bottom
+    // corners, where the padding (not any table cell) IS the corner. Reuses DK_HIGH — the
+    // same token already used for the header and the table cells — so the whole card
+    // (header + body, including its padding) reads as one consistent surface.
+    'html.ext-night #ext-inline-panel .ext-seg-body{' +
+      'background-color:' + DK_HIGH + ' !important;' +
     '}',
 
     // Stop data rows — HIGH (one step above overlay panel bg)
@@ -187,6 +244,14 @@ function buildNightCss() {
     // Loaded/empty status dots
     'html.ext-night #ext-inline-panel .ext-dot-loaded{background-color:' + DK_TEXT + ' !important;}',
     'html.ext-night #ext-inline-panel .ext-dot-empty{border-color:' + DK_TEXT + ' !important;}',
+
+    // Stop address — muted secondary (2026-07-30: same reasoning as .ext-seg-dist above;
+    // was previously falling through to the blanket primary-text reset, losing the
+    // light-mode secondary/muted hierarchy).
+    'html.ext-night #ext-inline-panel .ext-stop-addr{' +
+      'color:' + DK_MUTED + ' !important;' +
+      '-webkit-text-fill-color:' + DK_MUTED + ' !important;' +
+    '}',
 
     // Action bar — sits at overlay level (flush with panel bg)
     'html.ext-night #ext-inline-panel .ext-action-bar{' +

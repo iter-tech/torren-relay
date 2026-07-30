@@ -66,7 +66,8 @@ async function getState() {
     lastGrantedAt:    0,
     backoffUntil:     null,
     backoffStepIndex: -1,
-    lastFailureAt:    null
+    lastFailureAt:    null,
+    rateLimited:      false
   };
 }
 
@@ -130,18 +131,101 @@ async function requestPermit(sharedLimitEnabled) {
   return permitQueueTail;
 }
 
+// 2026-07-30: active-tab registry — added for the "Shared rate" UI display only (sidebar.js
+// shows "Active tabs: N → each tab refreshes every intervalMs*N"). Pacing itself (above)
+// does NOT use this — it stays purely FIFO-on-a-shared-floor, which already produces the
+// correct interval*N cadence with zero tab-count dependency. This is the ONE authoritative
+// source of N; nothing else counts tabs independently. {tabId: lastSeenAt}, persisted (not
+// just in-memory) for the same reason as RATE_LIMITER_KEY — a restarted service worker must
+// not silently forget who's active. Primary removal is immediate (chrome.tabs.onRemoved,
+// and the RELEASE_TAB message content.js sends on logout/pause); ACTIVE_TAB_STALE_MS below
+// is a safety net only, for a tab that vanishes without a clean event (crash, navigating off
+// the Relay domain without a normal teardown).
+const ACTIVE_TABS_KEY       = 'extActiveTabs';      // {tabId: lastSeenAt} — internal registry
+const ACTIVE_TAB_COUNT_KEY  = 'extActiveTabCount';  // {count:N} — what content scripts subscribe to
+const ACTIVE_TAB_STALE_MS   = 20000;
+
+var activeTabsQueueTail = Promise.resolve(); // same read-modify-write race guard as permitQueueTail
+
+async function getActiveTabsRegistry() {
+  var data = await chrome.storage.local.get(ACTIVE_TABS_KEY);
+  return data[ACTIVE_TABS_KEY] || {};
+}
+
+async function writeActiveTabsState(registry) {
+  var count = Object.keys(registry).length;
+  await chrome.storage.local.set({
+    [ACTIVE_TABS_KEY]:      registry,
+    [ACTIVE_TAB_COUNT_KEY]: { count: count }
+  });
+  return count;
+}
+
+async function touchActiveTabNow(tabId) {
+  var registry = await getActiveTabsRegistry();
+  var now = Date.now();
+  registry[tabId] = now;
+  Object.keys(registry).forEach(function (id) {
+    if (now - registry[id] > ACTIVE_TAB_STALE_MS) delete registry[id];
+  });
+  await writeActiveTabsState(registry);
+}
+
+async function releaseActiveTabNow(tabId) {
+  var registry = await getActiveTabsRegistry();
+  if (registry[tabId] === undefined) return;
+  delete registry[tabId];
+  await writeActiveTabsState(registry);
+}
+
+function touchActiveTab(tabId) {
+  if (typeof tabId !== 'number') return Promise.resolve();
+  activeTabsQueueTail = activeTabsQueueTail.then(
+    function () { return touchActiveTabNow(tabId); },
+    function () { return touchActiveTabNow(tabId); }
+  );
+  return activeTabsQueueTail;
+}
+
+function releaseActiveTab(tabId) {
+  if (typeof tabId !== 'number') return Promise.resolve();
+  activeTabsQueueTail = activeTabsQueueTail.then(
+    function () { return releaseActiveTabNow(tabId); },
+    function () { return releaseActiveTabNow(tabId); }
+  );
+  return activeTabsQueueTail;
+}
+
+// Immediate removal on real tab close — chrome.tabs.onRemoved is a persistent event
+// listener re-registered on every service-worker load, so this survives SW eviction/restart
+// just like every other listener in this file.
+chrome.tabs.onRemoved.addListener(function (tabId) {
+  releaseActiveTab(tabId).catch(function (e) {
+    console.error('[background] releaseActiveTab on tab close failed', e);
+  });
+});
+
 // ok=true (2xx observed) resets backoff entirely. ok=false (5xx or network failure —
 // status 0) advances one backoff step. Never called on 3xx/4xx — content.js only reports
 // results for responses it identifies as either success or a 5xx/network failure; other
 // statuses are left alone deliberately (a 401/403 is an auth problem, not a rate problem,
 // and should not be treated as "the whole browser must back off").
+//
+// `rateLimited` (2026-07-30) is a DISPLAY flag only — nothing in this file's pacing or
+// backoff math reads it. It exists because backoffUntil answers a different question than
+// the sidebar banner needs to: backoffUntil expiring means "we may try again now", NOT
+// "Amazon lifted the block". Only an observed 2xx proves the latter, so the flag is set on
+// every reported failure and cleared ONLY on a reported success — it deliberately outlives
+// the backoff timer. See sidebar.js isRateLimitPaused().
 async function reportResult(ok, status) {
   var state = await getState();
   if (ok) {
     state.backoffUntil     = null;
     state.backoffStepIndex = -1;
     state.lastFailureAt    = null;
+    state.rateLimited      = false;
   } else {
+    state.rateLimited      = true;
     state.backoffStepIndex = Math.min(state.backoffStepIndex + 1, BACKOFF_STEPS_MS.length);
     var baseMs = state.backoffStepIndex < BACKOFF_STEPS_MS.length
       ? BACKOFF_STEPS_MS[state.backoffStepIndex]
@@ -161,6 +245,14 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     // Default true (missing/undefined) so an older/mismatched content script that doesn't
     // send the flag still gets the safe (paced) behavior rather than an accidental bypass.
     var sharedLimitEnabled = msg.sharedLimitEnabled !== false;
+    // Heartbeat for the active-tab registry — fire-and-forget, not awaited before the
+    // permit response, so this display-only bookkeeping never adds latency to the
+    // latency-sensitive pacing decision above.
+    if (sender.tab) {
+      touchActiveTab(sender.tab.id).catch(function (e) {
+        console.error('[background] touchActiveTab failed', e);
+      });
+    }
     requestPermit(sharedLimitEnabled)
       .then(function (result) { sendResponse(result); })
       .catch(function (e) { sendResponse({ granted: false, error: String(e) }); });
@@ -170,6 +262,17 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (msg.type === 'REPORT_RESULT') {
     reportResult(msg.ok === true, msg.status)
       .then(function (state) { sendResponse({ ack: true, state: state }); })
+      .catch(function (e) { sendResponse({ ack: false, error: String(e) }); });
+    return true; // async response
+  }
+
+  if (msg.type === 'RELEASE_TAB') {
+    // Sent by content.js's stopOrchestrator() — covers both logout and the dispatcher
+    // manually pausing (Play/Pause off). A paused tab isn't part of the round-robin, so it
+    // must not count toward N — see the comment on ACTIVE_TABS_KEY above.
+    var releaseTabId = sender.tab && sender.tab.id;
+    releaseActiveTab(releaseTabId)
+      .then(function () { sendResponse({ ack: true }); })
       .catch(function (e) { sendResponse({ ack: false, error: String(e) }); });
     return true; // async response
   }
