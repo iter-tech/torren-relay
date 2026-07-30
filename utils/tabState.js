@@ -1,22 +1,25 @@
-// Per-tab state store — isolates running, refreshIntervalMs, surgeThreshold, priceHistory.
-// Each tab has its own in-memory state; sessionStorage backs three of the four fields so
+// Per-tab state store — isolates running, surgeThreshold, priceHistory.
+// Each tab has its own in-memory state; sessionStorage backs both persisted fields so
 // they survive the memory-watchdog page reload without touching chrome.storage.local.
 //
-// running:           in-memory only — always starts false; memory-reload resume is handled
-//                    separately via sessionStorage['ext_resume_after_memory_reload'].
-// refreshIntervalMs: sessionStorage['ext_tab_speed']          (persists across reload)
-// surgeThreshold:    sessionStorage['ext_tab_surge_threshold'] (persists across reload)
-// priceHistory:      sessionStorage['ext_tab_price_history']   (persists across reload)
+// running:        in-memory only — always starts false; memory-reload resume is handled
+//                 separately via sessionStorage['ext_resume_after_memory_reload'].
+// surgeThreshold: sessionStorage['ext_tab_surge_threshold'] (persists across reload)
+// priceHistory:   sessionStorage['ext_tab_price_history']   (persists across reload)
 //
 // Global settings (nightMode, sounds, tag filters, surgeEnabled) stay in chrome.storage.local.
+// refreshIntervalMs moved OUT of this store 2026-07-20 — it is now a GLOBAL setting
+// (STORAGE_KEYS.REFRESH_INTERVAL_MS, utils/storage.js) shared by every tab, because N
+// independently-timed tabs were multiplying the effective request rate against one IP.
+// See background.js / content/content.js for the cross-tab rate-limit coordinator this
+// enabled.
 
 var tabState = (function () {
 
   var _state = {
-    running:           false,
-    refreshIntervalMs: 2000,
-    surgeThreshold:    50,
-    priceHistory:      {}
+    running:        false,
+    surgeThreshold: 50,
+    priceHistory:   {}
   };
 
   var _subscribers = {}; // { key: [fn, ...] }
@@ -47,9 +50,7 @@ var tabState = (function () {
     _state[key] = value;
     // Mirror non-running fields to sessionStorage so they survive a page reload.
     try {
-      if (key === 'refreshIntervalMs') {
-        sessionStorage.setItem('ext_tab_speed', String(value));
-      } else if (key === 'surgeThreshold') {
+      if (key === 'surgeThreshold') {
         sessionStorage.setItem('ext_tab_surge_threshold', String(value));
       } else if (key === 'priceHistory') {
         sessionStorage.setItem('ext_tab_price_history', JSON.stringify(value));
@@ -85,16 +86,6 @@ var tabState = (function () {
     logger.log('tabState', 'init called');
     return new Promise(function (resolve) {
       try {
-        // Restore refresh speed
-        var savedSpeed = sessionStorage.getItem('ext_tab_speed');
-        if (savedSpeed !== null) {
-          var ms = parseFloat(savedSpeed);
-          if (!isNaN(ms) && ms > 0) {
-            _state.refreshIntervalMs = ms;
-            logger.log('tabState', 'refreshIntervalMs restored', { ms: ms });
-          }
-        }
-
         // Restore price history
         var savedHistory = sessionStorage.getItem('ext_tab_price_history');
         if (savedHistory) {

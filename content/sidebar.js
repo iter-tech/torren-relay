@@ -78,6 +78,15 @@ function buildSidebar() {
     '#ext-sidebar [data-testid="ext-slider-value"]{' +
       'font-size:11px;min-width:28px;opacity:.9;color:var(--ext-n700);' +
     '}' +
+    // Rate-limit banner (2026-07-20) — replaces the play/pause+slider row while the
+    // cross-tab rate limiter (background.js) is in backoff. Fixed amber color (matches the
+    // existing memory-indicator amber tier, #d4a72c) rather than a --ext-* token, since
+    // this is a semantic caution signal that must stay visually consistent regardless of
+    // theme — same reasoning already used for the Fast Book button's fixed blue.
+    '#ext-sidebar [data-testid="ext-rate-limit-banner"]{' +
+      'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+      'font-size:12px;font-weight:600;color:#d4a72c;' +
+    '}' +
     '#ext-sidebar [data-testid="ext-memory-indicator"]{' +
       'width:12px;height:12px;border-radius:50%;cursor:pointer;' +
       'border:1px solid var(--ext-n300);flex-shrink:0;' +
@@ -165,10 +174,15 @@ function buildSidebar() {
       '<rect x="14" y="5" width="4" height="14" rx="1"></rect>' +
     '</svg>';
 
-  // Speed slider
+  // Speed slider — GLOBAL as of 2026-07-20 (was per-tab; see utils/tabState.js and
+  // CHANGELOG.md — N independently-timed tabs multiplied the effective request rate
+  // against one IP). title/aria-label make the new scope explicit in the UI, per the task
+  // ("update the label so the user understands it applies browser-wide").
   const slider = document.createElement('input');
   slider.setAttribute('type', 'range');
   slider.setAttribute('data-testid', 'ext-slider-speed');
+  slider.setAttribute('title', 'Refresh speed — applies to ALL open Relay tabs, not just this one');
+  slider.setAttribute('aria-label', 'Refresh speed. Applies to all open Relay tabs.');
   slider.min   = '0.5';
   slider.max   = '8';
   slider.step  = '0.5';
@@ -177,7 +191,15 @@ function buildSidebar() {
   // Slider value display
   const sliderValue = document.createElement('span');
   sliderValue.setAttribute('data-testid', 'ext-slider-value');
+  sliderValue.setAttribute('title', 'Applies to all open Relay tabs');
   sliderValue.textContent = '2.0s';
+
+  // Rate-limit banner (2026-07-20) — hidden by default; shown in place of
+  // playpause+slider+sliderValue while background.js's cross-tab limiter is in backoff.
+  // See updateRateLimitDisplay() below.
+  const rateLimitBanner = document.createElement('span');
+  rateLimitBanner.setAttribute('data-testid', 'ext-rate-limit-banner');
+  rateLimitBanner.style.display = 'none';
 
   // Memory indicator — dispatcher-controlled reload, no auto-reload (see content.js).
   const memoryIndicator = document.createElement('span');
@@ -212,6 +234,7 @@ function buildSidebar() {
   container.appendChild(playpause);
   container.appendChild(slider);
   container.appendChild(sliderValue);
+  container.appendChild(rateLimitBanner);
   container.appendChild(memoryIndicator);
   container.appendChild(memoryInfo);
   container.appendChild(scanline);
@@ -321,11 +344,51 @@ function buildSidebar() {
     memoryTooltip.classList.remove('ext-tooltip-visible');
   }
 
-  // Seed visual state from tabState (synchronous — tabState.init() completed before buildSidebar)
-  var initSpeedSec = tabState.get('refreshIntervalMs') / 1000;
-  slider.value = String(initSpeedSec);
-  sliderValue.textContent = initSpeedSec.toFixed(1) + 's';
-  applyScanSpeed(initSpeedSec);
+  // --- Global refresh interval + cross-tab rate-limit banner (2026-07-20) ---
+  // Local cache of background.js's rate-limiter state, kept in sync via
+  // chrome.storage.onChanged below. Ticked every second purely for the visible
+  // countdown — does not re-message the service worker every second; backoffUntil is a
+  // fixed timestamp, so a local countdown is all that's needed between storage updates.
+  var _rateLimitState = { backoffUntil: null, backoffStepIndex: -1 };
+
+  function formatCountdown(ms) {
+    return Math.max(0, Math.ceil(ms / 1000)) + 's';
+  }
+
+  // Swaps playpause+slider+sliderValue for the banner while backoff is active, so the
+  // dispatcher is never left wondering whether the extension broke — per the task.
+  function updateRateLimitDisplay() {
+    var now = Date.now();
+    var active = !!(_rateLimitState.backoffUntil && _rateLimitState.backoffUntil > now);
+    if (active) {
+      rateLimitBanner.textContent = 'Paused — Amazon rate limit. Retrying in ' +
+        formatCountdown(_rateLimitState.backoffUntil - now);
+    }
+    rateLimitBanner.style.display = active ? '' : 'none';
+    playpause.style.display       = active ? 'none' : '';
+    slider.style.display          = active ? 'none' : '';
+    sliderValue.style.display     = active ? 'none' : '';
+  }
+
+  // Seed visual state — GLOBAL settings now live in chrome.storage.local, not tabState
+  // (moved 2026-07-20; see utils/tabState.js). Async, unlike the old synchronous
+  // tabState.get() read — a brief flash of the '2.0s' default before this resolves is an
+  // accepted, imperceptible trade-off (every other global setting in this codebase is
+  // already seeded the same asynchronous way).
+  chrome.storage.local.get([STORAGE_KEYS.REFRESH_INTERVAL_MS, RATE_LIMITER_KEY], function (data) {
+    var storedMs = data[STORAGE_KEYS.REFRESH_INTERVAL_MS];
+    var initSpeedSec = (typeof storedMs === 'number' && storedMs > 0) ? storedMs / 1000 : 2;
+    slider.value = String(initSpeedSec);
+    sliderValue.textContent = initSpeedSec.toFixed(1) + 's';
+    applyScanSpeed(initSpeedSec);
+
+    var rl = data[RATE_LIMITER_KEY];
+    if (rl) {
+      _rateLimitState.backoffUntil     = rl.backoffUntil || null;
+      _rateLimitState.backoffStepIndex = (typeof rl.backoffStepIndex === 'number') ? rl.backoffStepIndex : -1;
+    }
+    updateRateLimitDisplay();
+  });
 
   reflectRunning(tabState.get('running'));
 
@@ -348,6 +411,39 @@ function buildSidebar() {
   // once removed from the DOM, and a reactivation would start a second one alongside it.
   container._memoryPollInterval = setInterval(updateMemoryIndicator, MEMORY_POLL_MS);
 
+  // Rate-limit countdown tick — same leak-prevention pattern as the memory poller above:
+  // stashed on the container so deactivateExtensionUI() can clear it.
+  container._rateLimitPollInterval = setInterval(updateRateLimitDisplay, 1000);
+
+  // Cross-tab sync: the refresh-interval slider and the rate-limit banner both reflect
+  // GLOBAL chrome.storage.local state now, so a change made in ANY tab (a different
+  // tab's slider, or background.js updating backoff) must be reflected here live. Named
+  // (not anonymous) and stashed on the container for the same reason as
+  // _runningSubscriber/_memoryPollInterval — deactivateExtensionUI() removes it before
+  // the sidebar is torn down, so a later reactivation's fresh buildSidebar() doesn't
+  // leak a second listener alongside it.
+  function handleGlobalStorageChange(changes, area) {
+    if (area !== 'local') return;
+    if (changes[STORAGE_KEYS.REFRESH_INTERVAL_MS] !== undefined) {
+      var newMs = changes[STORAGE_KEYS.REFRESH_INTERVAL_MS].newValue;
+      if (typeof newMs === 'number' && newMs > 0) {
+        var sec = newMs / 1000;
+        slider.value = String(sec);
+        sliderValue.textContent = sec.toFixed(1) + 's';
+        applyScanSpeed(sec);
+        logger.log('sidebar', 'refresh interval synced from another tab', { ms: newMs });
+      }
+    }
+    if (changes[RATE_LIMITER_KEY] !== undefined) {
+      var rl = changes[RATE_LIMITER_KEY].newValue || {};
+      _rateLimitState.backoffUntil     = rl.backoffUntil || null;
+      _rateLimitState.backoffStepIndex = (typeof rl.backoffStepIndex === 'number') ? rl.backoffStepIndex : -1;
+      updateRateLimitDisplay();
+    }
+  }
+  chrome.storage.onChanged.addListener(handleGlobalStorageChange);
+  container._rateLimitStorageListener = handleGlobalStorageChange;
+
   // --- Event listeners ---
   // CLAUDE.md rule 2: addEventListener only, never inline handlers
   // CLAUDE.md rule 4: no .click() on Amazon elements — these only touch our own UI
@@ -364,11 +460,11 @@ function buildSidebar() {
   });
 
   slider.addEventListener('input', function () {
-    logger.log('sidebar', 'slider changed', { value: slider.value });
+    logger.log('sidebar', 'slider changed (GLOBAL — applies to all tabs)', { value: slider.value });
     var sec = parseFloat(slider.value);
     sliderValue.textContent = sec.toFixed(1) + 's';
     applyScanSpeed(sec);
-    tabState.set('refreshIntervalMs', sec * 1000);
+    chrome.storage.local.set({ [STORAGE_KEYS.REFRESH_INTERVAL_MS]: sec * 1000 });
   });
 
   // Click 4 — extension-owned UI, not Amazon DOM. Manual, dispatcher-initiated reload

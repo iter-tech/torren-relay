@@ -13,6 +13,15 @@ function injectPanelStyle() {
   style.id = 'ext-inline-panel-style';
   style.textContent =
     '.ext-inline-panel{' +
+      // width:100%+box-sizing:border-box — LAYOUT FIX (2026-07-20): the panel is inserted as
+      // a sibling of the load card via cardElement.parentNode.insertBefore(...). Amazon's
+      // load-list container appears to lay its children out via flex/grid; a block <div>
+      // with no explicit width shrinks to its content's natural width in that context
+      // instead of filling the row, which is what produced "collapsed to the left, ~half
+      // width" — the table's own width:100%/table-layout:fixed (below) was always correct,
+      // it just had a shrunken parent to be 100% of. box-sizing:border-box keeps the 1px
+      // border from pushing total rendered width past the card's width.
+      'width:100%;box-sizing:border-box;' +
       'border:1px solid var(--ext-n200);border-radius:4px;margin:0 0 12px 0;' +
       'font-family:Arial,sans-serif;font-size:13px;background:var(--ext-surface);overflow:hidden;' +
     '}' +
@@ -23,52 +32,91 @@ function injectPanelStyle() {
     '.ext-inline-panel__header .ext-payout{' +
       'margin-left:auto;font-weight:bold;' +
     '}' +
+    // CSS POLISH (2026-07-20): switched from CSS Grid to Flexbox. The badge+code+arrow+
+    // badge+code route group used to be split across two separate grid columns/elements
+    // (a 40px badge column, then a route column) — they read as drifting apart. Now
+    // .ext-seg-route is the ONE flex item holding all five pieces (JS restructured to match
+    // — see buildPanelElement()), sized to its content (flex:0 1 auto, not a fixed
+    // fraction), pinned left. margin-left:auto on .ext-seg-dist (the first of the
+    // remaining group) pushes distance/duration + load type + status + chevron into a
+    // compact cluster at the right — see that rule below.
     '.ext-seg-header{' +
       'background:var(--ext-n100);border-top:1px solid var(--ext-n200);padding:10px 14px;' +
-      'display:grid;grid-template-columns:40px minmax(0,3fr) 1.4fr 1fr 1fr 32px;' +
-      'gap:0;align-items:center;' +
-      'font-size:12px;color:var(--ext-n700);cursor:pointer;user-select:none;' +
+      'display:flex;align-items:center;gap:8px;' +
+      'font-size:12px;font-weight:600;color:var(--ext-n900);cursor:pointer;user-select:none;' +
     '}' +
-    '.ext-seg-header > span{padding:0 8px;}' +
-    '.ext-seg-route{min-width:0;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;}' +
+    '.ext-seg-route{' +
+      'display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;' +
+    '}' +
     '.ext-route-origin{' +
       'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11px;' +
-      'overflow-wrap:break-word;word-break:break-word;min-width:0;text-align:center;' +
+      'overflow-wrap:break-word;word-break:break-word;min-width:0;' +
     '}' +
     '.ext-route-dest{' +
       'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11px;' +
-      'overflow-wrap:break-word;word-break:break-word;min-width:0;text-align:center;' +
+      'overflow-wrap:break-word;word-break:break-word;min-width:0;' +
     '}' +
-    '.ext-route-arrow{font-size:1.15em;font-weight:700;color:var(--ext-n400);margin:0 0.35em;}' +
-    '.ext-seg-dist{color:var(--ext-n500);font-size:11px;text-align:center;}' +
-    '.ext-seg-action{text-align:center;font-size:11px;color:var(--ext-n700);}' +
-    '.ext-seg-status{text-align:center;font-size:11px;}' +
+    '.ext-route-arrow{font-size:1.15em;font-weight:700;color:var(--ext-n400);}' +
+    // margin-left:auto — the "right-align remaining columns in a compact group" mechanism:
+    // consumes all free space between the route group and this item, pushing dist/duration,
+    // load type, status, and the chevron together at the right edge. gap:8px on the flex
+    // container (above) provides the tight spacing between them after that point.
+    '.ext-seg-dist{color:var(--ext-n500);font-size:11px;white-space:nowrap;margin-left:auto;}' +
+    '.ext-seg-action{font-size:11px;color:var(--ext-n700);white-space:nowrap;}' +
+    '.ext-seg-status{font-size:11px;white-space:nowrap;}' +
     '.ext-seg-loaded{color:var(--ext-success);font-weight:500;}' +
     '.ext-seg-empty{color:var(--ext-n500);}' +
-    '.ext-seg-header .ext-seg-title{display:flex;align-items:center;justify-content:center;padding:0;}' +
     '.ext-seg-header .ext-seg-arrow{transition:transform .15s;text-align:center;padding:0 4px;}' +
     '.ext-seg-header.ext-open .ext-seg-arrow{transform:rotate(180deg);}' +
     '.ext-seg-body{display:none;}' +
     '.ext-seg-body.ext-open{display:block;}' +
-    '.ext-inline-panel__table{width:100%;border-collapse:collapse;table-layout:fixed;}' +
-    '.ext-inline-panel__table th:nth-child(1),.ext-inline-panel__table td:nth-child(1){width:40%;}' +
-    '.ext-inline-panel__table th:nth-child(2),.ext-inline-panel__table td:nth-child(2){width:20%;}' +
-    '.ext-inline-panel__table th:nth-child(3),.ext-inline-panel__table td:nth-child(3){width:20%;}' +
-    '.ext-inline-panel__table th:nth-child(4),.ext-inline-panel__table td:nth-child(4){width:20%;}' +
+    // display:table + width:100% MUST be !important here — Amazon has a global rule that
+    // sets <table> to display:block on the page. A block-level table ignores width:100%
+    // for its own internal layout (the browser builds an anonymous shrink-to-fit table
+    // inside the block instead), which is the confirmed, browser-measured root cause of
+    // this table rendering at ~40-45% of the card width with empty space on the right
+    // (2026-07-20). Do NOT remove the !important — without it, Amazon's rule wins and the
+    // table silently reverts to shrink-to-fit.
+    '.ext-inline-panel__table{display:table !important;width:100% !important;table-layout:fixed;border-collapse:collapse;}' +
+    // Column widths (CSS POLISH, 2026-07-20): was 40/20/20/20 — now Stop 34%, Equipment/Id
+    // 18%, Arrival 24%, Departure 24%.
+    '.ext-inline-panel__table th:nth-child(1),.ext-inline-panel__table td:nth-child(1){width:34%;}' +
+    '.ext-inline-panel__table th:nth-child(2),.ext-inline-panel__table td:nth-child(2){width:18%;}' +
+    '.ext-inline-panel__table th:nth-child(3),.ext-inline-panel__table td:nth-child(3){width:24%;}' +
+    '.ext-inline-panel__table th:nth-child(4),.ext-inline-panel__table td:nth-child(4){width:24%;}' +
     '.ext-inline-panel__table th{' +
-      'text-align:left;font-size:11px;color:var(--ext-n500);font-weight:bold;' +
-      'padding:8px 14px;border-bottom:1px solid var(--ext-n200);' +
+      // CSS POLISH (2026-07-20): smaller uppercase label style (was 11px/bold, no
+      // transform), padding reduced 10px 14px → 6px 12px (was "too tall"). Background
+      // unchanged (var(--ext-n100) was already "one step darker than data rows").
+      'text-align:left;font-size:10px;color:var(--ext-n500);font-weight:600;' +
+      'text-transform:uppercase;letter-spacing:0.4px;' +
+      'padding:6px 12px;background:var(--ext-n100);vertical-align:middle;' +
+      'border-bottom:1px solid var(--ext-n200);' +
     '}' +
     '.ext-inline-panel__table td{' +
-      'padding:10px 14px;border-bottom:1px solid var(--ext-n100);vertical-align:top;word-break:break-word;' +
+      // CSS POLISH (2026-07-20): padding 10px 14px → 8px 12px; vertical-align top → middle.
+      // border-right column separators REMOVED per this pass — "they add noise, keep only
+      // horizontal separators" (were added in the immediately preceding layout-only pass).
+      'padding:8px 12px;border-bottom:1px solid var(--ext-n200);vertical-align:middle;word-break:break-word;' +
     '}' +
+    // Primary line (station code / city) — the <b> element built in buildSegmentTable().
+    // No class on that element (tag selector, scoped to this table, is precise enough —
+    // avoided touching buildSegmentTable() for a rule this simple).
+    '.ext-inline-panel__table td b{font-weight:600;color:var(--ext-n700);font-size:13px;}' +
+    // Zebra striping (CSS POLISH, 2026-07-20): reuses var(--ext-n100) — the same subtle
+    // tint already established for the header — rather than inventing a new shade, per
+    // "existing CSS custom properties only". content/nightMode.js's existing
+    // `tbody td{background-color:DK_HIGH !important}` would otherwise erase this in dark
+    // mode (blanket !important on every cell); a matching dark-mode counterpart was added
+    // there (reusing the panel's own existing DK_OVERLAY, not a new color) — see that file.
+    '.ext-inline-panel__table tbody tr:nth-child(even) td{background:var(--ext-n100);}' +
     '.ext-stop-num{' +
       'display:inline-flex;width:18px;height:18px;border-radius:50%;' +
       'background:var(--ext-accent-bg);color:var(--ext-accent-text);font-size:11px;' +
       'align-items:center;justify-content:center;margin-right:8px;' +
     '}' +
-    '.ext-seg-title .ext-stop-num{margin-right:0;}' +
-    '.ext-stop-addr{color:var(--ext-n500);font-size:12px;}' +
+    '.ext-seg-route .ext-stop-num{margin-right:0;}' +
+    '.ext-stop-addr{color:var(--ext-n500);font-size:11px;margin-top:2px;}' +
     '.ext-dot-loaded{' +
       'display:inline-block;width:11px;height:11px;border-radius:50%;' +
       'background:var(--ext-n900);margin-right:6px;vertical-align:middle;' +
@@ -688,23 +736,23 @@ function buildPanelElement(data) {
       var segHeader = document.createElement('div');
       segHeader.className = 'ext-seg-header';
 
-      var titleSpan = document.createElement('span');
-      titleSpan.className = 'ext-seg-title';
-      // Use stops[0].num when stops exist; fall back to formula only when stops are empty.
-      var originNum   = segment.stops.length > 0 ? segment.stops[0].num : String(i + 1);
-      var originNumEl = document.createElement('span');
-      originNumEl.className  = 'ext-stop-num';
-      originNumEl.textContent = originNum;
-      titleSpan.appendChild(originNumEl);
-
-      // Route column — origin, bold accent arrow, destination as separate nodes.
-      // Never uses innerHTML; each part set via textContent.
+      // Route group — badge/code/arrow/badge/code all as direct children of ONE flex
+      // container (.ext-seg-route), so they read as a single group at the left instead of
+      // the badge sitting in its own separate grid column, far from its code (CSS POLISH,
+      // 2026-07-20). Previously the origin badge lived in a separate `.ext-seg-title`
+      // element/grid column; that element no longer exists.
       var fromToSpan = document.createElement('span');
       fromToSpan.className = 'ext-seg-route';
 
       var routeParts = segment.fromTo.split(' → ');
       var originText = routeParts[0] || '';
       var destText   = routeParts.length > 1 ? routeParts.slice(1).join(' → ') : '';
+
+      // Use stops[0].num when stops exist; fall back to formula only when stops are empty.
+      var originNum   = segment.stops.length > 0 ? segment.stops[0].num : String(i + 1);
+      var originNumEl = document.createElement('span');
+      originNumEl.className  = 'ext-stop-num';
+      originNumEl.textContent = originNum;
 
       var originEl = document.createElement('span');
       originEl.className  = 'ext-route-origin';
@@ -714,8 +762,6 @@ function buildPanelElement(data) {
       routeArrowEl.className  = 'ext-route-arrow';
       routeArrowEl.textContent = '→';
 
-      var destEl = document.createElement('span');
-      destEl.className  = 'ext-route-dest';
       // Use last stop's num when stops exist; fall back to formula only when stops are empty.
       var destNum   = segment.stops.length > 0
         ? segment.stops[segment.stops.length - 1].num
@@ -723,11 +769,15 @@ function buildPanelElement(data) {
       var destNumEl = document.createElement('span');
       destNumEl.className  = 'ext-stop-num';
       destNumEl.textContent = destNum;
-      destEl.appendChild(destNumEl);
-      destEl.appendChild(document.createTextNode(destText));
 
+      var destEl = document.createElement('span');
+      destEl.className  = 'ext-route-dest';
+      destEl.textContent = destText;
+
+      fromToSpan.appendChild(originNumEl);
       fromToSpan.appendChild(originEl);
       fromToSpan.appendChild(routeArrowEl);
+      fromToSpan.appendChild(destNumEl);
       fromToSpan.appendChild(destEl);
 
       // Distance · duration — muted secondary
@@ -751,7 +801,6 @@ function buildPanelElement(data) {
       arrowSpan.className  = 'ext-seg-arrow';
       arrowSpan.textContent = '⌄';
 
-      segHeader.appendChild(titleSpan);
       segHeader.appendChild(fromToSpan);
       segHeader.appendChild(milesSpan);
       segHeader.appendChild(loadTypeSpan);

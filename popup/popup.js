@@ -19,6 +19,7 @@ var KEY_HIDE_PAST_BOOK     = 'hidePastBook';       // STORAGE_KEYS.HIDE_PAST_BOO
 var KEY_SURGE_ENABLED      = 'surgeEnabled';       // STORAGE_KEYS.SURGE_ENABLED  (boolean, default false)
 var KEY_SURGE_THRESHOLD    = 'surgeThreshold';     // STORAGE_KEYS.SURGE_THRESHOLD (number, default 50)
 var KEY_FAST_BOOK_ENABLED  = 'fastBookEnabled';    // STORAGE_KEYS.FAST_BOOK_ENABLED (boolean, default false)
+var KEY_SHARED_LIMIT       = 'sharedRefreshLimitEnabled'; // STORAGE_KEYS.SHARED_LIMIT_ENABLED (true-default)
 
 // ── Supabase auth (email OTP) ──────────────────────────────────────────────────
 // vendor/supabase.min.js (global `supabase`) + utils/supabaseConfig.js
@@ -104,6 +105,9 @@ document.addEventListener('DOMContentLoaded', function () {
   var surgeToggle        = document.getElementById('popup-surge');
   var surgeThreshold     = document.getElementById('popup-surge-threshold');
   var fastBookToggle     = document.getElementById('popup-fast-book');
+  var sharedLimitToggle  = document.getElementById('popup-shared-limit');
+  var sharedLimitInfo    = document.getElementById('popup-shared-limit-info');
+  var sharedLimitTooltip = document.getElementById('popup-shared-limit-tooltip');
   var resetBtn           = document.getElementById('popup-reset');
 
   // ── Account / login (Supabase email OTP) ───────────────────────────────────
@@ -342,7 +346,7 @@ document.addEventListener('DOMContentLoaded', function () {
       KEY_NIGHT_MODE, KEY_TAB_ALERT, KEY_AUTO_OPEN, KEY_HIDE_SIMILAR,
       KEY_VOLUME, KEY_SOUND_ID,
       KEY_HIDE_PROMOTED, KEY_HIDE_STARTING_SOON, KEY_HIDE_TRAILER_READY, KEY_HIDE_PAST_BOOK,
-      KEY_SURGE_ENABLED, KEY_SURGE_THRESHOLD, KEY_FAST_BOOK_ENABLED
+      KEY_SURGE_ENABLED, KEY_SURGE_THRESHOLD, KEY_FAST_BOOK_ENABLED, KEY_SHARED_LIMIT
     ],
     function (data) {
       if (nightToggle)        nightToggle.checked        = data[KEY_NIGHT_MODE] === true;
@@ -363,6 +367,7 @@ document.addEventListener('DOMContentLoaded', function () {
         logger.log('popup', 'surgeThreshold loaded', { value: surgeThreshold.value });
       }
       if (fastBookToggle)     fastBookToggle.checked     = data[KEY_FAST_BOOK_ENABLED]  === true;
+      if (sharedLimitToggle)  sharedLimitToggle.checked  = data[KEY_SHARED_LIMIT] !== false; // true-default
     }
   );
 
@@ -467,6 +472,24 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  if (sharedLimitToggle) {
+    sharedLimitToggle.addEventListener('change', function () {
+      logger.log('popup', 'sharedRefreshLimitEnabled saved', { value: sharedLimitToggle.checked });
+      chrome.storage.local.set({ [KEY_SHARED_LIMIT]: sharedLimitToggle.checked });
+    });
+  }
+
+  // Info tooltip — hover + keyboard focus (not a native title attribute, which doesn't
+  // reliably show on keyboard focus). Matches content/sidebar.js's memory-info pattern.
+  if (sharedLimitInfo && sharedLimitTooltip) {
+    var showSharedLimitTooltip = function () { sharedLimitTooltip.classList.add('popup-tooltip-visible'); };
+    var hideSharedLimitTooltip = function () { sharedLimitTooltip.classList.remove('popup-tooltip-visible'); };
+    sharedLimitInfo.addEventListener('mouseenter', showSharedLimitTooltip);
+    sharedLimitInfo.addEventListener('mouseleave', hideSharedLimitTooltip);
+    sharedLimitInfo.addEventListener('focus', showSharedLimitTooltip);
+    sharedLimitInfo.addEventListener('blur', hideSharedLimitTooltip);
+  }
+
   // ── Reset to defaults ─────────────────────────────────────────────────────
   // Clears every extension-managed key from chrome.storage.local, then resets
   // the popup UI controls to their documented defaults. No confirm dialog.
@@ -492,6 +515,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (surgeToggle)        surgeToggle.checked        = false;
         if (surgeThreshold)     surgeThreshold.value       = 50;
         if (fastBookToggle)     fastBookToggle.checked     = false;
+        if (sharedLimitToggle)  sharedLimitToggle.checked  = true; // true-default
       });
     });
   }
@@ -516,6 +540,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (changes[KEY_SURGE_ENABLED]      !== undefined && surgeToggle)        surgeToggle.checked        = changes[KEY_SURGE_ENABLED].newValue      === true;
     if (changes[KEY_SURGE_THRESHOLD] !== undefined && surgeThreshold) surgeThreshold.value = (changes[KEY_SURGE_THRESHOLD].newValue !== undefined) ? changes[KEY_SURGE_THRESHOLD].newValue : 50;
     if (changes[KEY_FAST_BOOK_ENABLED]  !== undefined && fastBookToggle)    fastBookToggle.checked     = changes[KEY_FAST_BOOK_ENABLED].newValue   === true;
+    if (changes[KEY_SHARED_LIMIT] !== undefined && sharedLimitToggle) sharedLimitToggle.checked = changes[KEY_SHARED_LIMIT].newValue !== false;
     if (changes[SUPABASE_SESSION_KEY] !== undefined) {
       var newSession = changes[SUPABASE_SESSION_KEY].newValue;
       if (newSession && newSession.user) {

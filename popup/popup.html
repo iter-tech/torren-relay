@@ -86,6 +86,20 @@
       </label>
     </div>
 
+    <div class="popup-row">
+      <span class="popup-label-with-info">
+        <label class="popup-label" for="popup-shared-limit">Shared refresh limit</label>
+        <span class="popup-info-icon" id="popup-shared-limit-info" data-testid="popup-shared-limit-info"
+              tabindex="0" role="button" aria-label="About shared refresh limit" aria-describedby="popup-shared-limit-tooltip">i
+          <span class="popup-info-tooltip" id="popup-shared-limit-tooltip" data-testid="popup-shared-limit-tooltip" role="tooltip">Amazon blocks too-frequent refreshes and can temporarily cut off access from your IP. This mode shares one refresh budget across all your tabs so you don't hit that limit. Turn it off to give each tab its own timer.</span>
+        </span>
+      </span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="popup-shared-limit" data-testid="popup-shared-limit">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+
     <div class="popup-sound">
       <div class="popup-sound-head">Sound</div>
       <div class="popup-sound-row">

@@ -2,6 +2,564 @@
 
 ## [Unreleased]
 
+### 2026-07-30 — Shared-limit pacing bug fix: 1 tab at 2s was actually refreshing every ~3.5s
+
+**Bug report (with real measured data):** with the "Shared refresh limit" toggle ON and
+only ONE tab open, the tab refreshed about every 3.5s even though the dispatcher's slider
+was set to 2s. A single tab at 2s never triggered a 503 in prior testing, so shared mode
+must never be slower than the dispatcher's own chosen setting.
+
+**Wiring reported before coding (per instruction):**
+- `background.js`'s pacing floor was `const GLOBAL_MIN_PERMIT_INTERVAL_MS = 5000` — a
+  **hardcoded 5-second constant, unrelated to the dispatcher's slider value**
+  (`globalRefreshIntervalMs`, adjustable 0.5s–8s). `grantOrDenyPermit()` paced every grant
+  against `lastGrantedAt + GLOBAL_MIN_PERMIT_INTERVAL_MS` — so even a single tab requesting
+  every 2s could be silently re-throttled toward a 5s cadence.
+- **How N (active-tab count) was counted: it wasn't.** No registry, no heartbeat, no
+  counter anywhere — permits were granted purely FIFO against one shared `lastGrantedAt`
+  timestamp. This turned out not to be a gap that needed filling (see below).
+- A second, independent cause of the reported 3.5s: `content.js`'s `scheduleNextTick()` set
+  a **fresh** `globalRefreshIntervalMs` timer *after* `orchestratorTick()` fully finished —
+  and that tick includes the permit round-trip, `refreshNow()`, `REFRESH_SETTLE_MS`
+  (1200ms), and pipeline parsing. Real cadence was `interval + tick_overhead`, not
+  `interval` — for 1 tab, `2000 + 1200(settle) + ~300(pipeline) ≈ 3500ms`, matching the
+  reported number. This was likely the dominant cause, independent of the 5000ms floor
+  (which for a single tab often wasn't even binding, since the tick's own overhead already
+  exceeded it).
+
+**Correct model implemented (dispatcher's interval = the global budget itself, not a
+separate constant):**
+- **`background.js`:** `GLOBAL_MIN_PERMIT_INTERVAL_MS` removed. New
+  `getGlobalPacingFloorMs()` reads `STORAGE_KEYS.REFRESH_INTERVAL_MS`
+  (`globalRefreshIntervalMs`) directly from `chrome.storage.local` on every call (falls back
+  to 2000ms if missing/invalid) — the shared floor now IS the dispatcher's own chosen
+  interval, re-read fresh so a live slider change takes effect for pacing immediately, not
+  just for each tab's own local timer.
+- **No explicit N-tracking added, deliberately.** With the floor set to the dispatcher's
+  interval, FIFO fairness alone reproduces the requested model: with 1 tab, the floor is
+  essentially never binding (a tab's own tick overhead already exceeds it once the
+  overhead-compensation fix below is applied), so it refreshes at exactly the chosen
+  interval; with N tabs competing for the same one-slot-every-`interval` floor, each tab
+  statistically receives 1 grant in every N — i.e. `interval × N` per tab, with the combined
+  rate across all tabs staying at 1 grant per `interval`, exactly as specified. A tab that
+  closes or logs out simply stops sending `REQUEST_PERMIT` messages, so it drops out of the
+  round robin **instantly** — no registry entry to expire, no TTL/staleness window, no risk
+  of a stale entry inflating N after a crash. This is simpler and more immediate than an
+  explicit counter would have been.
+- **`content/content.js`:** new `lastTickElapsedMs` (module-level, starts at 0) records how
+  long the just-finished tick actually took wall-clock (`tickStart` captured at tick entry,
+  `lastTickElapsedMs = Date.now() - tickStart` set in the tick's `finally` block — not
+  touched by the `orchTickRunning` overlap-guard's early return, since that's not a real
+  tick attempt). `scheduleNextTick()` now computes
+  `delayMs = Math.max(0, intervalMs - lastTickElapsedMs)` instead of scheduling a bare
+  `intervalMs` timer — this is the literal "subtract permit round-trip overhead rather than
+  let it accumulate" fix, generalized to the tick's *total* overhead (permit wait +
+  `refreshNow()` + settle + pipeline), since the settle/pipeline time dominates the permit
+  round-trip itself and both need subtracting for the cadence to actually match the chosen
+  interval. When a tick's overhead exceeds the interval (e.g. it had to wait for another
+  tab's turn), the next attempt fires immediately (floored at 0) instead of waiting a full
+  extra interval on top — this is also what lets a tab "catch up" quickly after losing a
+  contention round, contributing to the N-tab fairness above.
+- No new artificial safety floor was added below the slider's own 0.5s minimum — per the
+  "dispatcher's interval IS the budget" model, their own setting is now authoritative. The
+  protection against the original 503 bug is preserved entirely by the shared floor: no
+  matter how many tabs are open, the **combined** request rate across all of them never
+  exceeds 1 per chosen interval — that's what actually prevented the original failure (many
+  tabs each independently polling at full, uncoordinated speed).
+
+**Verified with real functional tests (Node `vm` loading the actual `background.js`, plus a
+faithful simulation of `content.js`'s own compensation algorithm — real wall-clock timing,
+not mocked clocks; no browser available, see Verification rules):**
+- 1 tab at a 2000ms setting (1500ms simulated settle+pipeline overhead, mirroring the real
+  numbers) cadences at ~2000ms average over 8s, not ~3500ms.
+- 3 tabs sharing a 300ms setting: each tab's own cadence averages ~900ms (interval × 3);
+  combined grant rate across all 3 averages ~300ms (1 per chosen interval); grant counts
+  are balanced across tabs (no starvation).
+- A tab that "closes" mid-run (stops requesting, exactly like a real tab close or logout)
+  causes the remaining tab to speed back up to the full un-shared interval within one cycle
+  — no lag, no stale N.
+- A live slider change mid-session (2000ms → 500ms) is picked up by the very next pacing
+  check, not the previously-cached value.
+- 11/11 structural checks confirming the exact code changes are present in both files.
+
+**NOT verified — needs manual browser testing (no browser available in this environment):**
+1. **1 tab, real browser:** set the slider to 2s, open DevTools Network tab, confirm actual
+   `/api/loadboard/search` requests are ~2s apart (not ~3.5s as previously reported).
+2. **4 tabs, real browser:** set the slider to 2s in all 4, confirm the **combined** request
+   rate across all 4 tabs (sum of requests/sec in the Network tab across tabs) is ~1 request
+   per 2s total — i.e. each individual tab should visibly refresh roughly every ~8s
+   (2s × 4), not more, not less.
+3. Close (or log out) one of the 4 tabs mid-session and confirm the remaining 3 tabs speed
+   up toward ~6s each (2s × 3) promptly, without a long lag.
+4. Change the slider while multiple tabs are running and confirm the new pacing floor takes
+   effect for ALL tabs within one tick, not just the tab that changed it.
+5. Re-run TC-RATELIMIT-1's original 503 regression scenario (3-4 tabs, fast setting) to
+   confirm the combined-rate protection still holds after this fix — this fix changes HOW
+   the floor is computed but must not reopen the original bug.
+6. Confirm 503 backoff (TC-RATELIMIT-1 steps 4-8, TC-RATELIMIT-2 step 5) is unaffected by
+   this change — this fix only touches the pacing floor, not the backoff check, which still
+   runs first and unconditionally in `grantOrDenyPermit()`.
+
+### 2026-07-20 — Cross-tab rate limiting follow-up: make the shared budget OPTIONAL
+
+**Ask:** the cross-tab permit system (previous entry below) must not be forced — add a
+"Shared refresh limit" toggle (default ON) in the popup. ON = previous behavior (one
+global request budget via `background.js`'s permit dispenser, 503 backoff). OFF = legacy
+behavior: each tab fires its own refresh on its own schedule, no permit requests, no
+cross-tab coordination — **except** 503 backoff, which is never optional and must still
+pause a tab and show the countdown even in OFF mode.
+
+**Wiring reported before coding (per instruction):** the refresh-interval slider was
+already global (`STORAGE_KEYS.REFRESH_INTERVAL_MS`, cached in `content.js` as
+`globalRefreshIntervalMs`, synced live via `chrome.storage.onChanged`).
+`orchestratorTick()` unconditionally sent `{type:'REQUEST_PERMIT'}` before every
+`refreshNow()` and skipped the tick if denied; `background.js`'s `grantOrDenyPermit()`
+checked backoff first (deny if active), then paced against
+`lastGrantedAt + GLOBAL_MIN_PERMIT_INTERVAL_MS`. Backoff itself is populated by
+`content/networkObserver.js`'s MAIN-world 503 observation → `REPORT_RESULT`, entirely
+independent of the pacing/permit path — this made backoff and pacing already separable
+without a parallel implementation.
+
+**Design decision (interpretive judgment call, flagged for review):** the refresh-interval
+*value* stays a global setting regardless of the new toggle — only the PACING/COORDINATION
+step (asking `background.js` for a permit before firing) is what toggles off. The tooltip
+text says "give each tab its own **timer**", which reads as describing the coordination
+mechanism, not the interval value's storage location; reverting the interval itself back to
+per-tab (as it was before the whole rate-limiting feature) was judged out of scope and not
+requested by requirement 5 ("Setting is global... and persists" — describing the NEW
+toggle, not the interval). If this is wrong, say so and it's a small follow-up.
+
+**Implementation:**
+- `utils/storage.js`: new `STORAGE_KEYS.SHARED_LIMIT_ENABLED = 'sharedRefreshLimitEnabled'`, true-default.
+- `background.js`: `grantOrDenyPermit(sharedLimitEnabled)` now checks backoff FIRST,
+  unconditionally; only when backoff is clear does it branch — `sharedLimitEnabled === false`
+  grants immediately (no pacing wait, `lastGrantedAt` left untouched so it never competes
+  with a concurrently shared-mode tab's pacing math); `true` (or the flag missing, for
+  backward safety) runs the existing pacing wait unchanged. `requestPermit()` threads the
+  flag through the existing FIFO queue.
+- `content/content.js`: caches `sharedRefreshLimitEnabled` (true-default), seeded +
+  live-synced via `chrome.storage.onChanged` — identical pattern to
+  `globalRefreshIntervalMs`. `orchestratorTick()` still sends `REQUEST_PERMIT` on every
+  tick regardless of the setting (this is what keeps backoff working in both modes) but now
+  includes `sharedLimitEnabled: sharedRefreshLimitEnabled` in the message so
+  `background.js` knows whether to also enforce pacing.
+- `content/sidebar.js`: **no changes.** The rate-limit banner (`updateRateLimitDisplay()`)
+  already reads `RATE_LIMITER_KEY.backoffUntil` directly, independent of any mode, so it
+  already shows the "Paused — Amazon rate limit" countdown correctly in both ON and OFF
+  states without modification.
+- `popup/popup.html` / `popup.css` / `popup.js`: new "Shared refresh limit" toggle row
+  (`data-testid="popup-shared-limit"`) placed in the Display & Alerts section, right after
+  Auto-Open Top Load, following the exact existing `.popup-row`/`.toggle-switch` markup and
+  the `KEY_AUTO_OPEN` true-default read/write/reset/live-sync pattern. A circled "i" icon
+  (`data-testid="popup-shared-limit-info"`) next to the label shows a tooltip
+  (`data-testid="popup-shared-limit-tooltip"`) with the exact requested text, on hover AND
+  keyboard focus (not a native `title` attribute — those don't reliably show on focus),
+  matching `content/sidebar.js`'s existing memory-info tooltip pattern adapted to static
+  HTML/CSS since no popup-side precedent existed.
+
+**Verified (Node `vm` sandbox loading the real `background.js`, no browser available — see
+Verification rules):** 15/15 checks — OFF-mode grants immediately with no pacing wait (2
+back-to-back requests <500ms); ON-mode (and a request with the flag omitted entirely, for
+backward safety) still enforces the ~5s pacing floor; backoff denies permits in BOTH
+OFF and ON mode after a reported 503, and the denial carries `backoffUntil` for the
+countdown; once backoff expires, OFF-mode grants immediately without any pacing wait;
+a reported 200 fully resets backoff. Separately verified structurally (source-text
+assertions, since these files are DOM-heavy) that popup.html/css/js and content.js contain
+the toggle markup, tooltip markup with the exact requested copy, keyboard-focusability,
+the true-default storage pattern, the live-sync listener, and that `orchestratorTick()`'s
+`REQUEST_PERMIT` message now carries the flag.
+
+**NOT verified — needs manual browser testing (no browser available in this environment):**
+1. Visual check of the toggle row and "i" icon rendering/alignment in the actual 320px popup, both themes (Night Mode on/off).
+2. Tooltip position/overflow — `left:0` positioning relative to the icon has not been visually confirmed to stay within the popup's bounds; may need a tweak if it clips at the edge.
+3. Tooltip shows/hides correctly on real mouse hover and real Tab-key keyboard focus.
+4. Toggling the switch in one tab's popup takes effect on another already-open Relay tab within one tick, with no reload — the `chrome.storage.onChanged` live-sync path is verified logically in isolation, not end-to-end.
+5. With the toggle OFF and multiple real tabs open, confirm each tab fires its own refresh without waiting on another tab (no more 503-inducing burst was NOT re-tested here — this task only adds the ESCAPE HATCH; the original problem this whole feature solves will recur if a user intentionally turns it off with many tabs open, which is expected/accepted per the ask).
+6. With the toggle OFF, force a real 503 (or simulate) and confirm the sidebar banner still shows "Paused — Amazon rate limit" with a live countdown, and that the tab actually pauses (does not keep firing) during that window.
+
+### 2026-07-20 — Cross-tab rate limiting: one global request budget + backoff on 503
+
+**Problem, confirmed with real data:** with 3-4 Relay tabs open, each running its own
+independent 2s refresh timer, Amazon returned HTTP 503 on
+`https://relay.amazon.com/api/loadboard/search` for ALL tabs simultaneously. Switching
+networks restored access immediately, confirming the throttle is IP-based, not
+account-based. Root cause: the refresh interval was PER TAB (`utils/tabState.js`), so N
+open tabs multiplied the effective request rate against one IP.
+
+Files changed: `manifest.json`, `utils/storage.js`, `utils/tabState.js`,
+`content/sidebar.js`, `content/content.js`. New files: `background.js` (this extension's
+first-ever service worker), `content/networkObserver.js`.
+
+**Current slider wiring, reported before changing it (per instruction):**
+`content/sidebar.js`'s `ext-slider-speed` wrote `tabState.set('refreshIntervalMs', sec *
+1000)` on `input` — per-tab, sessionStorage-backed (`ext_tab_speed`), fully isolated
+between tabs by the file's own design ("Per-tab state store — isolates running,
+refreshIntervalMs, surgeThreshold, priceHistory"). `content/content.js`'s
+`scheduleNextTick()` read `tabState.get('refreshIntervalMs')` to pace that tab's own timer,
+completely independent of every other open tab.
+
+**1. Permit dispenser (`background.js`, new).** `chrome.runtime.onMessage` handles
+`REQUEST_PERMIT` (grants/denies, enforcing one global minimum interval across all tabs) and
+`REPORT_RESULT` (advances/resets backoff). **Design constraint honored exactly as
+specified: this file never performs the board fetch itself** — it only coordinates via
+`chrome.storage.local`; the fetch/click stays entirely in the content script, which needs
+the page's own auth context. Concurrent requests are serialized through an in-memory
+promise chain (`permitQueueTail`) — FIFO, so no tab can cut the line ("round robin, no tab
+starves"). **Critically, this chain is NOT the source of truth**: MV3 service workers are
+not persistent (Chrome can terminate one after ~30s of no pending activity and restart it
+fresh), so every grant/deny decision re-reads `chrome.storage.local` on each call; if the
+worker is evicted and restarted between requests, the in-memory chain just resets to a
+no-op with zero correctness impact, because pacing is governed by the persisted
+`lastGrantedAt` timestamp, never by anything held only in memory. `content/content.js`'s
+`orchestratorTick()` requests a permit before every `refreshNow()` call and skips the
+refresh entirely (no fetch, no pipeline run) when denied — the next scheduled tick asks
+again, which also means the worker keeps receiving messages throughout a backoff period
+instead of being evicted for the full 5-minute worst case.
+
+**Named constant, empirical and unverified, as instructed:**
+```js
+// EMPIRICAL, UNVERIFIED — Amazon's real per-IP rate threshold for /api/loadboard/search is
+// NOT known. This is a conservative guess based on exactly one observed failure...
+const GLOBAL_MIN_PERMIT_INTERVAL_MS = 5000;
+```
+Chosen as roughly 10x below the observed failure rate (4 tabs × 1 req/2s ≈ 2 req/s
+aggregate caused sustained 503s) — a guess at a safe margin, not a confirmed safe rate.
+Adjustable in exactly one place if real capacity data ever emerges.
+
+**2. Refresh interval is now GLOBAL.** `STORAGE_KEYS.REFRESH_INTERVAL_MS =
+'globalRefreshIntervalMs'` added (a new key, not a reuse of the legacy `SPEED` key — different
+unit, different semantics). `utils/tabState.js`'s `refreshIntervalMs` field removed entirely
+(was one of 4 per-tab fields; now 2). `content/sidebar.js`'s slider reads/writes
+`chrome.storage.local` directly instead of `tabState`, with a `chrome.storage.onChanged`
+listener so every open tab's slider stays in sync live when changed from any one of them.
+Label/tooltip updated: `title="Refresh speed — applies to ALL open Relay tabs, not just this
+one"` on both the slider and its value display, per the instruction to make the new scope
+explicit in the UI.
+
+**3. Backoff on failure.** `content/networkObserver.js` (new) — injected as a **separate**
+`"world":"MAIN"` content_scripts entry in `manifest.json` (Chrome 111+ declarative
+main-world injection; every other file in this extension runs isolated). This is required
+specifically to see Amazon's own `fetch()`/`XMLHttpRequest` calls, which use the page's own
+`window.fetch` reference, invisible to an isolated-world script. **Read-only observation
+only** — wraps fetch/XHR to watch responses; never modifies a request, never delays one,
+never invents a new one. Only requests whose URL contains the confirmed
+`/api/loadboard/search` path are reported (via `window.postMessage`, the standard
+MAIN↔ISOLATED world technique) to `content/content.js`, which relays `{ ok, status }` to
+`background.js` via `REPORT_RESULT`. Backoff schedule exactly as specified: `[5000, 10000,
+20000, 40000, 80000]` ms, capped at `300000` (5 min), ±20% jitter
+(`Math.random() * 2 - 1) * ratio`), advancing one step per consecutive failure, reset to
+"normal" only by a reported 2xx. **5xx/network-failure only** — a 401/403 does not trigger
+backoff (that is an auth problem, not a rate problem; treating it as "the whole browser
+must back off" would be wrong).
+
+**4. Visible state.** New `ext-rate-limit-banner` element in `content/sidebar.js`: while
+`backoffUntil` is in the future, it replaces `ext-playpause`/`ext-slider-speed`/
+`ext-slider-value` in place (not a separate row — the sidebar is only 40px tall) with
+"Paused — Amazon rate limit. Retrying in Xs", updated every second via a local
+`setInterval` (does **not** re-message the service worker every second — `backoffUntil` is
+a fixed timestamp cached locally and refreshed live via `chrome.storage.onChanged`, so the
+countdown is purely a local re-render). Fixed amber color (`#d4a72c`, the same tier already
+used for the memory indicator's amber state) rather than a `--ext-*` token, for the same
+reason the Fast Book button uses a fixed color — a semantic caution signal that must read
+consistently regardless of theme.
+
+**5. One shared state, not per-tab backoff.** All backoff state lives in
+`chrome.storage.local` under `RATE_LIMITER_KEY`, owned exclusively by `background.js` — no
+tab computes or stores its own backoff; every tab reads the same value and shows the same
+countdown.
+
+**6. Persistence.** `chrome.storage.local` (not `chrome.storage.session`, not any in-memory
+JS state) is the sole source of truth for both `RATE_LIMITER_KEY` and
+`REFRESH_INTERVAL_MS` — a popup reopen, a tab reload, or a service-worker restart all read
+the same persisted state fresh; nothing resets on any of those events. `RATE_LIMITER_KEY`
+was deliberately kept **out of** `STORAGE_KEYS` (same reasoning as `SUPABASE_SESSION_KEY`/
+`AUTH_PENDING_KEY`) — "Reset to Defaults" clearing live coordination state mid-backoff
+would let every tab immediately hammer Amazon again right when the extension is most likely
+to be freshly reset after trouble. `REFRESH_INTERVAL_MS` **is** in `STORAGE_KEYS` — it is a
+genuine user preference, correctly reset like every other slider/toggle.
+
+**Verified — real functional tests, not just structural checks (no browser needed for
+this part; `background.js` has zero DOM dependency):** ran the actual `background.js` in a
+Node `vm` context with `chrome.storage.local` mocked as a real async in-memory store and
+`chrome.runtime.onMessage` driven directly. 18/18 checks passed, including: two requests
+5000ms apart are correctly spaced ~5000ms (not both granted immediately); three concurrent
+"tabs" requesting at once are serialized FIFO over ~2x the interval (not all granted at
+once, not starved); a reported failure produces a backoff duration within the 5s ±20%
+jitter band; six consecutive failures advance the backoff index exactly 0→1→2→3→4→5(capped);
+a success resets the index to -1 and clears `backoffUntil`; and — critically — **a
+freshly-constructed worker instance reading the same persisted store still correctly denies
+a permit**, directly verifying backoff survives a simulated service-worker restart. Also
+ran a separate integration test against `content/content.js`'s `orchestratorTick()`: 4/4
+checks confirm `refreshNow()` is never called when a permit is denied or when the permit
+request itself fails (fail-safe), and is called normally when granted.
+
+**Could NOT be verified (explicitly, per Verification rules) — no browser available in
+this environment:**
+- The `networkObserver.js` fetch/XHR patching actually intercepting real page traffic —
+  Node has no `XMLHttpRequest` global at all, and testing `fetch` patching in Node would
+  not reflect real page behavior regardless.
+- The sidebar banner's actual visual rendering/layout (same limitation as every CSS change
+  this session).
+- Real `chrome.runtime` message-passing timing/serialization between the actual separate
+  service-worker and content-script processes (the functional test above runs everything
+  in one process/context — real IPC has its own behavior).
+- Whether a manifest `content_scripts` entry with `"world":"MAIN"` behaves as expected in
+  the dispatcher's actual Chrome version (a Chrome 111+ feature).
+- Real service-worker eviction/restart behavior over the true multi-minute backoff window
+  in an actual browser session, with actual multiple tabs.
+
+**What still needs manual browser testing, explicitly, as instructed:**
+1. Open 4 Relay tabs, log in, start the loop in all four. Confirm — via the Network tab or
+   `chrome://serviceworker-internals`/`chrome://inspect` on the service worker's console —
+   that the aggregate request rate across ALL FOUR tabs together matches
+   `GLOBAL_MIN_PERMIT_INTERVAL_MS` (one board request roughly every 5s total, not four
+   tabs each independently hitting every ~2s).
+2. Force a 503 (or simulate one — e.g., temporarily block `/api/loadboard/search` via
+   DevTools request blocking in one tab) and confirm: all four tabs' sidebars switch to
+   the "Paused — Amazon rate limit. Retrying in Xs" banner at the same time, the countdown
+   ticks down in sync across tabs, and normal operation resumes in all tabs together once
+   backoff ends (or a real 200 is observed).
+3. Reopen the popup and reload a tab mid-backoff — confirm the countdown does not reset
+   (persistence).
+4. Confirm the global slider change in one tab is reflected live in every other open tab.
+
+**Not implemented, flagged for follow-up:** `docs/SAFETY.md` was not updated this pass
+(not in this task's requested doc list), but this change introduces two genuinely new kinds
+of surface this project has not had before — a background service worker, and a MAIN-world
+script that patches `window.fetch`/`XMLHttpRequest.prototype` — that this codebase's usual
+rigor around documenting click sites and network writes would normally cover. Worth a
+SAFETY.md pass separately.
+
+### 2026-07-20 — CSS polish: segment header route grouping, table header/cell styling, zebra striping
+
+Files changed: `content/inlinePanel.js` (JS + CSS), `content/nightMode.js` (CSS). Layout
+width untouched — `display:table !important;width:100% !important` on
+`.ext-inline-panel__table` (previous fix) is unchanged.
+
+**Quoted current-state before changing anything, as instructed** — `.ext-seg-header`'s
+`grid-template-columns` was `40px minmax(0,3fr) 1.4fr 1fr 1fr 32px`; `th` was
+`text-align:left;font-size:11px;color:var(--ext-n500);font-weight:bold;padding:10px
+14px;background:var(--ext-n100);vertical-align:middle;border-bottom:1px solid
+var(--ext-n200);`; `td` was `padding:10px 14px;border-bottom:1px solid
+var(--ext-n200);vertical-align:top;word-break:break-word;` plus a `border-right` column
+separator added in the immediately preceding pass.
+
+**1. Segment header route grouping.** The origin badge and its station code were genuinely
+in two separate DOM elements/grid columns (`.ext-seg-title` holding only the badge,
+`.ext-seg-route` holding origin/arrow/dest) — CSS alone cannot merge two sibling grid items
+into one flex cell, so this required a small structural change in `buildPanelElement()`:
+`.ext-seg-title` was removed; the origin badge, origin code, arrow, destination badge, and
+destination code are now five flat children appended directly to `.ext-seg-route`, which is
+now `display:flex;align-items:center;gap:6px;flex:0 1 auto` (content-sized, not a fixed
+grid fraction). `.ext-seg-header` itself switched from CSS Grid to `display:flex;gap:8px`.
+The remaining columns (distance/duration, load type, status, chevron) are pushed into a
+compact right-aligned cluster via `margin-left:auto` on `.ext-seg-dist` (the first of that
+group), which consumes all free space between it and the route group — a standard flexbox
+idiom, no extra spacer element needed. Header text: `font-weight:600`, `color:var(--ext-n900)`
+(darker than the table body's `var(--ext-n700)` primary line, per instruction).
+
+**2. Table header row (`th`).** `font-size:10px` (was 11px), `text-transform:uppercase`,
+`letter-spacing:0.4px`, `font-weight:600` (was `bold`), `padding:6px 12px` (was `10px 14px`
+— "currently too tall"). Background unchanged (`var(--ext-n100)` was already correctly "one
+step darker than data rows").
+
+**3. Data cells (`td`).** Primary line (station code/city — the `<b>` element built in
+`buildSegmentTable()`, no class of its own) styled via a new tag selector
+`.ext-inline-panel__table td b{font-weight:600;color:var(--ext-n700);font-size:13px;}` —
+chose a scoped tag selector over adding a class in JS, since the element is unambiguous
+within this table and it kept `buildSegmentTable()` untouched. Secondary line
+(`.ext-stop-addr`): `font-size:11px` (was 12px), `margin-top:2px` added. Cell padding
+`8px 12px` (was `10px 14px`), `vertical-align:middle` (was `top`). **Column-separator
+borders removed** (`border-right` rule from the previous pass deleted) — "keep only
+horizontal separators", per this instruction; `border-bottom:1px solid var(--ext-n200)`
+kept as the sole row separator.
+
+**4. Column widths.** 40/20/20/20 → **Stop 34%, Equipment/Id 18%, Arrival 24%, Departure
+24%** (both `th` and `td` `nth-child` rules updated).
+
+**5. Zebra striping.** `.ext-inline-panel__table tbody tr:nth-child(even) td{background:
+var(--ext-n100);}` — reuses the same subtle tint already used for the header rather than
+inventing a new shade ("existing CSS custom properties only"). **Dark-mode counterpart
+added to `content/nightMode.js`**, not just left to the universal override: the existing
+`#ext-inline-panel tbody td{background-color:DK_HIGH !important}` rule would otherwise
+blanket-erase the zebra tint in Night Mode (same `!important`, but a plain `tbody td` loses
+to a more specific `tbody tr:nth-child(even) td`, so a matching rule was needed, not just
+inherited "for free" like the border-color fixes in the previous two passes). Added
+`html.ext-night #ext-inline-panel tbody tr:nth-child(even) td{background-color:DK_OVERLAY
+!important;}` — reuses `DK_OVERLAY` (already the panel's own background color in dark mode),
+not a new color.
+
+**Verified (structural + DOM-shape only — still explicitly not a rendered-layout proof, no
+browser available in this environment):** loaded the real `injectPanelStyle()` and
+`buildPanelElement()` in a Node `vm` context with a minimal fake DOM. 27 checks, all passing:
+every intended CSS declaration is present verbatim (flex conversion, `margin-left:auto`,
+th/td font-size/padding/transform, column-border removal, `34/18/24/24` widths, zebra rule,
+updated `.ext-stop-num` selector), the removed `.ext-seg-title` rule is gone, and — critically
+— `buildPanelElement()`'s actual output DOM was inspected directly: `.ext-seg-header` now has
+exactly 5 children (was 6), and `.ext-seg-route` now has exactly 5 flat children in the
+correct order (badge, origin code, arrow, badge, destination code), confirming the
+route-group merge actually happened in the generated markup, not just in the CSS.
+
+**Still needs manual browser confirmation** — nothing above proves the visual result. Check,
+in both light mode and Night Mode, for a multi-segment load: the badge+code+arrow+badge+code
+now read as one visually grouped cluster at the left (not drifting apart); the
+dist/duration+load-type+status+chevron cluster sits compactly at the right; the header row
+looks smaller/uppercase/darker-text than before; data cells show only horizontal separators
+(no vertical noise); even rows show a subtle tint distinguishable from odd rows in both
+modes; and the primary/secondary stop-line text sizes read as intended. See
+docs/TEST_CASES.md TC-PANEL-POLISH-1.
+
+**Note:** `docs/UI_ELEMENTS.md`'s Inline Panel section (updated two passes ago) now has some
+stale claims — "Always 6 child spans" for `.ext-seg-header`, and the column-separator/padding
+description — not updated this pass since it wasn't in this task's requested doc list
+(CHANGELOG.md, TEST_CASES.md only). Flagging so it isn't silently wrong if referenced later.
+
+### 2026-07-20 — FIX: inline panel table width — real root cause (Amazon's global `table{display:block}` rule)
+
+Files changed: `content/inlinePanel.js` (CSS only, `injectPanelStyle()`).
+
+Supersedes the previous same-day width fix, which was insufficient — the segment table
+still rendered at ~40-45% of the card width afterward. **Root cause this time was found by
+live browser measurement, not hypothesis**: `.ext-inline-panel__table` computed to
+`display:block`, because Amazon has a global page rule setting `<table>` to
+`display:block`. A block-level table ignores `width:100%` for its own internal layout — the
+browser builds an anonymous shrink-to-fit table box inside the block instead — which is
+exactly why the table always rendered narrow with empty space on the right, regardless of
+`width:100%` being present. Confirmed live: forcing `display:table !important;width:100%
+!important` on the element immediately spanned the full card width, while an untouched
+sibling table stayed narrow.
+
+Fix:
+```
+.ext-inline-panel__table{display:table !important;width:100% !important;table-layout:fixed;border-collapse:collapse;}
+```
+A code comment is included directly above this rule explaining `!important` is required
+specifically to beat Amazon's global `table` rule, and warning not to remove it as a
+"cleanup."
+
+**Checked whether any other injected table has the same problem** (per instruction): grepped
+the entire codebase for `createElement('table')` / `<table` — `content/inlinePanel.js` is the
+**only** place in the extension that creates a `<table>` element. `content/patModal.js` (PAT
+modal — origin/dest/times/miles/payout rows) and `content/sidebar.js` (play/pause, speed
+slider, memory indicator) both lay their content out with CSS grid/flex on `<div>`s, never
+`<table>`. **No other fix needed or made.**
+
+Column-width percentages (40/20/20/20, Stop widest) are unchanged, per instruction — this
+fix only touches `display`/`width` on the table element itself, not its columns.
+
+**Verified (structural only — still not a rendered-layout proof):** no browser available in
+this environment (unchanged from the last two entries). Loaded the real `injectPanelStyle()`
+in a Node `vm` context and confirmed the generated CSS is brace-balanced and contains the
+exact new declaration (`display:table !important`, `width:100% !important`,
+`table-layout:fixed`, `border-collapse:collapse`) verbatim, with the previous fix's changes
+(panel `width:100%`, column-separator borders, unified padding, header background) and the
+40/20/20/20 column widths all still intact.
+
+**Still needs manual browser confirmation** — the user's own live measurement identified
+this root cause and confirmed the fix works on one table via direct DOM manipulation in
+DevTools; what's not yet confirmed is the *shipped* `injectPanelStyle()` rule doing the same
+across all four required scenarios: single-segment light mode, single-segment Night Mode,
+multi-segment light mode, multi-segment Night Mode. See docs/TEST_CASES.md
+TC-PANEL-WIDTH-2 for the exact before/after measurement steps.
+
+### 2026-07-20 — FIX: inline panel segment tables collapsed to ~half width, left-aligned
+
+Files changed: `content/inlinePanel.js` (CSS only, inside `injectPanelStyle()` — no
+data/field/structural changes, per the task's scope).
+
+**Investigation (read-only, done first):** `git log`/`git diff` on every file that renders
+or styles this panel (`content/inlinePanel.js`, `utils/designTokens.js`,
+`content/nightMode.js`, `content/highlighter.js`, `content/priceSurge.js`) found **no code
+regression** — the panel's core CSS and structure were byte-identical back to the last
+several commits; only additive, unrelated changes (Fast Book, login gating) had landed. Two
+explicit hypotheses (a `clearPipelineDom()`/`showInlinePanel()` race; light-mode CSS leakage
+from `nightMode.js`) were both ruled out with direct code evidence. **Root cause identified
+by inspecting the actual CSS**, not the diff: `.ext-inline-panel` (the panel's outer
+container, inserted as a sibling of the load card via
+`cardElement.parentNode.insertBefore(...)`) had no explicit `width`. `.ext-inline-panel__table`
+itself already had `width:100%;table-layout:fixed` with proportional column widths (40/20/20/20%)
+— correct, and unchanged by this fix — but a plain block `<div>` with no explicit width
+shrinks to its content's natural size instead of filling the row when its parent context
+lays children out via flex/grid, which is consistent with Amazon's load-list container. This
+existed for some time; it likely only became visually jarring recently because — per the
+task description — Amazon added visible borders to its own detail tables, and the
+now-narrower/borderless contrast made ours look obviously wrong next to them.
+
+Fix:
+- `.ext-inline-panel{ width:100%; box-sizing:border-box; ... }` — the core fix. `box-sizing:
+  border-box` keeps the existing 1px border from pushing the rendered width past the card's
+  width now that `width:100%` is explicit.
+- Column-separator borders added: `.ext-inline-panel__table th:not(:last-child), td:not(:last-child)
+  { border-right: 1px solid var(--ext-n200); }` — previously only row separators
+  (`border-bottom`) existed; Amazon's own tables now show both row and column separators.
+- Cell padding unified: `th` was `8px 14px`, `td` was `10px 14px` — both now `10px 14px`.
+- Border color unified: `td`'s `border-bottom` was `var(--ext-n200)` for `th` but
+  `var(--ext-n100)` (a lighter shade) for `td` — both now `var(--ext-n200)`, "same color
+  family" end to end.
+- Header visually distinct: `th` gained `background:var(--ext-n100)` (previously no
+  background at all — only text color/weight differed) and explicit `vertical-align:middle`
+  (parity with `td`'s existing `vertical-align:top`).
+- All new colors use `var(--ext-n200)`/`var(--ext-n100)` (CSS custom properties from
+  `utils/designTokens.js`), never a hardcoded hex — confirmed via `content/nightMode.js`'s
+  existing universal `html.ext-night body *:not(...){ border-color: <dark border> !important;
+  background-color:transparent !important; ... }` rule (plus its existing, more specific
+  `#ext-inline-panel thead th`/`tbody td`/`tbody tr` overrides) that every new rule added here
+  is automatically corrected for dark mode — **no changes to `content/nightMode.js` were
+  needed or made.**
+
+**Column proportions** (Stop widest, then Equipment/Id/Arrival/Departure roughly equal) were
+**already correct** in the existing code (40/20/20/20% via `table-layout:fixed`) — not
+changed by this fix, since the visual "collapse" was the outer container's width, not the
+table's internal proportions.
+
+**Verified (structural only — explicitly NOT a rendered-layout proof):** no browser,
+jsdom, or CSS parser is available in this environment (checked: `playwright`, `puppeteer`,
+`jsdom` all absent; no Chromium/Edge binary on `PATH`). Loaded the real `injectPanelStyle()`
+in a Node `vm` context and captured its generated CSS string — confirmed brace-balanced
+(40/40), confirmed every intended change is present verbatim (width:100%, box-sizing,
+unified padding, header background, unified border color, the new column-separator rule),
+and confirmed the untouched parts (table width/layout, 40/20/20/20 column widths) survived
+unchanged. **This proves the CSS text is well-formed, not that it renders correctly.**
+
+**Still needs manual browser testing (explicitly, per Verification rules) — nothing here has
+been visually confirmed:**
+1. Open a load's inline panel (single-segment and multi-segment) on the real load board and
+   confirm the segment table now spans the full card width, not ~half/left-collapsed.
+2. Confirm column-separator borders render as 1px lines, matching Amazon's own current
+   bordered-table look (color/weight) side by side.
+3. Confirm the header row reads as visually distinct (subtle background) without looking
+   out of place next to Amazon's own header styling.
+4. Repeat in Night Mode — confirm no light-mode colors leak through and the panel still
+   reads correctly against the dark surface.
+5. Item 2 of this task ("inspect Amazon's own detail table widths/borders/padding") could
+   **not** be done — no live page access in this environment. The fix targets the reported
+   symptom (full-width table, visible column separators, consistent padding) using values
+   already established elsewhere in this same file/design system, not measured Amazon
+   values. A dispatcher should eyeball this side-by-side against Amazon's current table and
+   flag if the border color/weight or padding needs tuning to match more closely.
+
+**Six-item smoke checklist (docs/CLAUDE.md Verification rules) — not run, no browser
+available:** (a) popup opens without console errors — not run; (b) logged-out popup shows
+only the login block — not run; (c) full login flow works — not run; (d) sidebar/panel
+activates on the load board — not run; (e) PAT modal opens and Confirm enables with valid
+data — not run; (f) no errors in the page console — not run. This change is CSS-only inside
+an existing, already-gated render path, so risk to (a)/(b)/(c)/(e)/(f) is low, but "low risk"
+is not the same as "verified" — flagging per the rule rather than implying any of these were
+checked.
+
+**Read-only finding, not implemented (explicitly out of scope for this task) — data fields
+present in a competitor's accordion but missing or incomplete in ours:**
+- **Per-segment payout** — `segment.price` is hardcoded to `''` in `readSheetData()`
+  (`content/inlinePanel.js`), never populated from the DOM, never rendered.
+- **Segment ID label** — `segment.idLabel` is likewise hardcoded to `''`, never populated
+  or rendered (stop-number circles are shown instead of a distinct segment identifier).
+- **Stop-level warnings** (e.g. Road Restriction) — no field exists at all in
+  `parseStopBlock()`'s returned stop object; zero handling anywhere in the file.
+- **Segment distance/duration** — partially present: `segment.miles`/`segment.duration`
+  *are* extracted and rendered, but **only** in the multi-segment collapsible header
+  (`ext-seg-dist`) — for single-segment loads (`buildPanelElement()`'s `else` branch), these
+  same computed values are silently discarded and never shown at all.
+
 ### 2026-07-20 — FIX: in-flight detection tick no longer outlives a logout
 
 Files changed: `content/content.js`.

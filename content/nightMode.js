@@ -172,6 +172,14 @@ function buildNightCss() {
     'html.ext-night #ext-inline-panel tbody td{' +
       'background-color:' + DK_HIGH + ' !important;' +
     '}',
+    // Zebra striping (CSS POLISH, 2026-07-20) — the light-mode rule (injectPanelStyle() in
+    // inlinePanel.js) uses var(--ext-n100); the blanket "tbody td{background:DK_HIGH}" rule
+    // right above would otherwise erase it in dark mode (same !important, but this
+    // even-row selector is more specific and wins). Reuses DK_OVERLAY — already the
+    // panel's own background color — rather than introducing a new shade.
+    'html.ext-night #ext-inline-panel tbody tr:nth-child(even) td{' +
+      'background-color:' + DK_OVERLAY + ' !important;' +
+    '}',
     'html.ext-night #ext-inline-panel tbody tr{' +
       'border-bottom:1px solid ' + DK_BORDER + ' !important;' +
     '}',

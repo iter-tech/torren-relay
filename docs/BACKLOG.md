@@ -4,6 +4,43 @@ Status key: **UI-BUILT** = HTML/CSS exists in popup, logic not wired | **PLANNED
 
 ---
 
+## 🚫 PRE-LAUNCH BLOCKER — Cross-tab rate limiting (implemented, unverified in a real browser)
+
+**Confirmed with real data, 2026-07-20:** 3-4 Relay tabs open, each with its own independent
+2s refresh timer, produced sustained HTTP 503 from Amazon on `/api/loadboard/search` across
+ALL tabs. Switching networks restored access immediately — IP-based throttle, not
+account-based. Root cause: the refresh interval was per-tab, so N tabs multiplied the
+effective request rate against one IP. **Do not ship/distribute this extension to more than
+one dispatcher (or recommend multi-tab use) until this is verified live**, since the failure
+mode is "the extension appears to silently break for everyone sharing that IP," not a
+contained per-tab issue.
+
+**Code-complete** — `background.js` (new service worker, permit dispenser + backoff state
+machine), `content/networkObserver.js` (new, MAIN-world 503 detection), global refresh
+interval (was per-tab), visible "Paused — Amazon rate limit. Retrying in Xs" countdown in
+every tab's sidebar. See CHANGELOG.md 2026-07-20 for full detail — including 18/18 real
+functional tests on the core permit/backoff algorithm (pure logic, no DOM needed) and 4/4
+on the content-script integration.
+
+**Blocking this from being considered launch-ready — none of the following has been
+checked in an actual multi-tab browser session (no browser available in the environment
+that implemented this):**
+- [ ] Open 4 real tabs, confirm the AGGREGATE request rate across all four matches the
+      global interval (not 4x it).
+- [ ] Force/simulate a real 503 and confirm all tabs pause and count down together, in
+      sync, and all resume together.
+- [ ] Confirm the countdown survives a popup reopen and a tab reload (persistence).
+- [ ] Confirm the `"world":"MAIN"` network observer actually intercepts real Amazon page
+      traffic in the dispatcher's actual Chrome version (Chrome 111+ feature; declarative
+      main-world content-script injection has not been used anywhere else in this
+      codebase before now).
+- [ ] Confirm real service-worker eviction/restart behavior over an actual multi-minute
+      backoff window doesn't lose or corrupt the shared state.
+
+See docs/TEST_CASES.md TC-RATELIMIT-1 for the full manual test script.
+
+---
+
 ## Step 3 — Wire popup controls (next up)
 
 Wire each popup control to `chrome.storage.local` one at a time. Order TBD by PM.

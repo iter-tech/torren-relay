@@ -8,11 +8,96 @@ var orchLoopActive  = false;  // double-start guard — true between startOrches
 
 var REFRESH_SETTLE_MS = 1200; // ms to wait after refresh before parsing
 
+// 2026-07-30 FIX: scheduleNextTick() used to set a FRESH globalRefreshIntervalMs timer
+// after every tick finished, so tick overhead (permit round-trip + refreshNow + settle +
+// pipeline) was added ON TOP of the chosen interval every cycle instead of being part of
+// it — a 2s setting compounded to ~3.5s in practice. lastTickElapsedMs records how long the
+// just-finished tick actually took (wall-clock, from tick start to tick end) so
+// scheduleNextTick can subtract it from the next delay, floored at 0 — the goal is for
+// refreshNow()-to-refreshNow() spacing to equal the chosen interval, not
+// interval + overhead. Left at 0 until the first real tick completes (see the tick's own
+// finally block below) — deliberately NOT updated by the orchTickRunning overlap-guard's
+// early return, since that's not a real tick attempt.
+var lastTickElapsedMs = 0;
+
 function sleep(ms) {
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);
   });
 }
+
+// --- Cross-tab rate limiting (2026-07-20) ---
+// GLOBAL refresh interval — was per-tab via tabState.refreshIntervalMs. N independently
+// timed tabs were multiplying the effective request rate against one IP (confirmed live:
+// 3-4 tabs at 2s each caused sustained HTTP 503 on /api/loadboard/search; switching
+// networks restored access immediately, confirming an IP-based, not account-based,
+// throttle). Cached here and kept in sync via chrome.storage.onChanged so
+// scheduleNextTick() doesn't need an async storage round-trip on every call — same
+// pattern used for the sidebar's own local caches.
+var globalRefreshIntervalMs = 2000; // default; corrected by the async seed below
+
+chrome.storage.local.get(STORAGE_KEYS.REFRESH_INTERVAL_MS, function (data) {
+  var ms = data[STORAGE_KEYS.REFRESH_INTERVAL_MS];
+  if (typeof ms === 'number' && ms > 0) {
+    globalRefreshIntervalMs = ms;
+    logger.log('content', 'globalRefreshIntervalMs seeded', { ms: ms });
+  }
+});
+
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area !== 'local') return;
+  if (changes[STORAGE_KEYS.REFRESH_INTERVAL_MS] === undefined) return;
+  var newMs = changes[STORAGE_KEYS.REFRESH_INTERVAL_MS].newValue;
+  if (typeof newMs === 'number' && newMs > 0) {
+    globalRefreshIntervalMs = newMs;
+    logger.log('content', 'globalRefreshIntervalMs synced from another tab', { ms: newMs });
+  }
+});
+
+// "Shared refresh limit" toggle (2026-07-20 follow-up) — true-default, set from the popup,
+// same cache+onChanged pattern as globalRefreshIntervalMs above. ON: orchestratorTick asks
+// background.js for a paced permit (GLOBAL_MIN_PERMIT_INTERVAL_MS enforced). OFF: the
+// permit request still happens (so backoff is still checked — see requirement below) but
+// tells background.js to skip pacing, restoring "each tab fires on its own schedule"
+// legacy behavior. Toggling takes effect on the very next tick — no reload needed.
+var sharedRefreshLimitEnabled = true; // default; corrected by the async seed below
+
+chrome.storage.local.get(STORAGE_KEYS.SHARED_LIMIT_ENABLED, function (data) {
+  var v = data[STORAGE_KEYS.SHARED_LIMIT_ENABLED];
+  sharedRefreshLimitEnabled = v !== false;
+  logger.log('content', 'sharedRefreshLimitEnabled seeded', { value: sharedRefreshLimitEnabled });
+});
+
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area !== 'local') return;
+  if (changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED] === undefined) return;
+  sharedRefreshLimitEnabled = changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED].newValue !== false;
+  logger.log('content', 'sharedRefreshLimitEnabled synced from another tab', { value: sharedRefreshLimitEnabled });
+});
+
+// Relays board-search HTTP status from the MAIN-world network observer
+// (content/networkObserver.js — a separate content_scripts entry, "world":"MAIN", per
+// manifest.json) to the rate-limit coordinator in background.js. Registered
+// unconditionally (not gated behind the login/auth check that gates the rest of this
+// file) — this is passive observation of the page's own network traffic, relaying it to
+// the shared coordinator is correct and safe regardless of THIS tab's login state (a 503
+// is a property of the shared IP, not of any one tab's session), and it costs nothing
+// when idle. ev.source check accepts only messages from this page's own scripts (not
+// iframes/other origins) — a coarse trust boundary, not a security gate, since the only
+// payload is an HTTP status code, nothing sensitive.
+window.addEventListener('message', function (ev) {
+  if (ev.source !== window) return;
+  var data = ev.data;
+  if (!data || data.__extRelaySearchResult !== true) return;
+  logger.log('content', 'board search result observed', { url: data.url, ok: data.ok, status: data.status });
+  try {
+    chrome.runtime.sendMessage({ type: 'REPORT_RESULT', ok: data.ok, status: data.status }).catch(function (e) {
+      logger.warn('content', 'REPORT_RESULT message failed', { error: e });
+    });
+  } catch (e) {
+    logger.warn('content', 'REPORT_RESULT sendMessage threw', { error: e });
+  }
+});
 
 // Shared heap reader — used by sidebar.js's memory indicator (polled independently
 // of the orchestrator loop). Returns null where performance.memory is unsupported.
@@ -167,7 +252,35 @@ async function orchestratorTick() {
     return;
   }
   orchTickRunning = true;
+  var tickStart = Date.now();
   try {
+    // Cross-tab permit gate (2026-07-20) — background.js enforces ONE global minimum
+    // interval between board requests across every open Relay tab, plus backoff on 5xx.
+    // A denied permit means either the global pace floor hasn't elapsed yet (another tab
+    // is "due" first) or the shared limiter is in backoff — either way, this tick simply
+    // skips refreshing; the next scheduled tick (globalRefreshIntervalMs later) will ask
+    // again. This is what keeps the sidebar's countdown live during backoff without a
+    // separate polling loop, and keeps the service worker from being evicted for the
+    // whole backoff duration (a message arrives every tick).
+    //
+    // "Shared refresh limit" toggle (2026-07-20 follow-up): the permit request is ALWAYS
+    // sent, even when the toggle is off — this is what keeps 503 backoff working in both
+    // modes (requirement: backoff is never optional). sharedRefreshLimitEnabled only tells
+    // background.js whether to ALSO enforce the pacing floor on top of the backoff check.
+    var permit;
+    try {
+      permit = await chrome.runtime.sendMessage({ type: 'REQUEST_PERMIT', sharedLimitEnabled: sharedRefreshLimitEnabled });
+    } catch (e) {
+      logger.warn('content', 'orchestratorTick: permit request failed (service worker unreachable?) — skipping this tick', { error: e });
+      return;
+    }
+    if (!permit || !permit.granted) {
+      logger.log('content', 'orchestratorTick: no permit — rate limiter active, skipping this tick', {
+        backoffUntil: permit && permit.backoffUntil
+      });
+      return;
+    }
+
     var refreshed = refreshNow();
     logger.log('content', 'orchestratorTick: refresh triggered', { refreshed: refreshed });
     await sleep(REFRESH_SETTLE_MS);
@@ -181,6 +294,7 @@ async function orchestratorTick() {
     logger.error('content', 'orchestratorTick: unexpected error', { error: e });
   } finally {
     orchTickRunning = false;
+    lastTickElapsedMs = Date.now() - tickStart;
   }
 }
 
@@ -194,11 +308,17 @@ function scheduleNextTick() {
     logger.log('content', 'scheduleNextTick: loop halted');
     return;
   }
-  var intervalMs = tabState.get('refreshIntervalMs');
+  var intervalMs = globalRefreshIntervalMs; // GLOBAL (2026-07-20) — see top of file
+  // Subtract the previous tick's actual overhead (2026-07-30 fix — see lastTickElapsedMs
+  // comment above) so refreshNow()-to-refreshNow() spacing matches intervalMs instead of
+  // intervalMs + overhead. Floored at 0: if a tick already took longer than intervalMs
+  // (e.g. it had to wait for a permit due to another tab's turn), fire again immediately
+  // rather than waiting a full extra interval on top.
+  var delayMs = Math.max(0, intervalMs - lastTickElapsedMs);
   orchTimer = setTimeout(async function () {
     await orchestratorTick();
     scheduleNextTick();
-  }, intervalMs);
+  }, delayMs);
 }
 
 async function startOrchestrator() {
@@ -278,11 +398,14 @@ function deactivateExtensionUI() {
 
   var sidebarEl = document.getElementById('ext-sidebar');
   if (sidebarEl) {
-    // Release the sidebar's tabState subscription + its independent memory-poll timer
-    // (both stored on the element by buildSidebar()) so a later reactivation's fresh
-    // buildSidebar() call doesn't leak a second copy of either alongside this one.
+    // Release the sidebar's tabState subscription, its independent memory-poll timer,
+    // its rate-limit countdown timer, and its global-storage change listener (all four
+    // stored on the element by buildSidebar()) so a later reactivation's fresh
+    // buildSidebar() call doesn't leak a second copy of any of them alongside this one.
     if (sidebarEl._runningSubscriber) tabState.unsubscribe('running', sidebarEl._runningSubscriber);
     if (sidebarEl._memoryPollInterval) clearInterval(sidebarEl._memoryPollInterval);
+    if (sidebarEl._rateLimitPollInterval) clearInterval(sidebarEl._rateLimitPollInterval);
+    if (sidebarEl._rateLimitStorageListener) chrome.storage.onChanged.removeListener(sidebarEl._rateLimitStorageListener);
     sidebarEl.remove();
   }
 

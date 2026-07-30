@@ -516,3 +516,316 @@ on timing a logout to hit one of two narrow windows in a live tab.
    several ticks complete normally **without** logging out. **Expected:** identical behavior
    to before this fix — new loads highlight, sound plays, top load auto-opens, inline panel
    shows normally, no spurious "bailing" log lines appear.
+
+### TC-PANEL-WIDTH-1 — Inline panel segment table spans the full card width, with column/row borders
+
+**Superseded/incomplete:** the fix this test case covers (`.ext-inline-panel{width:100%}`)
+was necessary but not sufficient — the table itself still rendered at ~40-45% width
+afterward. Root cause (Amazon's global `table{display:block}` rule) and the actual fix are
+in TC-PANEL-WIDTH-2 below; steps 1–2 of this test case (full-width table) will not pass
+until TC-PANEL-WIDTH-2's fix is also in place. Steps 3–8 (column proportions, header
+distinction, action bar) remain valid checks regardless.
+
+Regression test for the layout fix in `injectPanelStyle()` (2026-07-20 — panel collapsed to
+~half width, left-aligned). **Not yet run in a browser** — no rendering environment was
+available to verify this fix; every check below is outstanding.
+
+1. Open a **single-segment** load's inline panel (click a load card, or let auto-open trigger
+   it). **Expected:** `ext-inline-panel` (and the stop table inside it) spans the **full
+   width** of the load card — no large empty area on the right, not collapsed to the left.
+2. Open a **multi-segment** load's inline panel, expand a segment. **Expected:** same —
+   the expanded segment's stop table spans the full card width.
+3. **Expected — column proportions unchanged and correct:** within the full-width table,
+   the Stop column is visibly widest (~40%), with Equipment/Id, Arrival, and Departure each
+   roughly equal (~20% each) — this was already correct before the fix and must stay so.
+4. **Expected — borders:** visible 1px separator lines both between rows (horizontal) and
+   between columns (vertical) — previously only row separators existed. The rightmost
+   column should not show a double/redundant line against the panel's own outer border.
+5. **Expected — header:** the header row (Stop / Equipment / Id / Arrival / Departure)
+   has a subtle background tint distinguishing it from the data rows below, and consistent
+   padding with the data rows (not visibly tighter/looser).
+6. **Expected — no overflow:** the panel's outer border does not visibly overflow past the
+   load card's right edge by a pixel or two (checks `box-sizing:border-box` is doing its
+   job).
+7. **Regression — Night Mode:** toggle Night Mode on, repeat steps 1–5. **Expected:** same
+   full-width layout and bordered look, colors adapted to the dark surface (no light-mode
+   colors — e.g. a bright white header background — leaking through).
+8. **Regression — action bar / Fast Book button unaffected:** confirm the action bar
+   (screenshot/map/create-post/Fast Book icons) at the bottom of the panel still renders and
+   functions normally — this fix did not touch `.ext-action-bar`/`.ext-action-btn` CSS.
+9. **Not covered by this fix (reported separately, not implemented):** per-segment payout,
+   segment ID label, and stop-level warnings (e.g. Road Restriction) are absent from the
+   panel entirely; segment distance/duration is shown only for multi-segment loads, not
+   single-segment ones. None of these are expected to appear as a result of this fix.
+
+### TC-PANEL-WIDTH-2 — Table spans full card width (real root cause: Amazon's global `table{display:block}` rule)
+
+Regression guard for the actual root cause, found by live browser measurement (not a
+hypothesis): Amazon applies a global rule setting `<table>` to `display:block`, which makes
+the browser build an anonymous shrink-to-fit table box internally — `width:100%` alone
+(TC-PANEL-WIDTH-1's fix) cannot override this. Fixed via `display:table !important;width:100%
+!important` on `.ext-inline-panel__table`. **Not yet confirmed against the shipped code** —
+the root cause and the *general* fix approach were confirmed live by the user via direct
+DevTools element-style editing; what's outstanding is confirming `injectPanelStyle()`'s
+actual generated rule produces the same result end-to-end, across all four required
+scenarios.
+
+**Before/after measurement script** — paste into DevTools console with an accordion segment
+open:
+```js
+(function () {
+  var panel = document.getElementById('ext-inline-panel');
+  var table = panel && (panel.querySelector('table.ext-inline-panel__table')
+                      || panel.querySelector('.ext-seg-body.ext-open table'));
+  if (!panel || !table) { console.log('panel or open table not found'); return; }
+  var panelCs = getComputedStyle(panel);
+  var panelInner = panel.clientWidth - parseFloat(panelCs.paddingLeft) - parseFloat(panelCs.paddingRight);
+  var tableRect = table.getBoundingClientRect();
+  var tableCs = getComputedStyle(table);
+  console.log({
+    panelInnerWidthPx: panelInner.toFixed(1),
+    tableRenderedWidthPx: tableRect.width.toFixed(1),
+    tableComputedDisplay: tableCs.display,
+    matches: Math.abs(panelInner - tableRect.width) < 2
+  });
+})();
+```
+
+1. Run the script above on a **single-segment** load in **light mode**. **Expected:**
+   `tableComputedDisplay: "table"` (not `"block"`), and `tableRenderedWidthPx` equal to
+   `panelInnerWidthPx` (within ~2px rounding tolerance) — `matches: true`. **Report both
+   numbers.**
+2. Repeat on a **multi-segment** load (expand a segment first) in **light mode**. Same
+   expectation. **Report both numbers.**
+3. Toggle **Night Mode** on, repeat step 1 (single-segment). Same expectation — table still
+   full width; visually, colors adapt to the dark surface (no light-mode leakage). **Report
+   both numbers.**
+4. Toggle **Night Mode** on, repeat step 2 (multi-segment, expanded). Same expectation.
+   **Report both numbers.**
+5. **Regression — column proportions still correct at full width:** with the table now
+   genuinely full-width, re-confirm the Stop column is visibly ~40% and the other three are
+   ~20% each *of the new, correct total* — not just proportionally correct within an
+   already-too-narrow table.
+6. **Regression — other injected UI unaffected:** confirm the PAT modal (`ext-action-post`)
+   and the sidebar (`ext-sidebar`) still render exactly as before — neither uses a `<table>`
+   element (confirmed via codebase grep), so this fix should have zero visible effect on
+   either, but worth a quick look since Amazon's global rule is page-wide and could
+   theoretically interact with other elements we haven't audited.
+7. **Regression — comment survives:** confirm the code comment above the fixed CSS rule in
+   `content/inlinePanel.js` explaining why `!important` is required is still present (guards
+   against a future "cleanup" silently reintroducing this bug).
+
+### TC-PANEL-POLISH-1 — Segment header route grouping, header/cell styling, zebra striping
+
+Regression test for the CSS polish pass in `injectPanelStyle()`/`buildPanelElement()` and
+`content/nightMode.js` (2026-07-20). **Not yet run in a browser** — no rendering environment
+was available; every check below is outstanding. Requires a **multi-segment** load for steps
+1–3 (the route-group/right-cluster changes only apply to `.ext-seg-header`, which only
+renders for multi-segment loads); single-segment loads only exercise steps 4–7.
+
+1. Open a multi-segment load's inline panel. **Expected:** in each segment's header row, the
+   stop-number badge, its station code, the arrow, the destination badge, and the
+   destination code now read as **one visually grouped cluster** at the left — no longer
+   drifting apart into a separate badge column vs. a route column.
+2. **Expected:** the header's left group is sized to its own content (not stretched into a
+   wide fixed column) — with a short route it should not leave a large empty gap between the
+   route text and the next element.
+3. **Expected:** distance/duration, load type (Drop/Live), status (Loaded/Empty), and the
+   `⌄` chevron are clustered tightly together at the **right edge** of the header row, with
+   a visibly larger gap separating them from the route group on the left than the gaps
+   between the four of them.
+4. **Expected — header row (`th`):** noticeably smaller, **UPPERCASE** column labels (Stop /
+   Equipment / Id / Arrival / Departure), with visible letter-spacing, and shorter/tighter
+   vertical padding than the data rows below — the header should read as clearly more
+   compact than before.
+5. **Expected — data cells (`td`):** the station code / city (primary line) is bold and a
+   shade darker than the address line below it (secondary line, smaller and lighter); the
+   two lines sit closer together than before (`margin-top:2px` on the address line); cell
+   content is vertically centered, not top-aligned.
+6. **Expected — borders:** only **horizontal** separator lines between rows remain — the
+   vertical lines between columns added in the previous pass are gone. This should look
+   less busy/noisy than the immediately preceding version.
+7. **Expected — zebra striping:** every other data row has a very subtle background tint
+   distinguishing it from its neighbors, making it easier to track a row across the full
+   row width. Should be subtle, not a strong/obvious stripe.
+8. **Expected — column proportions:** Stop is still clearly the widest column; Arrival and
+   Departure are now very slightly wider than Equipment/Id (34/18/24/24, was 40/20/20/20) —
+   a small but real shift, worth eyeballing.
+9. **Regression — Night Mode:** toggle Night Mode on, repeat steps 1–7. **Expected:** same
+   grouping/spacing/proportions; zebra striping is still visible (alternating rows
+   distinguishable) — this specifically checks the new `content/nightMode.js` rule, since
+   without it the existing dark-mode `tbody td` override would have silently erased the
+   striping entirely while everything else still looked fine.
+10. **Regression — single-segment loads unaffected by the removed grid:** open a
+    single-segment load (no `.ext-seg-header` at all — table renders directly). **Expected:**
+    header/cell/border/zebra/column-width changes (steps 4–8) all still apply normally; no
+    console errors from the `.ext-seg-header`/`.ext-seg-route` restructuring, since that
+    code path simply isn't reached for single-segment loads.
+11. **Regression — action bar unaffected:** confirm the action bar (screenshot/map/
+    create-post/Fast Book) still renders and functions normally at the bottom of the panel.
+12. **Regression — layout width unaffected:** confirm the table still spans the full card
+    width (the fix from the immediately preceding pass) — this task explicitly did not touch
+    `display:table`/`width` and should have zero effect on it.
+
+### TC-RATELIMIT-1 — Cross-tab rate limiting: global budget + synchronized backoff
+
+**PRE-LAUNCH BLOCKER — see docs/BACKLOG.md.** Nothing in this test case has been run in an
+actual browser; `background.js`'s core permit/backoff algorithm was verified with real
+functional tests (18/18, pure logic, no DOM) and `content/content.js`'s integration with
+4/4 — see CHANGELOG.md 2026-07-20 for exactly what those covered and did not cover.
+
+**Setup:** log in. Open 4 separate tabs on the Relay load board (same profile, same
+network). Have DevTools open on at least one tab (Console + Network), and if possible the
+service worker's own console (`chrome://extensions` → this extension → "service worker"
+link, or `chrome://inspect/#service-workers`).
+
+1. Start the loop (Play) in all 4 tabs, with the same slider speed (default 2s is fine —
+   confirm changing it in tab 1 updates the displayed value in tabs 2-4 live, per the
+   "global setting" requirement).
+2. **Expected — aggregate rate:** watch the Network tab (or the service worker's console
+   logs) across all 4 tabs combined. Board requests should occur roughly once every
+   `GLOBAL_MIN_PERMIT_INTERVAL_MS` (5000ms by default) **total**, not once every ~2s **per
+   tab** (which would be ~4x too fast, the original bug). Individual tabs will visibly
+   "skip" ticks — this is expected and correct, not a bug (see `orchestratorTick: no
+   permit — rate limiter active, skipping this tick` in that tab's console).
+3. **Expected — no tab starves:** over a couple of minutes, confirm each of the 4 tabs
+   gets roughly its fair share of the granted permits over time (not e.g. tab 1 getting
+   every single grant while tabs 2-4 never refresh) — this is the "round robin" FIFO
+   requirement.
+4. **Force/simulate a 503:** easiest approach — use DevTools' "Block request URL" (Network
+   tab → right-click a `/api/loadboard/search` request → Block request URL) in ONE tab, or
+   throttle to "Offline" briefly, to produce a failed/blocked request that
+   `content/networkObserver.js` should observe and report as a failure.
+5. **Expected — all tabs pause together:** within moments of the failure being reported,
+   **every one of the 4 tabs'** sidebars should switch from the normal play/pause+slider
+   view to the amber "Paused — Amazon rate limit. Retrying in Xs" banner — not just the
+   tab where the failure was simulated. This is the core "one shared state, not per-tab
+   backoff" requirement.
+6. **Expected — synchronized countdown:** the displayed countdown in all 4 tabs should
+   count down together (allow a second or two of visual drift between tabs, since each
+   runs its own local 1-second display timer, but the underlying `backoffUntil` target
+   must be identical across all of them).
+7. **Expected — synchronized resume:** once the countdown reaches 0 (or a real successful
+   200 is observed, whichever the implementation is actually gated on), all 4 tabs should
+   return to normal play/pause+slider view together and resume requesting — again subject
+   to the shared global pacing from step 2, not all 4 firing at once.
+8. **Expected — exponential backoff on repeated failures:** if you can simulate multiple
+   consecutive failures (e.g., keep the URL blocked across several retry attempts), the
+   wait time between attempts should visibly grow (~5s → ~10s → ~20s → ~40s → ~80s →
+   capped at 5 minutes), not stay flat or reset on each failure.
+9. **Regression — persistence across popup reopen:** while a tab is showing the paused
+   banner, open the extension popup, close it again. **Expected:** the countdown in the
+   sidebar did not reset or jump — it continues from where it was.
+10. **Regression — persistence across tab reload:** while paused, reload one of the 4
+    tabs. **Expected:** after the page (and extension) reloads, that tab's sidebar
+    immediately shows the paused banner with the countdown continuing from the correct
+    remaining time (not reset to a fresh full backoff, and not showing the normal
+    play/pause as if nothing were wrong).
+11. **Regression — single-tab behavior unaffected by the new floor:** with only 1 tab
+    open and the slider set well above the global floor (e.g. 8s), confirm normal
+    operation is completely unaffected — requests still happen roughly every 8s, no
+    unexpected pauses, no banner ever appears absent an actual failure.
+12. **Regression — logged-out tabs don't interfere:** with one tab logged in and running
+    and a second tab logged out (no session), confirm the logged-out tab shows no sidebar
+    at all (per existing gating) and does not affect the logged-in tab's pacing or backoff
+    state.
+13. **Regression — existing features unaffected:** with the loop running normally (no
+    backoff active), confirm load detection, highlighting, sound, auto-open, and the PAT
+    modal all still work exactly as before — this task only gates the timing of
+    `refreshNow()`, it does not change what happens once a refresh is allowed to proceed.
+
+### TC-RATELIMIT-2 — "Shared refresh limit" toggle: pacing is optional, backoff is not
+
+**Not yet run in a browser** — `background.js`'s pacing/backoff gating was verified with
+real functional tests (15/15, pure logic, no DOM); the popup toggle/tooltip and
+`content.js`'s wiring were verified structurally only (source-text assertions, since these
+are DOM-heavy files) — see CHANGELOG.md 2026-07-20 (follow-up entry) for exactly what those
+covered and did not cover.
+
+**Setup:** log in, open the popup. Confirm "Shared refresh limit" appears in Display &
+Alerts, right after Auto-Open Top Load, defaulting to ON (checked).
+
+1. **Tooltip — hover:** hover the circled "i" icon next to the label. **Expected:** a
+   tooltip appears with the exact text "Amazon blocks too-frequent refreshes and can
+   temporarily cut off access from your IP. This mode shares one refresh budget across all
+   your tabs so you don't hit that limit. Turn it off to give each tab its own timer." Move
+   the mouse away — tooltip disappears.
+2. **Tooltip — keyboard:** Tab to the info icon (don't click/hover). **Expected:** the same
+   tooltip appears on focus, and disappears on blur (Tab away). Confirm it does NOT rely on
+   a native browser title tooltip (should appear instantly on focus, not after a hover
+   delay).
+3. **Live sync across tabs:** open the popup in two different Relay tabs (or popup + a
+   second popup instance). Toggle "Shared refresh limit" OFF in one. **Expected:** the
+   toggle reflects OFF in the other popup instance without closing/reopening it, and the
+   change takes effect in any open Relay tab's sidebar behavior within one tick — no page
+   reload needed.
+4. **OFF mode — no shared pacing:** with the toggle OFF and 3-4 tabs open at a fast slider
+   speed (e.g. 2s), confirm each tab now refreshes independently on its own ~2s cadence
+   (no longer waiting for `GLOBAL_MIN_PERMIT_INTERVAL_MS` turns from other tabs) — i.e. the
+   "skip this tick, rate limiter active" log line from TC-RATELIMIT-1 step 2 should no
+   longer appear due to pacing (only due to backoff, if any). This is expected to
+   reintroduce the original 503 risk from many fast tabs — that's the accepted tradeoff of
+   turning the toggle off.
+5. **OFF mode — backoff still applies (core requirement):** with the toggle OFF, force/
+   simulate a 503 in one tab (see TC-RATELIMIT-1 step 4 for how). **Expected:** exactly as
+   in ON mode — that tab's sidebar (and every other open tab's sidebar) shows the "Paused —
+   Amazon rate limit. Retrying in Xs" banner and stops refreshing until the countdown
+   clears, even though pacing coordination is off. This is the one thing the toggle must
+   NOT be able to disable.
+6. **Toggle OFF → ON while paused:** while a tab is in backoff with the toggle OFF, switch
+   the toggle to ON. **Expected:** no disruption to the in-progress backoff countdown (it's
+   shared/global state, unaffected by the toggle); once the countdown clears, tabs resume
+   under the now-ON shared pacing.
+7. **Reset restores default:** click "Reset to Defaults" in the popup. **Expected:**
+   "Shared refresh limit" returns to ON (checked).
+8. **Persistence across restart:** set the toggle OFF, close the browser (or reload the
+   extension via `chrome://extensions`), reopen. **Expected:** the popup still shows OFF —
+   the setting is global and persists, not reset per session.
+
+### TC-RATELIMIT-3 — Shared-limit pacing: 1 tab matches the setting, N tabs split it fairly
+
+**Bug this covers (reported with real data):** with "Shared refresh limit" ON and only 1
+tab open, the tab was refreshing every ~3.5s despite a 2s slider setting — the shared floor
+was a hardcoded 5000ms constant unrelated to the dispatcher's own setting, and tick overhead
+(permit round-trip + settle + pipeline) was compounding on top of the interval every cycle
+instead of being subtracted from it. Fixed 2026-07-30 — see CHANGELOG.md for the full
+before/after. **Not yet run in a real browser** — verified with real-timing Node `vm`
+simulations (background.js's actual code + a faithful replica of content.js's own
+compensation algorithm) — 9/9 checks, real wall-clock timing, not mocked. See CHANGELOG.md
+2026-07-30 for exactly what those covered.
+
+**Setup:** log in. Ensure "Shared refresh limit" is ON (default). Set the slider to 2s.
+Have DevTools Network tab open, filtered to `/api/loadboard/search`.
+
+1. **1 tab matches the setting exactly:** with only this one tab open and running, watch
+   the Network tab for at least 30s. **Expected:** requests land roughly every 2s (±10-15%
+   for real network/DOM variance is fine) — NOT every ~3.5-5s as before this fix. This is
+   the core regression this fix addresses.
+2. **4 tabs — combined rate matches the setting:** open 3 more tabs (4 total), all logged
+   in, all running, all with the slider at 2s (confirm it reads 2s in all 4 — it's global).
+   Watch the **combined** request rate across all 4 tabs' Network tabs (or the service
+   worker's console log of grants) for at least 60s. **Expected:** the combined rate across
+   all 4 tabs together is ~1 request every 2s **total** — meaning each individual tab
+   should visibly refresh roughly every ~8s (2s × 4 tabs), not more often. Compare against
+   TC-RATELIMIT-1 step 2's aggregate-rate check — this test additionally confirms the
+   *per-tab* cadence lands near the expected `interval × N`, not just the aggregate.
+3. **No tab starves:** over the 60s window in step 2, confirm each of the 4 tabs got
+   roughly its fair share of grants (not one tab hogging most of them) — same requirement
+   as TC-RATELIMIT-1 step 3, re-checked here since the floor computation changed.
+4. **Closing a tab speeds up the rest immediately:** with 4 tabs running as in step 2,
+   close one tab (or log it out). **Expected:** within roughly one cycle, the remaining 3
+   tabs' cadence visibly speeds up toward ~6s each (2s × 3) — no multi-cycle lag before the
+   speed-up takes effect.
+5. **Live slider change takes effect for pacing:** with 2+ tabs running, change the slider
+   in one tab to a different value (e.g. 2s → 4s). **Expected:** all open tabs' displayed
+   slider value updates (existing behavior), AND the actual pacing floor used for grants
+   updates too — the per-tab cadence should shift toward the new `interval × N`, not stay
+   locked to the old value.
+6. **Original 503 regression still prevented:** re-run TC-RATELIMIT-1's steps 1-3 (multiple
+   tabs at a fast setting) and confirm no sustained 503s reappear — this fix changes HOW the
+   floor is computed, not the guarantee that the combined rate across all tabs stays
+   bounded.
+7. **Backoff unaffected:** re-run TC-RATELIMIT-1 steps 4-8 (force a 503, confirm all tabs
+   pause with a synchronized countdown and resume together) — this fix only touches the
+   pacing floor computation, not the backoff check, which still runs first in
+   `grantOrDenyPermit()`.

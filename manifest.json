@@ -20,53 +20,77 @@
     "https://*.supabase.co/*"
   ],
 
-  "content_scripts": [{
-    "matches": [
-      "https://relay.amazon.ca/*",
-      "https://relay.amazon.co.jp/*",
-      "https://relay.amazon.co.uk/*",
-      "https://relay.amazon.com/*",
-      "https://relay.amazon.cz/*",
-      "https://relay.amazon.de/*",
-      "https://relay.amazon.es/*",
-      "https://relay.amazon.fr/*",
-      "https://relay.amazon.it/*",
-      "https://relay.amazon.in/*",
-      "https://relay.amazon.pl/*"
-    ],
-    "js": [
-      "utils/designTokens.js",
-      "utils/constants.js",
-      "utils/logger.js",
-      "utils/storage.js",
-      "utils/supabaseConfig.js",
-      "vendor/supabase.min.js",
-      "utils/authGate.js",
-      "utils/tabState.js",
-      "utils/loadStore.js",
-      "utils/soundDefs.js",
-      "vendor/html2canvas.min.js",
-      "content/nightMode.js",
-      "content/filterSimilar.js",
-      "content/filterTags.js",
-      "content/refreshManager.js",
-      "content/loadParser.js",
-      "content/loadDetector.js",
-      "content/highlighter.js",
-      "content/soundAlert.js",
-      "content/priceSurge.js",
-      "content/detailOpener.js",
-      "content/patApi.js",
-      "content/patModal.js",
-      "content/inlinePanel.js",
-      "content/tabAlert.js",
-      "content/sidebar.js",
-      "content/panelCloser.js",
-      "content/loadObserver.js",
-      "content/content.js"
-    ],
-    "run_at": "document_idle"
-  }],
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://relay.amazon.ca/*",
+        "https://relay.amazon.co.jp/*",
+        "https://relay.amazon.co.uk/*",
+        "https://relay.amazon.com/*",
+        "https://relay.amazon.cz/*",
+        "https://relay.amazon.de/*",
+        "https://relay.amazon.es/*",
+        "https://relay.amazon.fr/*",
+        "https://relay.amazon.it/*",
+        "https://relay.amazon.in/*",
+        "https://relay.amazon.pl/*"
+      ],
+      "js": [
+        "utils/designTokens.js",
+        "utils/constants.js",
+        "utils/logger.js",
+        "utils/storage.js",
+        "utils/supabaseConfig.js",
+        "vendor/supabase.min.js",
+        "utils/authGate.js",
+        "utils/tabState.js",
+        "utils/loadStore.js",
+        "utils/soundDefs.js",
+        "vendor/html2canvas.min.js",
+        "content/nightMode.js",
+        "content/filterSimilar.js",
+        "content/filterTags.js",
+        "content/refreshManager.js",
+        "content/loadParser.js",
+        "content/loadDetector.js",
+        "content/highlighter.js",
+        "content/soundAlert.js",
+        "content/priceSurge.js",
+        "content/detailOpener.js",
+        "content/patApi.js",
+        "content/patModal.js",
+        "content/inlinePanel.js",
+        "content/tabAlert.js",
+        "content/sidebar.js",
+        "content/panelCloser.js",
+        "content/loadObserver.js",
+        "content/content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://relay.amazon.ca/*",
+        "https://relay.amazon.co.jp/*",
+        "https://relay.amazon.co.uk/*",
+        "https://relay.amazon.com/*",
+        "https://relay.amazon.cz/*",
+        "https://relay.amazon.de/*",
+        "https://relay.amazon.es/*",
+        "https://relay.amazon.fr/*",
+        "https://relay.amazon.it/*",
+        "https://relay.amazon.in/*",
+        "https://relay.amazon.pl/*"
+      ],
+      "js": ["content/networkObserver.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ],
 
   "action": {
     "default_title": "Torren Relay",
