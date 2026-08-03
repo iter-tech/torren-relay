@@ -16,9 +16,16 @@
 
     <div class="popup-section-title">Account</div>
 
-    <div class="popup-auth-gate-note" id="popup-auth-gate-note" data-testid="popup-auth-gate-note">Free access — sign in with your email to activate Torren Relay</div>
+    <!-- Nothing in the Account area renders on spec (2026-07-30). `hidden` here and on the
+         email step below is the fix for the login-block flash: this block used to render by
+         default, which is what a signed-in dispatcher saw while the session check ran.
+         popup.js decides which block to show from the LOCALLY stored session — no network in
+         that path — and calls showAuthStep() with the answer. The earlier "Checking your
+         session…" placeholder was removed the same day it was added: it only existed because
+         the decision waited on a network round trip, and it no longer does. -->
+    <div class="popup-auth-gate-note" id="popup-auth-gate-note" data-testid="popup-auth-gate-note" hidden>Free access — sign in with your email to activate Torren Relay</div>
 
-    <div class="popup-auth-step" id="popup-auth-step-email" data-testid="popup-auth-step-email">
+    <div class="popup-auth-step" id="popup-auth-step-email" data-testid="popup-auth-step-email" hidden>
       <div class="popup-auth-row">
         <input type="email" id="popup-auth-email" data-testid="popup-auth-email"
                class="popup-auth-input" placeholder="you@example.com" autocomplete="email">

@@ -16,6 +16,29 @@ var PAT_PAYOUT_MARKUP_RATE = 1.10;
 
 var LOADING_TYPE_DISPLAY = { 'Drop': 'Drop', 'Live': 'Live', 'Live/Drop': 'Drop & Live' };
 
+// Distance parser for the PAT modal ONLY (2026-07-30, no-silent-fallback fix).
+//
+// Same normalization as patApi.js's parseNumStr ("1,233.2 mi" → 1233.2) but with a
+// DIFFERENT failure sentinel: null, not 0. That difference is the entire point — a distance
+// of 0 and a distance we could not read are not the same fact, and conflating them is what
+// let fabricated Min/Max Miles (0/25) reach the live marketplace unflagged.
+//
+// Deliberately NOT a change to parseNumStr itself: that function is shared (it is also the
+// payout fallback in openPostModal), and the other currency/number parsers in this codebase
+// are out of scope here. Sentinel inventory for the future unification work is recorded in
+// CHANGELOG.md.
+//
+// Returns null for: null/undefined/'' input, and any string with no leading numeric part.
+// Returns a finite number otherwise — including a legitimate 0.
+function parsePatMilesOrNull(str) {
+  logger.log('patModal', 'parsePatMilesOrNull called', { str: str });
+  if (str === null || str === undefined) return null;
+  var cleaned = String(str).replace(/[$,]/g, '').trim();
+  if (cleaned === '') return null;
+  var n = parseFloat(cleaned);
+  return isFinite(n) ? n : null;
+}
+
 function injectPatModalStyle() {
   if (document.getElementById('ext-pat-modal-style')) return;
   var style = document.createElement('style');
@@ -86,7 +109,12 @@ function injectPatModalStyle() {
     '#ext-pat-modal .pat-num-field{display:flex;flex-direction:column;gap:3px;}' +
     '#ext-pat-modal .pat-num-label{font-size:10px;font-weight:600;color:var(--ext-n500);text-transform:uppercase;letter-spacing:.04em;}' +
     '#ext-pat-modal .pat-static-val{font-size:13px;font-weight:600;color:var(--ext-n900);padding:5px 0;}' +
-    '#ext-pat-modal .pat-payout-warning{font-size:10px;line-height:1.3;color:#c0392b;}' +
+    // 2026-07-30: .pat-distance-warning / .pat-stops-warning added to this selector list
+    // rather than given their own rules — all three are the same "field could not be read"
+    // caution line and must stay visually identical.
+    '#ext-pat-modal .pat-payout-warning,' +
+    '#ext-pat-modal .pat-distance-warning,' +
+    '#ext-pat-modal .pat-stops-warning{font-size:10px;line-height:1.3;color:#c0392b;}' +
     '#ext-pat-modal input[type=number],' +
     '#ext-pat-modal select{' +
       'width:100%;border:1px solid var(--ext-n300);border-radius:var(--ext-radius-sm);' +
@@ -437,13 +465,33 @@ async function openPostModal(loadId) {
   var detailOriginParsed = firstStop ? parseDetailAddress(firstStop.address) : null;
   var detailDestParsed   = lastStop  ? parseDetailAddress(lastStop.address)  : null;
 
+  // PII (2026-07-30): this used to emit FULL STREET ADDRESSES for both stops (boardOrigin,
+  // detailOriginAddress, boardDest, detailDestAddress) plus the parsed city/state objects —
+  // the largest remaining location leak in the codebase.
+  //
+  // Its diagnostic purpose is preserved without the values. Per the comment above, the log
+  // exists to confirm WHICH source supplied the city, because board stops can carry an
+  // unstripped state-code prefix that parseBoardStop mishandles. That question is answered by
+  // (1) whether the detail source parsed at all, and (2) whether the two sources agree — the
+  // board string containing the detail-parsed city is exactly the agreement test, and it is a
+  // boolean. Lengths are included as the task asked.
+  //
+  // agree() is a pure local helper that exists ONLY to build this payload: no new parse call
+  // (parseBoardStop is deliberately not invoked here — it would run its own log and extra
+  // work), no control-flow effect, nothing outside this object reads it.
+  var _srcAgree = function (boardStr, detailParsed) {
+    if (!boardStr || !detailParsed || !detailParsed.city) return null; // not comparable
+    return String(boardStr).toUpperCase().indexOf(String(detailParsed.city).toUpperCase()) !== -1;
+  };
   logger.log('patModal', 'openPostModal: city source comparison', {
-    boardOrigin:         originStop,
-    detailOriginAddress: firstStop ? firstStop.address : null,
-    detailOriginParsed:  detailOriginParsed,
-    boardDest:           destStop,
-    detailDestAddress:   lastStop ? lastStop.address : null,
-    detailDestParsed:    detailDestParsed,
+    originBoardLength:   originStop.length,
+    originDetailLength:  (firstStop && firstStop.address) ? String(firstStop.address).length : 0,
+    originDetailParsed:  !!(detailOriginParsed && detailOriginParsed.city),
+    originSourcesAgree:  _srcAgree(originStop, detailOriginParsed),
+    destBoardLength:     destStop.length,
+    destDetailLength:    (lastStop && lastStop.address) ? String(lastStop.address).length : 0,
+    destDetailParsed:    !!(detailDestParsed && detailDestParsed.city),
+    destSourcesAgree:    _srcAgree(destStop, detailDestParsed),
   });
 
   var originParsed, originInput;
@@ -451,7 +499,8 @@ async function openPostModal(loadId) {
     originParsed = detailOriginParsed;
     originInput  = detailOriginParsed; // resolvePATCity accepts { city, state }
   } else {
-    logger.warn('patModal', 'openPostModal: detail origin address unparseable — falling back to boardStop', { originStop: originStop });
+    // PII (2026-07-30): was `{ originStop: originStop }` — the raw board stop string.
+    logger.warn('patModal', 'openPostModal: detail origin address unparseable — falling back to boardStop', { originStopLength: originStop.length });
     originParsed = parseBoardStop(originStop);
     originInput  = originStop;
   }
@@ -461,7 +510,8 @@ async function openPostModal(loadId) {
     destParsed = detailDestParsed;
     destInput  = detailDestParsed;
   } else {
-    logger.warn('patModal', 'openPostModal: detail dest address unparseable — falling back to boardStop', { destStop: destStop });
+    // PII (2026-07-30): was `{ destStop: destStop }`.
+    logger.warn('patModal', 'openPostModal: detail dest address unparseable — falling back to boardStop', { destStopLength: destStop.length });
     destParsed = parseBoardStop(destStop);
     destInput  = destStop;
   }
@@ -490,13 +540,44 @@ async function openPostModal(loadId) {
   }
   var initPayout = payoutMissing ? null : parseFloat((boardPayout * PAT_PAYOUT_MARKUP_RATE).toFixed(2));
 
-  var distMiles = parseNumStr(loadUnit.distance);
-  var minMiles  = Math.max(0, Math.round(distMiles) - 25);
-  var maxMiles  = Math.round(distMiles) + 25;
+  // EDGE CASE (no-silent-fallback rule, same as Payout above and times below — 2026-07-30):
+  // this used to be `parseNumStr(loadUnit.distance)`, whose failure sentinel is 0 (`|| 0`),
+  // indistinguishable from a genuine zero. An unreadable distance therefore produced
+  // minMiles = max(0, 0-25) = 0 and maxMiles = 0+25 = 25, and those fabricated values were
+  // posted to the live marketplace with no warning and no Confirm gating (the submit-time
+  // check validates the DERIVED min/max, which pass happily). Now parsed through a local
+  // null-returning helper so "unparseable" is distinguishable from "0".
+  //
+  // Deliberately a LOCAL helper, not a change to patApi.js's shared parseNumStr(): that
+  // function is also the payout fallback on the line above, and the other currency/number
+  // parsers are explicitly out of scope for this task (they use three further sentinels —
+  // see CHANGELOG.md; unifying them is tracked separately).
+  var distMilesNum    = parsePatMilesOrNull(loadUnit.distance);
+  var distanceMissing = distMilesNum === null;
+  // Kept as a plain number for the per-mile↔payout linkage below, which is only ever
+  // consulted behind a `> 0` guard — 0 here means "no linkage", never a posted value.
+  var distMiles = distanceMissing ? 0 : distMilesNum;
+  var minMiles  = distanceMissing ? null : Math.max(0, Math.round(distMiles) - 25);
+  var maxMiles  = distanceMissing ? null : Math.round(distMiles) + 25;
   var initPermile = (!payoutMissing && distMiles > 0) ? (initPayout / distMiles).toFixed(2) : '';
+  if (distanceMissing) {
+    logger.warn('patModal', 'openPostModal: board distance missing/unparseable — Min/Max Miles left empty, no fabricated 0/25', {
+      loadId: loadId, distance: loadUnit.distance,
+    });
+  }
 
-  var stopsCountStr = (detail.header && detail.header.stopsCount) || '';
-  var stopCount     = parseInt(stopsCountStr, 10) || 0;
+  // Same edge case for stop count: `parseInt(...) || 0` collapsed an unreadable value to 0
+  // and posted "0 stops". NaN is the honest sentinel from parseInt; a parsed value below 1
+  // is also treated as unusable (a post with zero stops is not a real load either way).
+  var stopsCountStr   = (detail.header && detail.header.stopsCount) || '';
+  var parsedStopCount = parseInt(stopsCountStr, 10);
+  var stopCountMissing = isNaN(parsedStopCount) || parsedStopCount < 1;
+  var stopCount        = stopCountMissing ? null : parsedStopCount;
+  if (stopCountMissing) {
+    logger.warn('patModal', 'openPostModal: stop count missing/unparseable — field left empty for manual entry', {
+      loadId: loadId, stopsCount: stopsCountStr, parsed: parsedStopCount,
+    });
+  }
 
   var loadingTypeStr  = loadUnit.loadingType || '';
   var loadingTypeList = resolveLoadingType(loadingTypeStr);
@@ -680,34 +761,78 @@ async function openPostModal(loadId) {
     return f;
   }
 
-  var stopsVal = document.createElement('div');
-  stopsVal.setAttribute('data-testid', 'ext-pat-stops');
-  stopsVal.className = 'pat-static-val';
-  stopsVal.textContent = stopsCountStr || (stopCount + ' Stops');
+  // Stops (2026-07-30): a read-only display when the count parsed cleanly — unchanged from
+  // before. When it did NOT parse, the same slot becomes a real number input instead, because
+  // the old static div rendered the fabricated "0 Stops" and gave the dispatcher no way to
+  // correct it. Both carry data-testid="ext-pat-stops", so that id always resolves to "the
+  // stops field"; only its element type varies (div ⇄ input[type=number]).
+  var stopsVal;
+  var stopsInput = null; // non-null only in the unparseable case
+  if (stopCountMissing) {
+    stopsInput = document.createElement('input');
+    stopsInput.setAttribute('type', 'number');
+    stopsInput.setAttribute('data-testid', 'ext-pat-stops');
+    stopsInput.setAttribute('min', '1');
+    stopsInput.setAttribute('step', '1');
+    stopsInput.value = '';
+    stopsVal = stopsInput;
+  } else {
+    stopsVal = document.createElement('div');
+    stopsVal.setAttribute('data-testid', 'ext-pat-stops');
+    stopsVal.className = 'pat-static-val';
+    stopsVal.textContent = stopsCountStr || (stopCount + ' Stops');
+  }
 
+  // Visible warning for the unreadable-stop-count edge case — same pattern and styling as
+  // ext-pat-payout-warning / ext-pat-times-warning. Shown/hidden live by updateConfirmEnabled().
+  var stopsWarningEl = document.createElement('div');
+  stopsWarningEl.setAttribute('data-testid', 'ext-pat-stops-warning');
+  stopsWarningEl.className = 'pat-stops-warning';
+  stopsWarningEl.textContent = 'Stop count could not be read — enter it manually';
+
+  // Min/Max Miles: left EMPTY when the board distance was unreadable (2026-07-30) rather
+  // than prefilled with the derived-from-zero 0 and 25.
   var minMilesInput = document.createElement('input');
   minMilesInput.setAttribute('type', 'number');
   minMilesInput.setAttribute('data-testid', 'ext-pat-min-miles');
   minMilesInput.setAttribute('min', '0');
   minMilesInput.setAttribute('step', '1');
-  minMilesInput.value = String(minMiles);
+  minMilesInput.value = distanceMissing ? '' : String(minMiles);
 
   var maxMilesInput = document.createElement('input');
   maxMilesInput.setAttribute('type', 'number');
   maxMilesInput.setAttribute('data-testid', 'ext-pat-max-miles');
   maxMilesInput.setAttribute('min', '0');
   maxMilesInput.setAttribute('step', '1');
-  maxMilesInput.value = String(maxMiles);
+  maxMilesInput.value = distanceMissing ? '' : String(maxMiles);
+
+  // Visible warning for the unreadable-distance edge case. Spans the Min/Max Miles pair, so
+  // it is appended to the row rather than to one field.
+  var distanceWarningEl = document.createElement('div');
+  distanceWarningEl.setAttribute('data-testid', 'ext-pat-distance-warning');
+  distanceWarningEl.className = 'pat-distance-warning';
+  distanceWarningEl.textContent = 'Load distance could not be read — enter it manually';
 
   var driverVal = document.createElement('div');
   driverVal.setAttribute('data-testid', 'ext-pat-driver');
   driverVal.className = 'pat-static-val';
   driverVal.textContent = 'Solo';
 
-  numsA.appendChild(numField('Stops', stopsVal));
-  numsA.appendChild(numField('Min Miles', minMilesInput));
+  var stopsField = numField('Stops', stopsVal);
+  stopsField.appendChild(stopsWarningEl);
+  numsA.appendChild(stopsField);
+  var minMilesField = numField('Min Miles', minMilesInput);
+  minMilesField.appendChild(distanceWarningEl);
+  numsA.appendChild(minMilesField);
   numsA.appendChild(numField('Max Miles', maxMilesInput));
   numsA.appendChild(numField('Driver', driverVal));
+
+  // Re-gate Confirm whenever any of the three now-blocking numeric fields changes. Min/Max
+  // Miles previously had NO listeners at all — nothing re-evaluated Confirm when they were
+  // edited, which is part of why the fabricated 0/25 sailed through.
+  minMilesInput.addEventListener('input', function () { updateConfirmEnabled(); });
+  maxMilesInput.addEventListener('input', function () { updateConfirmEnabled(); });
+  if (stopsInput) stopsInput.addEventListener('input', function () { updateConfirmEnabled(); });
 
   // --- Row 3b: per-mile / payout / stem ---
   var numsB = document.createElement('div');
@@ -834,12 +959,41 @@ async function openPostModal(loadId) {
   function timesValid() {
     return !!(startStepper.getDate() && endStepper.getDate());
   }
+  // Resolved stop count: the parsed board value, or whatever the dispatcher typed when the
+  // board value was unreadable. Returns null when still unknown — never 0. This is the ONLY
+  // thing the submit path may use for stopCount.
+  function currentStopCount() {
+    if (!stopCountMissing) return stopCount;
+    if (!stopsInput) return null;
+    var n = parseInt(stopsInput.value, 10);
+    return (isNaN(n) || n < 1) ? null : n;
+  }
+  function stopsValid() {
+    return currentStopCount() !== null;
+  }
+  // Miles are gated the same way regardless of whether they were prefilled or typed: both
+  // must be present and coherent. When the distance was unreadable the fields start empty,
+  // so this is false until the dispatcher fills them — which is exactly the intended block.
+  function milesValid() {
+    var mn = parseFloat(minMilesInput.value);
+    var mx = parseFloat(maxMilesInput.value);
+    if (isNaN(mn) || isNaN(mx)) return false;
+    return mn >= 0 && mx >= mn;
+  }
   function updateConfirmEnabled() {
     var payoutOk = currentPayoutValid();
     var timesOk  = timesValid();
+    var stopsOk  = stopsValid();
+    var milesOk  = milesValid();
     payoutWarningEl.hidden = payoutOk;
     timesWarningEl.hidden  = timesOk;
-    confirmBtn.disabled = blockingErrors.length > 0 || !originCityObj || !destCityObj || !payoutOk || !timesOk;
+    // The two new warnings only ever apply to the unreadable-board-value case — a dispatcher
+    // who simply cleared a prefilled field gets the disabled Confirm without being told the
+    // board data was unreadable, which would be false.
+    stopsWarningEl.hidden    = !stopCountMissing || stopsOk;
+    distanceWarningEl.hidden = !distanceMissing  || milesOk;
+    confirmBtn.disabled = blockingErrors.length > 0 || !originCityObj || !destCityObj ||
+                          !payoutOk || !timesOk || !stopsOk || !milesOk;
   }
 
   footer.appendChild(statusEl);
@@ -963,7 +1117,13 @@ async function openPostModal(loadId) {
     var minMiVal   = parseFloat(minMilesInput.value);
     var maxMiVal   = parseFloat(maxMilesInput.value);
 
+    // Last line of defence, mirroring the payout/times checks. resolvedStopCount is null
+    // (never 0) when the board value was unreadable and nothing valid was typed — the
+    // previous code passed the fabricated 0 straight into the payload here.
+    var resolvedStopCount = currentStopCount();
+
     if (isNaN(payoutVal) || payoutVal <= 0)  { setStatus('Payout must be a positive number.', 'err'); return; }
+    if (resolvedStopCount === null) { setStatus('Stop count could not be read — enter it manually.', 'err'); return; }
     if (isNaN(minMiVal)  || minMiVal < 0)    { setStatus('Min Miles must be 0 or greater.', 'err'); return; }
     if (isNaN(maxMiVal)  || maxMiVal < minMiVal) { setStatus('Max Miles must be ≥ Min Miles.', 'err'); return; }
     if (!loadingTypeList) { setStatus('Unknown loading type — cannot submit.', 'err'); return; }
@@ -982,7 +1142,7 @@ async function openPostModal(loadId) {
       destRadius:           parseInt(destRadiusSel.value, 10),
       startTime:            startStepper.getDate(),
       endTime:              endStepper.getDate(),
-      stopCount:            stopCount,
+      stopCount:            resolvedStopCount,
       minMiles:             minMiVal,
       maxMiles:             maxMiVal,
       permile:              permileVal,

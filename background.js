@@ -205,18 +205,53 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   });
 });
 
-// ok=true (2xx observed) resets backoff entirely. ok=false (5xx or network failure —
-// status 0) advances one backoff step. Never called on 3xx/4xx — content.js only reports
-// results for responses it identifies as either success or a 5xx/network failure; other
-// statuses are left alone deliberately (a 401/403 is an auth problem, not a rate problem,
-// and should not be treated as "the whole browser must back off").
+// The ONLY statuses that mean "Amazon is rate-limiting this IP".
+//
+// 429 — the explicit signal.
+// 503 — confirmed live on 2026-07-20 (see this file's header: 3-4 tabs at 2s each produced
+//       sustained 503 on /api/loadboard/search, and switching networks restored access
+//       immediately, proving an IP-based throttle rather than an account problem).
+// 502, 504 — added 2026-07-31 as a DELIBERATE SAFETY-SIDE DEFAULT, made WITHOUT captured
+//       evidence. We have never observed Amazon throttling via a gateway status; these are
+//       included because the cost is asymmetric, not because we know. If a gateway status IS
+//       a throttle and we do not back off, we keep hammering Amazon and risk an IP block on
+//       the dispatcher's account — precisely what this backoff exists to prevent. If it is an
+//       ordinary gateway error, we lose a few seconds and recover on our own. Revisit if
+//       evidence ever appears: capture what Amazon actually returns under a real throttle.
+//
+// 500 is deliberately EXCLUDED — an application error on Amazon's side is not a throttle, and
+// retrying more slowly does not help it.
+const RATE_LIMIT_STATUSES = [429, 502, 503, 504];
+
+// ok=true (2xx observed) resets backoff entirely. A failure advances one backoff step ONLY
+// when its HTTP status is in RATE_LIMIT_STATUSES. Every other outcome leaves the state
+// completely untouched — no write, no storage event, no escalation.
+//
+// 2026-07-31 FIX. The previous version accepted `status` and never read it: the whole
+// decision was `if (ok)`, so the else branch fired for ANY non-2xx. Confirmed by execution:
+// status 0, 404 and 401 all paused the extension. The comment that used to sit here claimed
+// "Never called on 3xx/4xx — content.js only reports results for responses it identifies as
+// either success or a 5xx/network failure". That was never true; content.js
+// (see its window 'message' listener) relays every observed result verbatim, with no
+// filtering, and still does. The filtering lives HERE now, which is why the claim is gone.
+//
+// The practical damage: switching a saved search aborts the in-flight search, the abort was
+// reported as a failure, and monitoring silently stopped and escalated through 5/10/20/40/80s
+// while the dispatcher's board carried on working normally. Aborts are no longer reported at
+// all (content/networkObserver.js), and non-rate-limit failures no longer pause us here —
+// two independent fixes, either of which alone would have prevented that specific case.
+//
+// Deliberately NOT decided in this task: what a genuine network failure (status 0) or an
+// unexpected status (401/404/500/502/504) SHOULD do. They currently do nothing beyond being
+// logged. See CHANGELOG.md 2026-07-31 for the recommendation on each.
 //
 // `rateLimited` (2026-07-30) is a DISPLAY flag only — nothing in this file's pacing or
-// backoff math reads it. It exists because backoffUntil answers a different question than
-// the sidebar banner needs to: backoffUntil expiring means "we may try again now", NOT
-// "Amazon lifted the block". Only an observed 2xx proves the latter, so the flag is set on
-// every reported failure and cleared ONLY on a reported success — it deliberately outlives
-// the backoff timer. See sidebar.js isRateLimitPaused().
+// backoff math reads it. It exists because backoffUntil answers a different question than a
+// paused indicator needs: backoffUntil expiring means "we may try again now", NOT "Amazon
+// lifted the block". Only an observed 2xx proves the latter, so the flag is set when we enter
+// backoff and cleared ONLY on a reported success — it deliberately outlives the backoff
+// timer. (The sidebar element that displayed it was removed 2026-07-31; the flag itself still
+// drives the shared-rate status row and is still the honest record of the paused state.)
 async function reportResult(ok, status) {
   var state = await getState();
   if (ok) {
@@ -224,7 +259,7 @@ async function reportResult(ok, status) {
     state.backoffStepIndex = -1;
     state.lastFailureAt    = null;
     state.rateLimited      = false;
-  } else {
+  } else if (RATE_LIMIT_STATUSES.indexOf(status) !== -1) {
     state.rateLimited      = true;
     state.backoffStepIndex = Math.min(state.backoffStepIndex + 1, BACKOFF_STEPS_MS.length);
     var baseMs = state.backoffStepIndex < BACKOFF_STEPS_MS.length
@@ -233,6 +268,12 @@ async function reportResult(ok, status) {
     baseMs = Math.min(baseMs, BACKOFF_MAX_MS);
     state.backoffUntil  = Date.now() + jitter(baseMs);
     state.lastFailureAt = Date.now();
+  } else {
+    // Not a rate-limit signal. Return WITHOUT setState so an existing backoff is neither
+    // extended nor cleared, and no storage write fires — a non-rate-limit failure arriving
+    // mid-backoff must be a complete no-op, not a nudge in either direction.
+    console.log('[background] non-rate-limit result ignored for backoff purposes', { status: status });
+    return state;
   }
   await setState(state);
   return state;

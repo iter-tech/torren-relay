@@ -15,8 +15,24 @@ const ALLOWED_CLICK_INTENTS = {
 };
 
 // Project-wide config
-const EXT_NAME    = 'Amazon Relay Helper';
+// 2026-07-30: was 'Amazon Relay Helper' — the pre-rebrand name, which the sidebar was still
+// showing while the extension ships as "Torren Relay" (manifest.json `name`). Sole reader is
+// content/sidebar.js's ext-sidebar-title.
+const EXT_NAME    = 'Torren Relay';
 const EXT_VERSION = '0.1.0';
 
-// 0 = off, 1 = errors/warnings only, 2 = full debug
-const DEBUG_LEVEL = 2;
+// ─────────────────────────────────────────────────────────────────────────────
+// Console verbosity. THIS IS THE ONE LINE TO RAISE WHILE DEVELOPING — set it to 4
+// locally, and set it back to 1 before shipping. There is deliberately no UI for it.
+//
+//   0 = silent
+//   1 = error only            ← shipped default
+//   2 = error + warn
+//   3 = error + warn + log
+//   4 = everything, incl. debug
+//
+// Enforced for ALL FOUR logger methods in utils/logger.js (2026-07-30). Before that date
+// only logger.debug consulted this constant, so with 183 logger.log calls against 5
+// logger.debug the knob silenced roughly 3% of output and was effectively non-functional —
+// the console stayed fully verbose at every setting.
+const DEBUG_LEVEL = 1;

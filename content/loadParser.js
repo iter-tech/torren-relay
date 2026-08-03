@@ -12,8 +12,33 @@ function parseOneCard(card) {
   // loadId: inner div whose id attribute is a UUID
   const loadId = card.querySelector('div[id]')?.id || null;
 
-  // Payout: .wo-total_payout → raw text e.g. "$427.61"
-  const payout = card.querySelector('.wo-total_payout')?.textContent?.trim() || null;
+  // Payout: "$427.61". TWO inner classes, not one (2026-07-31 fix).
+  //
+  // Main board:      <span class="wo-total_payout">$427.61</span>
+  // Similar matches: <span class="wo-total_payout__match-deviation-attr">$309.08</span>
+  //
+  // Why the old single `.wo-total_payout` selector missed the second one: a CSS class selector
+  // matches whole class TOKENS. `wo-total_payout__match-deviation-attr` is one indivisible
+  // token — it is not "wo-total_payout" plus a suffix — so `.wo-total_payout` never matched it
+  // and every load in the Similar-matches section parsed with payout = null.
+  //
+  // Both listed explicitly rather than a `[class^="wo-total_payout"]` prefix match: a prefix/
+  // substring match would also hit any ancestor or sibling whose class merely starts with the
+  // same string, and querySelector returns the first match in DOCUMENT order, not selector
+  // order — so a wrapper appearing earlier would silently win and yield the wrong text.
+  //
+  // NOTE — a third member of this family is already documented in AMAZON_SELECTORS.md:
+  // `.wo-total_payout__modified-load-increase-attr` (price-increase highlight). It is
+  // deliberately NOT included here: we have no capture proving it is the payout element itself
+  // rather than a separate badge on the card, and if it is a badge that precedes the payout in
+  // document order, adding it would make price-increased loads parse the WRONG number. See the
+  // 2026-07-31 CHANGELOG entry — capture that markup and this becomes a one-token change.
+  //
+  // The `|| null` is unchanged and load-bearing: an unreadable payout must stay null so the PAT
+  // modal keeps the field empty, shows its warning, and blocks Confirm. This widens what can be
+  // read; it never substitutes a value.
+  const payout = card.querySelector('.wo-total_payout, .wo-total_payout__match-deviation-attr')
+    ?.textContent?.trim() || null;
 
   // Collect all .wo-card-header__components for multi-field parsing
   const components = Array.from(card.querySelectorAll('.wo-card-header__components'));

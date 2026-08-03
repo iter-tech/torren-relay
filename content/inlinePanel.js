@@ -7,6 +7,38 @@ var SHEET_SELECTOR            = '#selected-work-sheet';
 var currentPanelCard          = null; // owned by showInlinePanel (set on success) and removeInlinePanel (clear)
 var _fastBookStorageListener  = null; // storage.onChanged listener for Fast Book visibility — cleaned up in removeInlinePanel
 
+// --- waitForSheet poller state (2026-07-30 fix) --------------------------------------
+// waitForSheet() used to create a bare setInterval per call with no handle and no way to
+// cancel it. Clicking card A then quickly card B left BOTH pollers alive; A's poller then
+// saw the sheet fingerprint change — caused by B's sheet loading — treated that as "my
+// sheet is ready", and rendered card A's panel from card B's sheet data. The dispatcher
+// could then create a PAT post from the wrong load entirely.
+//
+// Three pieces of state, because cancelling an interval alone is not sufficient: a callback
+// already queued on the event loop still runs after clearInterval().
+//   _sheetPollInterval — handle of the in-flight run, so it can actually be cancelled.
+//   _sheetPollToken    — monotonic run id. Every cancel/start bumps it; a tick whose captured
+//                        token no longer matches is from a superseded run and must not fire.
+//   _sheetPollCard     — the card element the in-flight run was started for, so a resolved
+//                        poll can confirm it is still the card the dispatcher is waiting on.
+var _sheetPollInterval = null;
+var _sheetPollToken    = 0;
+var _sheetPollCard     = null;
+
+// Cancels any in-flight waitForSheet run and invalidates its queued callback.
+// Safe to call at any time, including when nothing is polling.
+function cancelSheetPoll() {
+  if (_sheetPollInterval !== null) {
+    logger.log('inlinePanel', 'cancelSheetPoll: cancelling in-flight sheet poll');
+    clearInterval(_sheetPollInterval);
+    _sheetPollInterval = null;
+  }
+  _sheetPollCard = null;
+  // Bumped even when no interval was live: a tick that already fired and is sitting on the
+  // event loop reads this token, so incrementing is what actually neutralizes it.
+  _sheetPollToken++;
+}
+
 function injectPanelStyle() {
   if (document.getElementById('ext-inline-panel-style')) return;
   var style = document.createElement('style');
@@ -32,19 +64,13 @@ function injectPanelStyle() {
       // raised cards" role in the dark elevation ramp).
       'background:#F1F3F5;' +
     '}' +
-    // LOAD HEADER (2026-07-30) — styled per spec, but currently DEAD CSS: no element with
-    // this class is ever created anywhere in this file (grep confirms zero matches outside
-    // this rule). Flagged in CHANGELOG.md — left styled here so it's correct the moment
-    // it's ever wired into buildPanelElement(), but has NO visible effect right now; that
-    // would be a JS change, out of scope for this CSS-only task.
-    '.ext-inline-panel__header{' +
-      'background:var(--ext-accent-bg);color:var(--ext-accent-text);padding:8px 14px;' +
-      'display:flex;gap:14px;align-items:center;font-size:12px;' +
-      'border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.12);margin-bottom:8px;' +
-    '}' +
-    '.ext-inline-panel__header .ext-payout{' +
-      'margin-left:auto;font-weight:bold;' +
-    '}' +
+    // AUDIT 2026-07-30 (Part B): the `.ext-inline-panel__header` and
+    // `.ext-inline-panel__header .ext-payout` rules that used to sit here were REMOVED as
+    // dead CSS. Neither class is ever assigned to any element anywhere in the codebase —
+    // `buildPanelElement()` never creates a load-header element, so both rules matched
+    // nothing. They were added speculatively on 2026-07-30 and already flagged as dead in
+    // their own comment. Re-add them together with the element if a load header is ever
+    // actually built.
     // LEG HEADER REDESIGN (2026-07-30, CSS-only — no HTML/JS changes; see CHANGELOG.md).
     // Was display:flex with margin-left:auto on .ext-seg-dist clustering everything from
     // "distance" onward at the right edge, leaving an empty gap in the middle on wide
@@ -174,8 +200,14 @@ function injectPanelStyle() {
       'color:#4A6570;' +
     '}' +
     '.ext-seg-header.ext-open .ext-seg-arrow{transform:rotate(180deg);}' +
+    // LOAD ROW BACKGROUND (2026-07-31, CSS-only): #FFFFFF -> #F5F5F5 per spec. This is the
+    // per-leg body — the surface behind each load's stop rows, and the bottom half of the
+    // header+body card pair whose header is var(--ext-leg-header-bg). Light mode only:
+    // content/nightMode.js already overrides this exact selector's background-color with
+    // DK_HIGH !important (see its .ext-seg-body rule), so this hex is never exercised in
+    // dark mode and nightMode.js needed no change.
     '.ext-seg-body{' +
-      'display:none;background:#FFFFFF;padding:0 16px 12px;' +
+      'display:none;background:#F5F5F5;padding:0 16px 12px;' +
       'width:100%;box-sizing:border-box;overflow:hidden;' +
     '}' +
     // Visible (expanded): this is the card's bottom half — bottom-only radius, the card's
@@ -397,11 +429,36 @@ function sheetFingerprint(sheet) {
 // prevFingerprint is null/undefined when no sheet was open before clicking; in that case any
 // sheet with .load-expander is accepted immediately.
 // Hard timeout: 1500ms — callback fires regardless; downstream handles null/stale data.
-function waitForSheet(callback, prevFingerprint) {
+//
+// SINGLE-FLIGHT as of 2026-07-30 (see the _sheetPoll* comment at the top of this file for the
+// bug this fixes). At most one poll run exists at a time: starting a run cancels any previous
+// one, and three independent guards stop a superseded run from ever reaching `callback`:
+//   1. token check at tick entry   — a superseded run stops polling immediately.
+//   2. token check before callback — catches a tick already queued when the cancel landed.
+//   3. card identity + DOM check   — the run's card must still be the one being waited on,
+//      and still attached. (Detached is not merely stale: showInlinePanel() renders via
+//      cardElement.parentNode.insertBefore, which already throws on a detached node today —
+//      so this converts a caught exception into a deliberate, silent discard.)
+// `card` is optional; when omitted only the token guards apply.
+function waitForSheet(callback, prevFingerprint, card) {
+  logger.log('inlinePanel', 'waitForSheet called', { hasPrevFingerprint: prevFingerprint != null });
+
+  // Requirement 1: never leave a previous poller running alongside this one.
+  cancelSheetPoll();
+
+  var myToken = _sheetPollToken; // identity of THIS run (cancelSheetPoll just bumped it)
+  _sheetPollCard = card || null;
+
   var POLL_MS = 50;
   var MAX_MS  = 1500;
   var elapsed = 0;
-  var interval = setInterval(function () {
+
+  _sheetPollInterval = setInterval(function () {
+    // Guard 1 — a newer run (or a teardown) superseded us. Do not poll, do not fire.
+    // The interval itself was already cleared by cancelSheetPoll; this is for the tick that
+    // was mid-flight when that happened.
+    if (myToken !== _sheetPollToken) return;
+
     elapsed += POLL_MS;
     var sheet       = document.querySelector(SHEET_SELECTOR);
     var hasExpander = sheet && sheet.querySelector('.load-expander');
@@ -411,8 +468,30 @@ function waitForSheet(callback, prevFingerprint) {
     } else {
       ready = !!(hasExpander && sheetFingerprint(sheet) !== prevFingerprint);
     }
+
     if (ready || elapsed >= MAX_MS) {
-      clearInterval(interval);
+      // Requirement 4: always clear on resolve OR timeout — no orphaned pollers either way.
+      clearInterval(_sheetPollInterval);
+      _sheetPollInterval = null;
+
+      // Guard 2 — re-check after the work above, before committing to a render.
+      if (myToken !== _sheetPollToken) {
+        logger.log('inlinePanel', 'waitForSheet: run superseded — discarding result');
+        return;
+      }
+      // Guard 3 — requirement 2. Silent discard: a superseded click is not an error.
+      if (card && (_sheetPollCard !== card || !document.contains(card))) {
+        logger.log('inlinePanel', 'waitForSheet: card no longer the one being waited on — discarding result', {
+          stillCurrent: _sheetPollCard === card, inDom: document.contains(card)
+        });
+        _sheetPollCard = null;
+        return;
+      }
+
+      _sheetPollCard = null;
+      if (elapsed >= MAX_MS && !ready) {
+        logger.warn('inlinePanel', 'waitForSheet: hard timeout reached — firing callback anyway', { elapsed: elapsed });
+      }
       callback();
     }
   }, POLL_MS);
@@ -1151,6 +1230,14 @@ function showInlinePanel(cardElement) {
 }
 
 function removeInlinePanel() {
+  // Requirement 3 (2026-07-30): a sheet poll must never outlive teardown. This one call site
+  // covers every path that matters — content.js's clearPipelineDom() calls removeInlinePanel(),
+  // and clearPipelineDom() is itself called by deactivateExtensionUI() (logout / auth-gate
+  // close) AND by every shouldContinue()-failing bail-out checkpoint in runDetectionPipeline.
+  // Also covers the toggle-off path below. Without this, a poll started just before logout
+  // would still fire and re-create the panel after everything had been torn down.
+  cancelSheetPoll();
+
   var old = document.getElementById(PANEL_ID);
   if (old) old.remove();
   currentPanelCard = null;
@@ -1186,6 +1273,35 @@ function initManualToggle() {
       return;
     }
 
+    // STOP THE LOOP HERE — synchronously, at the click, NOT inside the waitForSheet
+    // callback below.
+    //
+    // 2026-07-31 REGRESSION FIX. This call used to live in that callback. waitForSheet's
+    // guard 3 (added 2026-07-30 with the single-flight fix, to stop card A's poll rendering
+    // card B's sheet) discards the whole run when the clicked card is no longer attached:
+    //     if (card && (_sheetPollCard !== card || !document.contains(card))) return;
+    // While auto-refresh is RUNNING, refreshNow() makes Amazon re-render the load list, which
+    // detaches the very card the dispatcher just clicked — inside guard 3's own 50-1500ms
+    // poll window. The run was then discarded and the stop never executed, so the loop kept
+    // refreshing until the dispatcher stopped it by hand. The faster the refresh interval,
+    // the more reliably it happened.
+    //
+    // Stopping belongs at the click, not at the render: the dispatcher clicked a load to
+    // review it, and that intent does not depend on whether Amazon's sheet finished opening,
+    // whether the poll timed out, or whether React happened to replace the card node. Guard 3
+    // still governs the RENDER below, which is the only thing it was ever meant to protect —
+    // rendering the wrong card's data is a real hazard; stopping the loop is not.
+    //
+    // Still exactly ONE stop call in this file (no second call was added at another layer),
+    // it simply runs at the correct moment now. Nothing auto-resumes: the loop stays stopped
+    // until the dispatcher restarts it from the sidebar.
+    try {
+      tabState.set('running', false);
+      logger.log('inlinePanel', 'manual card open — stopping loop for dispatcher review');
+    } catch (e) {
+      logger.error('inlinePanel', 'tabState stop failed on manual card open', { error: e });
+    }
+
     // Toggle on: capture a fingerprint of the currently open sheet BEFORE polling starts.
     // waitForSheet will only fire the callback once the sheet has changed (i.e., Amazon has
     // replaced the previous card's sheet with the new one), preventing stale-sheet renders.
@@ -1194,18 +1310,12 @@ function initManualToggle() {
 
     waitForSheet(function () {
       try {
-        tabState.set('running', false);
-        logger.log('inlinePanel', 'manual card open — stopping loop for dispatcher review');
-      } catch (e) {
-        logger.error('inlinePanel', 'tabState stop failed on manual card open', { error: e });
-      }
-      try {
         showInlinePanel(card);
         // currentPanelCard ownership has moved to showInlinePanel — no assignment here
       } catch (e) {
         logger.warn('inlinePanel', 'manual toggle render failed', { error: e });
       }
-    }, prevFingerprint);
+    }, prevFingerprint, card); // `card` tags this run — see waitForSheet's guard 3
   });
 
   logger.log('inlinePanel', 'manual toggle initialized');

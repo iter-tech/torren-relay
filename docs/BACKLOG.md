@@ -4,6 +4,296 @@ Status key: **UI-BUILT** = HTML/CSS exists in popup, logic not wired | **PLANNED
 
 ---
 
+## ⛔ BLOCKED 2026-07-31 — Collapse Amazon's left filters panel on auto-refresh START
+
+Requested 2026-07-31. **Nothing implemented** — blocked on one missing piece of evidence, by the
+task's own instruction to stop rather than guess.
+
+**Requirement:** on every press of the auto-refresh START control (not just page load), collapse
+Amazon's left filters panel. Never reopen it automatically — not on stop, pause, or resume.
+
+**This was built and removed once before.** CHANGELOG 2026-06-18 "Remove filter-panel
+auto-close": three strategies tried (close-button search, toggle-button click, Escape dispatch +
+retry), none reliable. `content/panelCloser.js:72` still says *"Left filter panel is intentionally
+left alone."* `CLOSE_FILTER_PANEL` was also removed from `ALLOWED_CLICK_INTENTS`
+(`utils/constants.js`) and its SAFETY.md click-site section deleted — **re-adding this feature
+means re-authorising a click site**, not just writing the selector.
+
+**SOLVED — why all three attempts failed.** They all used `button[aria-label="Filter"]`. The
+2026-07-31 capture shows the `aria-label` is on an inner span, not the button:
+
+```html
+<button type="button" class="css-14evw8c">…<span aria-label="Filter" role="img">…
+```
+
+so that selector matched nothing. The working form (no dependence on the generated
+`css-14evw8c` hash, which will change on Amazon's next deploy):
+
+```js
+// ⚠ SUPERSEDED — see the correction below. Exact-match fails on the real label.
+document.querySelector('[aria-label="Filter"][role="img"]')?.closest('button')
+```
+
+**CORRECTION 2026-07-31 — the label has TRAILING SPACES.** A second capture shows
+`aria-label="Filter  "`, not `"Filter"`. CSS attribute selectors are exact by default, so the
+selector above matches **nothing** either — same failure mode as the three 2026-06-18 attempts,
+one layer along. Any exact-equality match on this label is wrong. Use a trimmed / starts-with
+comparison:
+
+```js
+// starts-with selector, then confirm by trimming — tolerant of trailing (or added) whitespace
+// and of Amazon appending a count/suffix later. Still no dependence on the css-14evw8c hash.
+var icon = Array.prototype.find.call(
+  document.querySelectorAll('[role="img"][aria-label]'),
+  function (el) { return el.getAttribute('aria-label').trim() === 'Filter'; }
+);
+var filterBtn = icon && icon.closest('button');
+```
+
+**STILL BLOCKED — how to tell whether the panel is already open.** The control is a toggle, so
+clicking it while already collapsed would OPEN it: the opposite of the requirement. The capture
+is truncated (`…`) exactly where the button's own attributes would appear, and the 2026-06-18
+notes explicitly say Amazon *"may not put `aria-expanded` on the button at all"*. No captured
+markup of this panel exists anywhere in the repo.
+
+### To unblock: paste this in DevTools on the load board, once with the panel OPEN and once with it COLLAPSED
+
+```js
+(() => {
+  const icon = document.querySelector('[aria-label="Filter"][role="img"]');
+  const btn  = icon && icon.closest('button');
+  if (!btn) return console.log('NO BUTTON FOUND — capture the Filter control markup by hand');
+  const attrs = (el) => [...el.attributes].map(a => `${a.name}="${a.value}"`).join(' ');
+  console.log('BUTTON  :', attrs(btn));
+  console.log('PARENT  :', btn.parentElement && attrs(btn.parentElement));
+  console.log('ICON    :', attrs(icon));
+  const controlled = btn.getAttribute('aria-controls');
+  console.log('aria-controls ->', controlled,
+    controlled && document.getElementById(controlled)
+      ? document.getElementById(controlled).outerHTML.slice(0, 300) : '(no element)');
+  console.log('ANY aria-expanded on page:',
+    [...document.querySelectorAll('[aria-expanded]')]
+      .map(e => `${e.tagName}[aria-expanded=${e.getAttribute('aria-expanded')}] label=${e.getAttribute('aria-label')}`));
+  console.log('BUTTON RECT:', JSON.stringify(btn.getBoundingClientRect()));
+})();
+```
+
+Also useful, same two states: right-click the filters panel itself → Inspect → copy the
+**outerHTML of the panel's outermost container, first ~300 chars**, plus its computed `width`
+and `display`. If the panel is removed from the DOM when collapsed rather than hidden, say so —
+that alone is a reliable state test and unblocks this immediately.
+
+**What I need from that capture:** any attribute that differs between the two states — on the
+button, its parent, or the panel container. `aria-expanded` / `aria-pressed` / `aria-controls` /
+a `data-*` flag / presence-vs-absence of the panel node / a measurable width change. Any one of
+them is enough.
+
+**Then the implementation is small:** a `collapseFilterPanel()` in `panelCloser.js` called from
+`closePanelsForStart()` (already invoked once per loop start from content.js's `tabState`
+'running' subscriber, `val=true` only — so "every start press, never on stop/pause/resume" comes
+free), guarded by `isForbiddenElement()`, wrapped so it can never throw or block the start, and a
+re-added `CLOSE_FILTER_PANEL` intent plus its SAFETY.md section.
+
+---
+
+## ↩️ REMOVED 2026-07-31 — Sidebar paused/rate-limit message (reinstatement record)
+
+Removed by PM decision. **Message only — the backoff/pause behaviour was NOT touched** and is
+still fully live: the extension still stops polling on 429/503, still waits, still resumes
+automatically. `background.js` and `content/networkObserver.js` were not edited at all. All
+changes were in `content/sidebar.js`.
+
+This section exists so the message can be put back without re-deriving it. Everything below is
+verbatim from `HEAD:content/sidebar.js` at the time of removal (commit `9cd7e7d` + working tree).
+
+### What the dispatcher saw
+
+An amber (`#d4a72c`) line in sidebar row 1, replacing the speed slider while paused:
+
+> Paused — Amazon has temporarily limited your IP due to frequent refreshes. Access returns on
+> its own; the extension will resume automatically.
+
+with a trailing circled "i" opening a 340px tooltip.
+
+### Elements and testids removed
+
+| testid | Tag | Role in the message |
+|---|---|---|
+| `ext-rate-limit-banner` | `span` | Flex container, `role="status"`, `style.display='none'` by default. Parent of the two below. |
+| `ext-rate-limit-text` | `span` | The sentence itself, ellipsised when cramped. |
+| `ext-rate-limit-info` | `span` | Trailing "i", `tabindex="0"`, `aria-label="About this pause"`. **Existed only to accompany this message.** |
+| `ext-rate-limit-tooltip` | `div` | `role="tooltip"`, child of the "i". The long explanation. |
+
+### Construction code (was directly above the memory indicator, ~line 263)
+
+```js
+  const rateLimitBanner = document.createElement('span');
+  rateLimitBanner.setAttribute('data-testid', 'ext-rate-limit-banner');
+  rateLimitBanner.setAttribute('role', 'status');
+  rateLimitBanner.style.display = 'none';
+
+  const rateLimitText = document.createElement('span');
+  rateLimitText.setAttribute('data-testid', 'ext-rate-limit-text');
+  rateLimitText.textContent =
+    'Paused — Amazon has temporarily limited your IP due to frequent refreshes. ' +
+    'Access returns on its own; the extension will resume automatically.';
+
+  const rateLimitInfo = document.createElement('span');
+  rateLimitInfo.setAttribute('data-testid', 'ext-rate-limit-info');
+  rateLimitInfo.setAttribute('tabindex', '0');
+  rateLimitInfo.setAttribute('aria-label', 'About this pause');
+  rateLimitInfo.textContent = 'i';
+
+  const rateLimitTooltip = document.createElement('div');
+  rateLimitTooltip.setAttribute('data-testid', 'ext-rate-limit-tooltip');
+  rateLimitTooltip.setAttribute('role', 'tooltip');
+  rateLimitTooltip.textContent =
+    'Amazon limits how often the load board can be refreshed from a single IP address. ' +
+    'When the limit is hit, the whole site stops loading for a while — this is not an ' +
+    'account issue and nothing is wrong with your extension. It clears by itself. To ' +
+    'avoid it, turn on Shared refresh limit in the extension settings: it spreads one ' +
+    'refresh budget across all your open tabs instead of each tab refreshing on its own.';
+  rateLimitInfo.appendChild(rateLimitTooltip);
+
+  rateLimitBanner.appendChild(rateLimitText);
+  rateLimitBanner.appendChild(rateLimitInfo);
+```
+
+**DOM insertion** — one line in the row-1 build block, between `sliderValue` and
+`memoryIndicator`; order matters, the banner sat where the slider had been:
+
+```js
+  row1.appendChild(rateLimitBanner);
+```
+
+### CSS removed (all inside the `style.textContent` string)
+
+Two banner-only rules, which sat between `[data-testid="ext-slider-value"]` and
+`[data-testid="ext-memory-indicator"]`:
+
+```js
+    '#ext-sidebar [data-testid="ext-rate-limit-banner"]{' +
+      'flex:1;min-width:0;display:flex;align-items:center;gap:6px;' +
+      'font-size:12px;font-weight:600;color:#d4a72c;' +
+    '}' +
+    '#ext-sidebar [data-testid="ext-rate-limit-text"]{' +
+      'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+    '}' +
+```
+
+One rate-limit-only rule (the "i" inherits the banner's amber instead of the neutral chip fill,
+which is also why it needed no `html.ext-night` override):
+
+```js
+    '#ext-sidebar [data-testid="ext-rate-limit-info"]{' +
+      'background:transparent;border-color:currentColor;color:currentColor;' +
+    '}' +
+```
+
+One tooltip-width rule (wider than the 220px memory tooltip because the text is ~4x longer):
+
+```js
+    '#ext-sidebar [data-testid="ext-rate-limit-tooltip"]{' +
+      'width:340px;' +
+    '}' +
+```
+
+**Four SHARED selectors were narrowed, not deleted** — each dropped its rate-limit half and kept
+the memory half unchanged. To reinstate, add the second selector line back to each:
+
+| Rule | Add back |
+|---|---|
+| info icon geometry | `'#ext-sidebar [data-testid="ext-rate-limit-info"]{' +` after the `ext-memory-info,` line |
+| info icon `:focus-visible` | `'#ext-sidebar [data-testid="ext-rate-limit-info"]:focus-visible{' +` |
+| tooltip base (`display:none;position:absolute;top:32px;right:0;width:220px;…`) | `'#ext-sidebar [data-testid="ext-rate-limit-tooltip"]{' +` |
+| tooltip `.ext-tooltip-visible` | `'#ext-sidebar [data-testid="ext-rate-limit-tooltip"].ext-tooltip-visible{' +` |
+| night-theme tooltip (`html.ext-night …`) | `'html.ext-night #ext-sidebar [data-testid="ext-rate-limit-tooltip"]{' +` |
+
+**Kept deliberately:** `#ext-sidebar{max-width:calc(100vw - 16px)}` was added *for* this banner
+but is retained — it is what bounds row 2's width so its ellipsis can trigger. No action needed
+on reinstatement.
+
+### Call sites that set/showed the text
+
+`updateRateLimitDisplay()` — the whole paused branch. Original body:
+
+```js
+  function updateRateLimitDisplay() {
+    var paused = isRateLimitPaused();
+    rateLimitBanner.style.display = paused ? '' : 'none';
+    slider.style.display          = paused ? 'none' : '';
+    sliderValue.style.display     = paused ? 'none' : '';
+    if (!paused) hideRateLimitTooltip(); // never leave a tooltip orphaned on a hidden banner
+    renderModeLabel();
+    renderSharedRateStatus();
+  }
+```
+
+Current body is just the last two lines. **Note the slider swap** (`slider`/`sliderValue` hidden
+while paused): that existed only to make room for the banner and was removed with it, so the
+speed control now stays visible in every state. Reinstating the banner means restoring those
+three lines too, or the banner will render *alongside* the slider rather than in place of it.
+
+Two tooltip helpers, removed entirely (they sat right after `hideMemoryTooltip`):
+
+```js
+  function showRateLimitTooltip() {
+    rateLimitTooltip.classList.add('ext-tooltip-visible');
+  }
+
+  function hideRateLimitTooltip() {
+    rateLimitTooltip.classList.remove('ext-tooltip-visible');
+  }
+```
+
+Five listeners, removed entirely (they sat after the `memoryInfo` listeners, at the end of
+`buildSidebar`):
+
+```js
+  rateLimitInfo.addEventListener('mouseenter', showRateLimitTooltip);
+  rateLimitInfo.addEventListener('mouseleave', hideRateLimitTooltip);
+  rateLimitInfo.addEventListener('focus', showRateLimitTooltip);
+  rateLimitInfo.addEventListener('blur', hideRateLimitTooltip);
+  rateLimitInfo.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    if (rateLimitTooltip.classList.contains('ext-tooltip-visible')) {
+      hideRateLimitTooltip();
+    } else {
+      showRateLimitTooltip();
+    }
+  });
+```
+
+### The state that drove it — ALL STILL PRESENT, nothing to restore
+
+The message was purely a reader of state that still exists and still works:
+
+- `background.js` `reportResult()` sets `state.rateLimited = true` on any reported failure and
+  clears it on a reported success, writing `RATE_LIMITER_KEY` (`extRateLimiterState`).
+- `content/sidebar.js` `_rateLimitState` (local cache), `adoptRateLimitState()`,
+  `isRateLimitPaused()` — all untouched and still live.
+- The `chrome.storage.onChanged` handler for `RATE_LIMITER_KEY` still fires and still calls
+  `updateRateLimitDisplay()`.
+
+`isRateLimitPaused()` still has one consumer: `renderSharedRateStatus()` hides row 2 (the
+"Active tabs: N" line) while paused. That condition was **left as-is** — it belongs to a
+different element and the task was scoped to the message. Visible effect while paused: row 2
+disappears and the bar is 20px shorter, with no text anywhere explaining why.
+
+**To reinstate:** put back the four elements, the `row1.appendChild`, the two banner CSS rules +
+the info/tooltip-width rules, re-widen the five shared selectors, restore the three swap lines in
+`updateRateLimitDisplay()`, the two tooltip helpers, and the five listeners. No changes needed in
+`background.js`, `networkObserver.js`, `content.js`, or `utils/storage.js`.
+
+**Related question — ✅ RESOLVED 2026-07-31, same day.** The paused state used to be entered by
+*any* failed or aborted `/api/loadboard/search` request. Fixed: aborts are no longer reported at
+all (`content/networkObserver.js`), and only HTTP 429/503 enter backoff (`background.js`
+`RATE_LIMIT_STATUSES`). See CHANGELOG.md 2026-07-31 and TC-RATELIMIT-7. **If the banner is
+reinstated it will now only appear for genuine rate limiting** — which is what makes reinstating
+it viable at all; before this fix it fired during ordinary saved-search switching.
+
+---
+
 ## 🚫 PRE-LAUNCH BLOCKER — Cross-tab rate limiting (implemented, unverified in a real browser)
 
 **Confirmed with real data, 2026-07-20:** 3-4 Relay tabs open, each with its own independent
@@ -219,6 +509,36 @@ loaded. Would need the content script to listen for `SUPABASE_SESSION_KEY` chang
 `chrome.storage.onChanged` and either retroactively call `buildSidebar()`/`initManualToggle()`
 (login) or tear the sidebar down and stop the loop (logout) — not implemented, deferred until
 there's a concrete reason a reload isn't acceptable.
+
+> **Stale entry (noted 2026-07-30, left as-is):** this was actually implemented 2026-07-20 —
+> `onAuthGateChange` in `utils/authGate.js` drives `activateExtensionUI()` /
+> `deactivateExtensionUI()` live, no reload needed. Flagged rather than rewritten because it's
+> outside the current task's scope; fold it into the next doc-drift pass.
+
+### Activation lockout (audit B1) ✅ FIXED 2026-07-30 — three follow-ups left open
+
+The fix itself (`content/content.js` only) is in CHANGELOG.md 2026-07-30; browser test steps
+are TC-AUTH-8. Three things it deliberately did **not** do:
+
+- **Logout arriving mid-activation (PLANNED, real bug).** If the gate closes while
+  `activateExtensionUI()` is awaiting `tabState.init()`, `deactivateExtensionUI()` early-returns
+  (`_extActivated` is false during the flight) and the in-flight activation then builds a
+  sidebar for a logged-out session. Equally broken before the B1 fix, just in a different shape.
+  Likely fix: recheck `isAuthGateActiveSync()` after the await and bail — the same pattern
+  `shouldContinue()` already uses in the tick pipeline. Needs its own task; it changes the
+  activation flow, which B1's task scope excluded.
+- **`ext-sidebar-styles` `<style>` tag leaks on teardown (PLANNED, cosmetic).**
+  `buildSidebar()` appends it to `document.head` (sidebar.js:214); `deactivateExtensionUI()`
+  removes `#ext-sidebar` but not the style tag, so a copy accumulates per deactivate→activate
+  cycle. Harmless today (the rules are identical and `buildSidebar()`'s own guard prevents a
+  second sidebar), but it breaks the "page reverted to untouched state" guarantee that function
+  claims in its own comment. Relates to the memory-leak/caching audit item about style-injection
+  idempotency (see "Step 3 — Memory-leak / caching audit" above).
+- **User-visible signal when activation fails (NOT APPROVED — needs a PM decision).** A failed
+  activation is currently console-only. The dispatcher sees no sidebar and no explanation; the
+  fix guarantees they can recover (log out/in, or the next gate change retries) but not that
+  they'll know to. Whether that warrants on-page UI, and what it should look like without
+  looking like an Amazon error, is an open product question.
 
 ---
 

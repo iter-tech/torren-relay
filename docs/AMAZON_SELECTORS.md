@@ -27,7 +27,9 @@ Implementation: content/refreshManager.js → findRefreshButton()
 Verified: 2026-06-02
 Container:        div.load-card, div.load-card__selected  (both states)
 Load ID:          card.querySelector('div[id]')?.id  (UUID string)
-Payout:           .wo-total_payout  → "$427.61"
+Payout:           .wo-total_payout, .wo-total_payout__match-deviation-attr  → "$427.61" / "$309.08"
+                  TWO inner classes — see "Payout inner-class family" below. Matching only the
+                  first one silently produced payout=null for the whole Similar-matches section.
 Price per mile:   .wo-card-header__components where textContent includes "/mi"  → "$1.84/mi"
 Distance:         .wo-card-header__components where textContent includes "mi" but NOT "/mi"  → "104.0 mi"
 Duration:         .wo-card-header__components matching /\d+[dh]/ and not containing "mi"  → "2h 52m"
@@ -39,7 +41,51 @@ Loading type:     .loading-type  → "Drop", "Live", "Live/Drop", or "Drop/Live"
 Deadhead:         previousElementSibling of span[title="Deadhead"]  → "32.31 mi"
 Tag:              #STARTING_SOON or .wo-tag  → "Starting soon"  (may be absent)
 Price increase:   .wo-total_payout__modified-load-increase-attr  (Amazon's own highlight)
+                  ⚠ SUSPECTED third member of the payout family below — NOT yet matched by the
+                  parser. See the family note.
 Implementation:   content/loadParser.js → parseLoads()
+
+### Payout inner-class family ⚠ (captured 2026-07-31)
+
+The payout value is wrapped in an outer span with generated CSS-in-JS hashes and an inner span
+carrying a **semantic `wo-*` class that varies by board section**. Only the inner `wo-*` class is
+stable — **never** select on the `css-*` hashes, they change on every Amazon deploy.
+
+**Similar matches section (captured live, 2026-07-31):**
+
+```html
+payout:      <span class="css-jarjh1 css-icpham"><span class="wo-total_payout__match-deviation-attr">$309.08</span></span>
+price/mile:  <span class="css-1tddwld css-n4zms0"><span class="wo-card-header__components">$4.23/mi</span></span>
+```
+
+**Main board:** `<span class="wo-total_payout">$427.61</span>`
+
+Known/suspected members:
+
+| Inner class | Where | Matched by the parser? |
+|---|---|---|
+| `wo-total_payout` | main load list | ✅ yes |
+| `wo-total_payout__match-deviation-attr` | Similar matches | ✅ yes (added 2026-07-31) |
+| `wo-total_payout__modified-load-increase-attr` | price-increase highlight | ❌ **no — unverified** |
+
+**Why a whole-token match matters:** `wo-total_payout__match-deviation-attr` is a single
+indivisible class token, *not* `wo-total_payout` plus a suffix, so `.wo-total_payout` does not
+match it. That is why the entire Similar-matches section parsed with `payout = null`.
+
+**Why the third is deliberately not matched:** no capture proves it is the payout element itself
+rather than a separate badge on the card. `querySelector` returns the first match in DOCUMENT
+order, so if it is a badge sitting before the payout, adding it would make price-increased loads
+report the WRONG number — worse than the current null. **To resolve:** capture the full inner
+HTML of a card showing a price increase and check whether that class is on the payout span or a
+sibling. If it is the payout span, add it to the selector in `loadParser.js` — a one-token change.
+
+**Other fields in the Similar-matches section:** the capture shows price/mile using the ordinary
+`wo-card-header__components`, and per the report so do cities, times, distance and duration — so
+those parse normally there. **Not verified from any capture** are the non-`wo-*` selectors this
+parser also depends on: `.equipment-type-text`, `.trailer-type-circle`, `.loading-type`,
+`span[title="Deadhead"]`, `#STARTING_SOON` / `.wo-tag`, and `div[id]` for the load ID. If any of
+those also differ inside this section, they fail the same silent way. Worth one capture of a
+complete Similar-matches card to confirm.
 
 ## Tour container / Contracts (Layout B) — INTENTIONALLY IGNORED ⛔
 Container: [data-type$="-tour-container"]

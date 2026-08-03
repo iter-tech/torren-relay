@@ -381,6 +381,9 @@ input[type="range"] {
 }
 
 /* ── Account / login (Supabase email OTP) ── */
+/* 2026-07-30: .popup-auth-checking (the "Checking your session…" placeholder and its 92px
+   min-height) was removed along with the state itself — the popup no longer waits on a
+   network round trip before it can decide what to render, so there is nothing to fill. */
 .popup-auth-gate-note {
   font-size: 14px;
   font-weight: 700;

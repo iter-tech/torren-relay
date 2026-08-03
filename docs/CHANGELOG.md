@@ -2,6 +2,1020 @@
 
 ## [Unreleased]
 
+### 2026-07-31 — Payout now parses in the "Similar matches" section
+
+**Diagnosis confirmed** (`content/loadParser.js:16`, was
+`card.querySelector('.wo-total_payout')`). The reason it missed: a CSS class selector matches
+whole class **tokens**. `wo-total_payout__match-deviation-attr` is one indivisible token — not
+`wo-total_payout` plus a suffix — so `.wo-total_payout` never matched it, and **every** load in
+the Similar-matches section parsed with `payout = null`.
+
+**Fix:** one selector, both classes —
+`.wo-total_payout, .wo-total_payout__match-deviation-attr`. No `css-*` hash anywhere (asserted by
+the harness). Listed explicitly rather than a `[class^="wo-total_payout"]` prefix match, because
+a prefix/substring match would also hit an ancestor or sibling whose class merely starts the same
+way, and `querySelector` returns the first match in **document order**, not selector order — an
+earlier wrapper would silently win and yield the wrong text.
+
+**Guard untouched.** The trailing `|| null` is unchanged: an unreadable payout still yields
+`null`, so the PAT modal keeps the field empty, shows its warning and blocks Confirm.
+`patModal.js` was not modified. Verified as case (c).
+
+**⚠️ Finding — a THIRD member of this family already exists and is still unmatched.**
+`AMAZON_SELECTORS.md` has documented `.wo-total_payout__modified-load-increase-attr`
+(price-increase highlight) since the original selector capture. The naming pattern is clearly
+`wo-total_payout__<variant>-attr`, which strongly suggests price-increased loads hit the *same*
+bug today — payout silently null. **Deliberately not added**: no capture proves that class is on
+the payout element rather than a separate badge, and if it is a badge preceding the payout in
+document order, matching it would make those loads report the **wrong number** — worse than null.
+Capture one price-increased card's inner HTML and it becomes a one-token change.
+
+**Other fields in that section:** the capture shows price/mile on the ordinary
+`wo-card-header__components`, so it and the other component-based fields (cities, times,
+distance, duration) parse normally — confirmed in the harness. **Not verifiable without a fuller
+capture:** the non-`wo-*` selectors the same parser depends on — `.equipment-type-text`,
+`.trailer-type-circle`, `.loading-type`, `span[title="Deadhead"]`, `#STARTING_SOON`/`.wo-tag`,
+and `div[id]` (load ID). If any of those differ inside this section they fail the same silent
+way. One capture of a complete Similar-matches card would settle it.
+
+**Verified** (no browser): 25 checks driving the **real** `parseOneCard()` against both captured
+markup shapes. The harness implements CSS whole-token class matching and **asserts its own
+matcher first** — including that `.wo-total_payout` does *not* match the variant token, i.e. it
+reproduces the bug before proving the fix. Also asserts a selector-level diff against HEAD:
+exactly one selector added, one removed, and no `css-*` hash introduced.
+
+### 2026-07-31 — Load row background → #F5F5F5 (light mode only)
+
+**Element:** `.ext-seg-body` — the per-leg body in the inline accordion panel: the surface behind
+each load's stop rows, and the bottom half of the header+body card pair whose header is
+`var(--ext-leg-header-bg)` (#CFDBFB).
+**Rule:** `content/inlinePanel.js` `injectPanelStyle()`, `.ext-seg-body{…background:#F5F5F5…}`
+(was `#FFFFFF`). Existing stylesheet mechanism, no new stylesheet, no `!important`.
+
+**Light-mode only, structurally:** `content/nightMode.js` already overrides this exact selector's
+`background-color` with `DK_HIGH !important`, so the hex is never exercised in dark mode.
+`nightMode.js` untouched.
+
+**⚠️ Consequence worth checking visually — the zebra striping effectively disappears.** Even table
+rows are tinted `var(--ext-n100)` = **#f5f7fa**, which against the new **#F5F5F5** body is a
+2-point difference on one channel. It was previously #f5f7fa on #FFFFFF, a visible stripe. If you
+want the striping back, the zebra tint needs to move (one line,
+`.ext-inline-panel__table tbody tr:nth-child(even) td`); not changed here because it was not asked
+for.
+
+**Interpretation flagged:** "load rows" was read as the per-leg body (`.ext-seg-body`), matching
+how the previous task's "load headers" mapped to `.ext-seg-header`. The alternative reading is the
+table cells (`.ext-inline-panel__table td`). Both are one-line changes — say the word if you meant
+the cells.
+
+**Verified** (no browser): 12 checks running the actual `injectPanelStyle()`/`buildNightCss()` —
+the rule carries #F5F5F5 with no `!important`, exactly one such declaration, #F5F5F5 appears
+nowhere in the night stylesheet, the night `!important` override is still present and still wins,
+`nightMode.js` has no related diff, no new `<style>` element was introduced, and a hex-diff
+against HEAD confirms **#F5F5F5 is the only newly-introduced colour** in the whole panel CSS.
+
+---
+
+### 2026-07-31 — STILL BLOCKED: collapse Amazon's filter panel on start (2nd request)
+
+Re-requested with new markup showing `aria-label="Filter  "` (trailing spaces). **Still nothing
+implemented — the blocker is unchanged and is not the selector.**
+
+**What the new capture changes:** it invalidates the selector this file recommended on the
+previous attempt. `[aria-label="Filter"]` is an exact match and does **not** match `"Filter  "`,
+so that recommendation would have failed exactly like the three 2026-06-18 attempts. BACKLOG.md
+now carries a corrected trim-based lookup. Finding the button is solved.
+
+**What is still missing:** how to read whether the panel is currently open. The control is a
+toggle, so acting without that read would OPEN it when already collapsed — the stated failure
+mode. The capture is truncated (`…`) precisely where the button's own attributes would be, and
+the 2026-06-18 investigation recorded that Amazon *"may not put `aria-expanded` on the button at
+all"*. The paste-in DevTools snippet that would settle it — run once with the panel open, once
+collapsed — is in BACKLOG.md and is unchanged.
+
+### 2026-07-31 — FIX: clicking a load card stops auto-refresh again (regression)
+
+**Symptom.** With auto-refresh running, clicking a load card no longer stopped the loop; it kept
+refreshing until the dispatcher stopped it by hand.
+
+**Cause — scenario (i): the loop was never told to stop.** `tabState.set('running', false)` lived
+*inside* the `waitForSheet` callback (`inlinePanel.js`). That callback is gated by **guard 3**,
+added 2026-07-30 with the single-flight fix (which stopped card A's poll rendering card B's
+sheet — a real hazard, it could produce a PAT post for the wrong load):
+
+```js
+if (card && (_sheetPollCard !== card || !document.contains(card))) { …; return; }
+```
+
+While the loop is **running**, `refreshNow()` makes Amazon re-render the load list, which
+**detaches the very card the dispatcher just clicked** — inside guard 3's own 50–1500ms poll
+window. The run was discarded, the callback never ran, and the stop never executed. The faster
+the refresh interval, the more reliably it happened. Nothing restarted the loop and nothing
+survived a stop: the stop simply never fired.
+
+**When it last worked.** Before the uncommitted 2026-07-30 single-flight change. The committed
+signature is `waitForSheet(callback, prevFingerprint)` with no `card` parameter and no guard 3 —
+so `git log` shows no commit that broke it; the regression is in the working tree.
+
+**Fix — the existing stop moved to the correct layer, no second call added.** The stop now runs
+synchronously in the click handler, before `waitForSheet`. Stopping belongs to the *click*, not
+the *render*: the dispatcher clicked a load to review it, and that intent does not depend on
+whether Amazon's sheet finished opening, whether the poll timed out, or whether React replaced
+the card node. Guard 3 still governs the render, which is the only thing it was meant to protect.
+`inlinePanel.js` still contains **exactly one** `tabState.set('running', …)` call. Side benefit:
+a sheet that never opens (poll timeout) now also stops the loop, which it previously did not.
+
+**⚠️ Your evidence could not have come from a stock build.** The quoted line
+`[inlinePanel] manual card open — stopping loop for dispatcher review` is a `logger.log`, which
+requires `DEBUG_LEVEL >= 3`; `utils/constants.js` ships `DEBUG_LEVEL = 1`. So it cannot print
+unless the level was raised locally. Worth knowing because at level 3+ the discard path also
+logs `waitForSheet: card no longer the one being waited on — discarding result` — that line
+appearing *instead of* the stop line is the fingerprint of this bug.
+
+**Verified** (no browser): 24 checks driving the real `tabState.js`, `content.js` and
+`inlinePanel.js` in a vm, counting real `refreshNow()` calls. Includes a **mechanism proof** —
+with the card detached mid-poll the loop kept refreshing before the fix and stops after it, with
+an attached-card control alongside to show the detachment is what matters. Three earlier harness
+failures were my own stub bugs, not code faults (poll waits shorter than `REFRESH_SETTLE_MS`; a
+sheet fingerprint that never changed so `waitForSheet` waited out its full 1500ms timeout; and
+`DEBUG_LEVEL` undefined because `constants.js` was not loaded).
+
+### 2026-07-31 — Accordion leg-header colour → #CFDBFB (light mode only)
+
+One value, one file: `utils/designTokens.js`'s `--ext-leg-header-bg`, `#DCE6E9` → `#CFDBFB`.
+
+**Element and rule:** `.ext-seg-header` — the accordion leg headers in the inline panel —
+via `background:var(--ext-leg-header-bg)` at `content/inlinePanel.js:96`. The existing token
+mechanism, as instructed: no new stylesheet, no `!important`, and `inlinePanel.js` itself was
+not edited (the colour lives in the token, and the consuming rule already pointed at it).
+
+**Light-mode only, structurally.** The token is declared in the `:root` block with deliberately
+no `html.ext-night` counterpart, because `content/nightMode.js:130-131` already overrides
+`.ext-seg-header`'s `background-color` with `DK_HIGH !important`. That `!important` is what
+guarantees the token's value can never be exercised in dark mode — so changing it cannot leak.
+`nightMode.js` was not touched.
+
+**⚠️ Contrast — one real regression, reported not fixed.** Computed to WCAG 2.1, reading the
+colours out of the real source files:
+
+| Text on the header | Old (#DCE6E9) | New (#CFDBFB) | AA 4.5:1 |
+|---|---|---|---|
+| `.ext-seg-header` base + `.ext-route-origin`/`.ext-route-dest` — `#1F3A45` | 9.45:1 | **8.68:1** | passes (AAA) |
+| `.ext-route-arrow`, `.ext-seg-dist`, `.ext-seg-header .ext-seg-arrow` — `#4A6570` | 4.88:1 | **4.48:1** | **fails by 0.02** |
+
+The secondary colour `#4A6570` drops just below the 4.5:1 AA threshold. These are 11–12px, which
+is **not** "large text" under WCAG at any weight (large = ≥18.66px bold or ≥24px), so 4.5:1 is
+the applicable bar, not 3:1. It passed before this change and does not now.
+
+**Not fixed, because the task scoped this to the background colour and `#4A6570` was itself
+spec'd in the 2026-07-30 redesign.** The minimal fix if you want it: `#4A6570` → **`#49646F`**
+(1% darker, same hue) = 4.55:1. Three declarations would change — `inlinePanel.js:173`, `:178`,
+`:200`. Your call.
+
+The pills (`.ext-seg-loaded`, `.ext-seg-empty`, and the `#E1EFFE` pill) carry their own
+backgrounds, so their internal text contrast is unaffected (7.70–9.37:1, unchanged). Their
+separation *from* the header actually improves slightly (1.09–1.15:1 → 1.18–1.26:1).
+
+**Verified** (no browser — see below): 21 checks on a harness running the actual
+`injectPanelStyle()` / `buildNightCss()` and the real token source — token value and uniqueness,
+that it sits in `:root` and not in `html.ext-night`, that `.ext-seg-header` still consumes the
+var with no hardcoded hex and no new `!important`, that neither `#CFDBFB` nor `#DCE6E9` appears
+anywhere in the night stylesheet, that the night `!important` override is still present and
+still wins, and that exactly one token declaration differs from HEAD with the token count
+unchanged.
+
+---
+
+### 2026-07-31 — BLOCKED, nothing implemented: collapse Amazon's filter panel on auto-refresh start
+
+**Stopped deliberately, per the task's own instruction** ("if you cannot determine it reliably,
+STOP and tell me what to capture in DevTools instead of guessing"). No code was written.
+
+**Why: this exact feature was built and removed once already.** See CHANGELOG 2026-06-18
+"Remove filter-panel auto-close" — three strategies (close-button search, toggle-button click,
+Escape dispatch + retry) were tried and none worked reliably. `panelCloser.js:72` still carries
+the resulting comment: *"Left filter panel is intentionally left alone."* `CLOSE_FILTER_PANEL`
+was removed from `ALLOWED_CLICK_INTENTS` at the same time, so re-adding this needs a SAFETY.md
+click-site authorisation too.
+
+**New information that explains the old failure.** Every prior attempt selected
+`button[aria-label="Filter"...]` — i.e. it expected `aria-label` on the **button**. The freshly
+captured markup shows it is on an inner **`<span role="img">`**:
+
+```html
+<button type="button" class="css-14evw8c">…<span aria-label="Filter" role="img">…
+```
+
+So `document.querySelector('button[aria-label="Filter"]')` matches **nothing**, which is
+consistent with all three attempts failing. Finding the button is therefore solvable now:
+`document.querySelector('[aria-label="Filter"][role="img"]')?.closest('button')` — no dependence
+on the generated `css-14evw8c` hash.
+
+**What is still NOT solvable from available evidence: the panel's open/collapsed state.** The
+capture is truncated exactly where the button's own attributes would be, and the 2026-06-18
+investigation explicitly recorded that Amazon *"may not put `aria-expanded` on the button at
+all"*. A diagnostic (`diagFilterPanel()`) was written back then to answer this and its output was
+never recorded before the code was deleted. Since the control is a toggle, acting without a
+reliable state read would **open** the panel whenever it was already collapsed — the opposite of
+the requirement. Hence the stop. See STATE.md / BACKLOG.md for the exact DevTools capture needed
+to unblock this.
+
+### 2026-07-31 — Only a genuine 429/503 may pause the extension (was: any non-2xx, and aborts)
+
+Fixes the finding reported at the end of the previous task. Two files:
+`content/networkObserver.js` (stop reporting aborts) and `background.js` (read the status).
+`content/content.js` was **not** changed — it still relays every observed result verbatim, and
+the filtering now lives in `background.js` where the decision is made.
+
+**What was wrong.** `reportResult(ok, status)` accepted `status` and never read it; the whole
+decision was `if (ok)`, so the `else` branch fired for *any* non-2xx. Meanwhile an aborted
+request was reported as a failure by both observer paths. Switching a saved search aborts the
+in-flight `/api/loadboard/search`, so ordinary use pushed the extension into backoff and
+escalated it through 5/10/20/40/80s — sticky until a 2xx it was no longer requesting. The
+dispatcher's board kept working, so nothing looked wrong, while our monitoring was off.
+
+**Fix 1 — aborts are never reported (`content/networkObserver.js`).**
+
+*fetch:* the `.catch` now returns early on an abort. Two independent signals, either sufficient:
+`signal.aborted` on the request's own AbortSignal (captured before the call, from either
+`init.signal` or `Request.signal`), and `err.name === 'AbortError'`. Both are needed, not one:
+`AbortController.abort(reason)` rejects with the caller's `reason`, which need not be a
+DOMException and need not be named `AbortError` — `signal.aborted` catches that case; and
+`err.name` catches an abort whose signal we could not see. A genuine failure rejects with a
+`TypeError` and an un-aborted signal, so it still reports as status 0.
+
+*XHR:* was one `loadend` listener. `loadend` fires for **every** terminal outcome — load, error,
+timeout **and abort** — and an abort arrives with `status === 0`, indistinguishable there from a
+real network failure. Replaced with three specific listeners (`load`, `error`, `timeout`);
+`abort` is simply not subscribed, which makes the distinction structural rather than inferred.
+Same reporting surface as before, minus aborts.
+
+**Fix 2 — the status is now read (`background.js`).** New
+`const RATE_LIMIT_STATUSES = [429, 502, 503, 504]`. The escalation branch runs only for those;
+every other failure returns **without** `setState`, so no storage write fires and an in-flight
+backoff is neither extended nor cleared.
+
+**502 and 504 included by PM decision (same day), as a deliberate safety-side default made
+without captured data.** We have never observed Amazon throttling via a gateway status. They are
+in because the cost is asymmetric: if a gateway status *is* a throttle and we do not back off, we
+keep hammering Amazon and risk an IP block on the dispatcher's account — the exact outcome this
+backoff exists to prevent. If it is an ordinary gateway error, we lose a few seconds and recover
+on our own. Recorded in the comment at the constant so it can be revisited if evidence appears.
+**500 stays out** — an application error is not a throttle, and retrying more slowly does not
+help it.
+
+**The backoff itself is untouched** — timings, escalation, cap, jitter, the sticky flag, 2xx
+reset, and permit suppression are all byte-for-byte the same code. Verified by A/B against the
+committed file (PART 4 below).
+
+**Requirement 5 — the false comment is gone.** `background.js:208-212` claimed *"Never called on
+3xx/4xx — content.js only reports results for responses it identifies as either success or a
+5xx/network failure"*. That was never true. The replacement states what the code does and notes
+explicitly that content.js relays everything unfiltered.
+
+**⚠️ Deliberate narrowing you should be aware of:** the old *documented* intent was "any 5xx".
+`500` now does **not** pause. (502/504 were briefly excluded too, then added back the same day —
+see above.) That is a small reduction in coverage versus the stated intent, not just versus the
+bug.
+
+---
+
+### 2026-07-31 — REPORT ONLY: what the other statuses should do (requirements 3 and 4)
+
+Requested as a separate decision. **None of this is implemented** — every status below currently
+does nothing beyond a console log.
+
+| Status | What it means here | Recommendation | Confidence |
+|---|---|---|---|
+| **502, 504** | Gateway/timeout from whatever fronts Amazon's API. Plausibly the *same* IP throttle surfacing through a CDN rather than the origin. | ~~Probably add — but capture evidence first.~~ **DECIDED same day: added to `RATE_LIMIT_STATUSES`.** Safety-side default without data — the asymmetric cost (risking a real IP block vs losing a few seconds) settles it. Revisit if evidence appears. | Low — no data, decision made on cost asymmetry not evidence |
+| **500** | Application error on Amazon's side. Not a throttle, not about us, and retrying at a slower rate does not help. | Leave out. Log only. | Medium |
+| **401, 403** | Session/auth problem, not a rate problem. Backoff is the wrong lever entirely — it would leave the loop suppressed while the actual fix is re-authentication. | No backoff. The useful response would be a gate re-check (`recheckAuthGate()`), which is a behaviour change needing its own task. | High |
+| **404** | Either a bad query from the page, or — more worrying — `WATCH_PATH` has gone stale and Amazon moved the endpoint. If sustained, the extension is silently blind, not rate-limited. | No backoff. Worth a **loud** log, because sustained 404s on this path mean our core assumption broke. | High |
+| **400** | Malformed request built by Amazon's own page. Nothing to do with us. | Ignore. | High |
+| **0 (genuine network failure)** — requirement 4 | Browser offline, DNS failure, connection refused. No server said anything, so there is nothing to back off *from*. | **No backoff — current behaviour is correct.** While offline the loop keeps ticking and failing every interval; Chrome fails offline fetches fast, so the cost is negligible and it means we resume the instant connectivity returns. | High |
+
+**One structural note while looking at this:** the sticky `rateLimited` flag cannot deadlock.
+Permits are suppressed only while `backoffUntil > now`; once that expires, permits flow again
+even though `rateLimited` is still true, so a 2xx can be observed and clear it. The flag is
+display-only, exactly as its comment claims.
+
+**Verification.** No browser; the 6-point smoke checklist is **NOT RUN**. `node --check` passes
+on both files. A Node `vm` harness, **89 checks, all pass**, in four parts:
+
+1. **The real `networkObserver.js`** driven with the **real `AbortController`/`DOMException`**
+   and an XHR double that fires the same events a browser does (including `loadend` after every
+   terminal outcome, so the old code path would have been caught).
+2. **The real `background.js`** driven through its **real `chrome.runtime.onMessage` listener**,
+   exactly as content.js relays.
+3. **End to end** — observer output piped straight into background with no hand-written messages
+   in between, including 10 rapid saved-search switches.
+4. **A/B against `git show HEAD:background.js`** — identical step-index sequences over 8
+   consecutive failures for both 429 and 503, identical reset-on-2xx state, and durations still
+   landing in 5s/10s/20s/40s/80s/5min ±20%.
+
+Stubs mean this proves message-level behaviour, not real Chrome/Amazon behaviour — the browser
+half is TC-RATELIMIT-7.
+
+### 2026-07-31 — Sidebar paused/rate-limit message removed (message only)
+
+Removed by PM decision. The amber row-1 line — *"Paused — Amazon has temporarily limited your IP
+due to frequent refreshes. Access returns on its own; the extension will resume automatically."*
+— along with its trailing "i" icon and that icon's 340px tooltip, which existed only to
+accompany it.
+
+**The pause behaviour is untouched.** `background.js` and `content/networkObserver.js` were not
+edited at all (they do not appear in `git status`); `content/content.js`'s relay was not touched
+by this task. The extension still stops polling on 429/503, still backs off, still resumes on the
+next success. All edits were in `content/sidebar.js`.
+
+**Removed:** 4 elements (`ext-rate-limit-banner`, `ext-rate-limit-text`, `ext-rate-limit-info`,
+`ext-rate-limit-tooltip`), 1 `row1.appendChild`, 4 CSS rules, 5 shared CSS selectors narrowed to
+their memory-icon half, 2 tooltip helper functions, 5 event listeners, and the paused branch of
+`updateRateLimitDisplay()`. **Nothing was left commented out in the source** — the full
+reinstatement record, with verbatim original code, is in BACKLOG.md "Sidebar paused/rate-limit
+message (reinstatement record)".
+
+**Two judgment calls, both flagged for reversal if you disagree:**
+
+1. **The slider swap went with the banner.** `updateRateLimitDisplay()` used to hide
+   `slider`/`sliderValue` while paused so the banner could take their place. That hiding existed
+   *only* to make room for the banner; keeping it would have made the speed control silently
+   vanish during a pause with nothing left on screen to explain why. The slider now stays visible
+   in every state. Reinstating the banner requires restoring those three lines too.
+2. **`renderSharedRateStatus()` was left exactly as-is.** It still hides row 2 (the "Active
+   tabs: N" line) while paused — a condition originally justified by "the banner already explains
+   the paused state". That element is not the message, and the task was scoped to the message, so
+   it was not touched. Consequence: while paused, row 2 disappears and the bar is 20px shorter
+   (body padding tracks it, so no gap or overlap), with no text anywhere explaining why.
+
+**Kept deliberately:** `#ext-sidebar{max-width:calc(100vw - 16px)}`, added for the banner's long
+sentence. It is what bounds row 2's width so its `text-overflow:ellipsis` can trigger, and
+removing a purely defensive cap is a layout change that could not be tested here.
+
+**Verification.** No browser; the 6-point smoke checklist is **NOT RUN**. `node --check` passes.
+A Node `vm` harness (79 checks, all pass) drives the **real** `background.js` through its real
+`chrome.runtime.onMessage` listener, and builds the **real** `sidebar.js` against a stub DOM. See
+the verification table in the task report. Stubbed DOM ⇒ structure and state only, not pixels.
+
+---
+
+### 2026-07-31 — REPORT ONLY: what actually puts the extension into the paused state
+
+Requested because the dispatcher saw the paused message while merely switching between saved
+searches, where no Amazon rate limiting should be involved. **Nothing was fixed.**
+
+**Answer: a single failed or aborted request is enough. A real 429/503 is not required.** The
+HTTP status is never examined anywhere in the chain — the only thing that matters is a boolean.
+
+**The chain, with the condition at each step:**
+
+1. **`content/networkObserver.js:38-44`** — for any request whose URL contains
+   `/api/loadboard/search`:
+   ```js
+   result.then(function (resp) { report(url, resp.ok, resp.status); })
+         .catch(function () { report(url, false, 0); }); // network failure — no HTTP status at all
+   ```
+   A rejected fetch reports `ok:false, status:0`. **An aborted request rejects**, so an abort is
+   indistinguishable here from a real network failure.
+2. **`content/networkObserver.js:56-63`** — the XHR path has the same hole via a different
+   route: it listens on `loadend`, which fires on abort and error as well as success, and
+   computes `ok` as `xhr.status >= 200 && xhr.status < 300`. On an abort `xhr.status` is `0`, so
+   `ok` is `false`.
+3. **`content/content.js:88-100`** — relays **every** observed result to background.js verbatim,
+   with no filtering:
+   ```js
+   chrome.runtime.sendMessage({ type: 'REPORT_RESULT', ok: data.ok, status: data.status })
+   ```
+   Note: `background.js:208-212` claims *"Never called on 3xx/4xx — content.js only reports
+   results for responses it identifies as either success or a 5xx/network failure"*. **That
+   comment is wrong.** No such filtering exists in content.js.
+4. **`background.js:220-236`** — `reportResult(ok, status)`. `status` is accepted as a parameter
+   and **never read**. The entire decision is `if (ok) { …clear… } else { …pause… }`, so the
+   `else` branch sets `state.rateLimited = true` and starts backoff for *any* falsy `ok`.
+
+**Confirmed by execution**, driving the real `background.js` through its real message listener:
+
+| Reported | Result |
+|---|---|
+| `ok:false, status:0` (aborted / failed request) | **PAUSES** |
+| `ok:false, status:404` | **PAUSES** |
+| `ok:false, status:401` (an auth problem, not a rate problem) | **PAUSES** |
+| `ok:false, status:429` / `503` | PAUSES (correct) |
+| `ok:true, status:200` | does not pause |
+
+**Why switching saved searches would trigger it:** the load board is an SPA. Changing the search
+replaces the in-flight `/api/loadboard/search` request — either cancelled via `AbortController`
+(fetch rejects → step 1) or `xhr.abort()` (→ step 2). One such abort sets `rateLimited = true`
+and starts a 5s backoff; the state is **sticky** and only clears on an observed 2xx.
+
+**Severity beyond the message.** Removing the message hides this from the dispatcher but does not
+stop it: a spurious pause still suppresses permits (`background.js:97`), so the extension really
+does stop polling for the backoff duration after an ordinary search switch. Escalation is real —
+repeated switches walk `BACKOFF_STEPS_MS` `[5s, 10s, 20s, 40s, 80s]` toward the 5-minute cap.
+
+**Fix shapes, not implemented — your call:** (a) filter in `content.js` so only 429/503/5xx are
+relayed; (b) inspect `status` in `reportResult()` and only pause on rate-limit statuses;
+(c) distinguish abort from failure in `networkObserver.js` (fetch: check `err.name === 'AbortError'`;
+XHR: use the `abort` event rather than `loadend`) and don't report aborts at all. (c) is the most
+precise and (a)/(b) the cheapest; they are not mutually exclusive. Whichever is chosen, the
+`background.js:208-212` comment needs correcting either way.
+
+### 2026-07-30 — Popup renders from local state; a lost connection no longer signs anyone out
+
+One change, two symptoms. The popup used to await a network round trip before deciding what to
+render — that was both the 1–1.5s "Checking your session…" screen **and** the reason a failed
+call dropped the dispatcher onto the login form. PART B (below) had already established that the
+call never discovered anything: the stored session at `popup.js:237` carries `expires_at` and
+`user.email`, the comparison at `popup.js:244` is a complete signed-in decision, and the
+`storage.onChanged` handler has always rendered the logged-in state from exactly that local data
+with no network at all.
+
+**Now:** read storage → decide → render. If a stored session exists and `expires_at - now > 30`
+(same margin, same comparison), the full panel goes up immediately. Otherwise the login form
+does. Nothing in that path touches the network. Validation runs afterwards, against a UI that is
+already on screen. The `popup-auth-checking` block and its CSS are gone from `popup.html` /
+`popup.css`, and the 3000ms bounded-wait timer is gone from `popup.js` — both existed only to
+manage a wait that no longer happens.
+
+**"The server said no" vs "I couldn't reach the server" — the distinction is reliable.** Verified
+by reading the shipped `vendor/supabase.min.js`, not from docs or memory:
+
+| Situation | What gotrue produces |
+|---|---|
+| fetch rejects — offline, DNS, refused, abort | `AuthRetryableFetchError`, status **0** (minified `Vr`: `catch(e){…throw new Zn(J(e),0)}`) |
+| HTTP 500,501,502,503,504,520–530 | `AuthRetryableFetchError`, that status (minified `zr`: `if(Rr.includes(e.status))`) |
+| a real auth verdict — 401/403/400, revoked token | `AuthApiError` carrying that status |
+
+gotrue **returns** these as `result.error` rather than throwing (its catch does
+`if(isAuthError(e)) return {…,error:e}`), and `_getUser` passes the instance through untouched,
+so both paths arrive intact. `isServerVerdict()` uses the library's own exported
+`isAuthRetryableFetchError` predicate (the UMD bundle exports it alongside `createClient`), with
+a `name` check as fallback. Anything that is not a supabase auth error at all — a `TypeError` out
+of the client, the synthesized `'setSession failed'` — is also treated as "no answer": **signing
+someone out now requires a positive server-issued verdict, nothing weaker.** That last part is a
+deliberate widening of the old behaviour, which cleared the session on any throw.
+
+- **Unreachable** → nothing changes. Session kept, view kept, dispatcher stays signed in, and
+  `MSG_NO_CONNECTION` ("No connection — check your internet.") goes into the existing
+  `popup-auth-status` line — inline, non-blocking, no new UI element. Logged via `logger.error`
+  with `errorName` + `status`.
+- **Verdict** → unchanged from before: clear the session, fall back through
+  `restorePendingOrEmailStep()` so a pending OTP still resumes at the code step.
+
+**Accepted trade-off (PM decision):** a session revoked server-side shows the panel for a few
+hundred ms before validation corrects it. Access is free at this stage, so there is nothing to
+gate.
+
+**Scope.** Every Supabase call, storage key, branch condition, and the 30s margin are unchanged —
+only *when* each result is applied and what a failure is permitted to do. The `.catch` on
+`restoreSession()` stays (a failed local storage read still needs the login form, and without it
+this is an unhandled rejection).
+
+**Note on first paint:** `chrome.storage.local.get` is async, so the popup paints its header and
+"Account" title before the decided block appears. That gap is a local IPC round trip, not a
+network one, and no *wrong* state is ever rendered in it — every auth and feature block starts
+`hidden`. A synchronous decision would mean moving the session out of `chrome.storage`, which is
+a storage change and out of scope.
+
+**Behavioural finding, unchanged by this fix but now user-visible in a new place.** On the
+*locally expired* + offline path, `refreshSession()` does not fail fast: gotrue's
+`_refreshAccessToken` retries with exponential backoff (`200 * 2^(attempt-1)`) while the error is
+retryable, bounded by `N = 30*1e3` — read out of the bundle, and **measured at ~25.6s** in the
+harness before the failure surfaced. Consequences: the login form still appears instantly (it no
+longer waits on anything), the stored session is still **not** cleared, but the "No connection"
+note on that one path can take ~25–30s to appear. The common case — valid session + offline —
+is prompt, because `setSession`/`_getUser` has no retry wrapper. Left as-is: it is library
+behaviour, and changing it means passing a custom fetch or timeout into a Supabase call, which
+this task's scope excludes.
+
+**Verification.** No browser in the execution environment; the 6-point smoke checklist was **NOT
+RUN**. `node --check` passes. A Node `vm` harness loads the real `utils/*.js`, the **real
+`vendor/supabase.min.js`**, and the real `popup.js`, seeding element visibility from the real
+`popup.html`. Supabase is **not** stubbed — popup.js calls the real `createClient` /
+`setSession` / `refreshSession`, and only `fetch` is swapped, so the error classification is
+produced by the shipped library itself rather than by hand-built error objects: offline = a
+rejecting fetch, 401/503 = real `Response` objects. 51 checks, all pass, including the panel
+being visible *while the network call is still in flight*, a 503 not signing anyone out, and the
+signed-out path making **no** network call at all. Stubbed DOM ⇒ sequencing and state only, not
+layout.
+
+---
+
+### 2026-07-30 — REPORT ONLY: can `supabase.min.js` be loaded after first paint?
+
+Requested alongside the change above; **nothing was implemented.**
+
+**Short answer: yes, but not by moving the `<script>` tag — that alone breaks login entirely.**
+First paint no longer needs the client, but three things still assume it exists synchronously.
+
+**What actually blocks it.** `popup.js:41-44` creates the client at top level, guarded by
+`typeof supabase !== 'undefined'`. Deferring the bundle makes that guard fail, leaving
+`supabaseClient === null` — and `restoreSession()` (`popup.js:257`) treats a null client as
+"login not configured" and routes straight to `restorePendingOrEmailStep()`. **Every dispatcher,
+signed in or not, would land on the login form.** Note `<script defer>` on the bundle alone is
+exactly this trap: deferred scripts run *after* non-deferred ones, so `popup.js` would execute
+first.
+
+**What would need to change** (all in `popup.js`, none of it in the first-paint path):
+1. Create the client lazily — a `getSupabaseClient()` that constructs on first use once the
+   bundle has loaded, instead of the top-level `if` at line 41.
+2. `restoreSession()` must stop treating "no client yet" as "not configured". It already reads
+   storage and renders before any Supabase call, so the split is natural: render, then await the
+   client, then validate.
+3. The five `if (!supabaseClient)` guards at lines 257, 325, 356, 389, 425 currently show
+   **"Login not configured."** — a dispatcher who clicks "Send code" during the load window
+   would get a misleading error. They need to await the client instead of failing.
+
+**What would NOT break:** the new `isServerVerdict()` already guards with
+`typeof supabase !== 'undefined'` and falls back to a `name` check, so it survives a late load.
+`utils/supabaseConfig.js` only defines two constants. Nothing else in `popup.js` touches the
+`supabase` global.
+
+**Separate surface, same pattern:** `utils/authGate.js:15` does the identical top-level
+`typeof supabase` check, ordered by `manifest.json`'s `content_scripts`. The same optimisation is
+available there and has the same failure mode — a gate that closes because the bundle had not
+loaded yet means features silently never activate on that page load. Out of scope here; flagged
+because a fix in one place invites the same change in the other.
+
+**Honest caveat on the payoff.** The claim that bundle parsing dominates the remaining delay is
+**inferred, not measured** — I have no browser. What is measured: the file is 207,722 bytes of
+the ~247KB total, and it is a blocking `<script>`. Before spending the refactor above, measure
+it: Chrome devtools Performance panel on the popup, look at "Evaluate Script" for
+`supabase.min.js`. If it is 30ms, this is not worth the three changes and their failure modes.
+
+---
+
+### 2026-07-30 — Popup no longer flashes the login screen at a signed-in dispatcher
+
+**The bug.** Opening the popup while signed in showed the "Free access — sign in with your
+email" block for ~1–1.5s before the real panel replaced it. Nothing was wrong with the auth
+logic: the login block is simply what `popup.html` rendered by default, and the session check
+that would replace it is async. Whichever of the two blocks you render on spec is wrong for one
+of the two kinds of user, for the whole duration of the check.
+
+**The fix — a third, neutral state.** `popup.html` now ships `hidden` on
+`popup-auth-gate-note` and `popup-auth-step-email` (the code step, logged-in row, and
+`popup-features` were already `hidden`), so **no** auth or feature markup is visible at first
+paint. In their place is a new `popup-auth-checking` block reading "Checking your session…".
+
+**One switch, by construction.** Leaving the neutral state happens inside `showAuthStep()`
+(`popup.js:172`) and nowhere else. Every path that can produce an answer already funnels through
+that one function — `showLoggedIn()`, both branches of `restorePendingOrEmailStep()`, the new
+timeout fallback, the `chrome.storage.onChanged` cross-page sync, and every button handler — so
+the neutral block is hidden exactly once, on the first real answer, without six call sites
+having to remember to do it.
+
+**Sizing.** `.popup-auth-checking` gets `min-height: 92px`, computed from the two elements it
+stands in for at the popup's fixed 320px width: gate note (14px × 1.4 line-height, wrapping to
+2 lines = 39.2px, + 14px margin) + email step (~29px input + 10px margin). The arithmetic is in
+the CSS comment. **Derived from the CSS rules, not measured in a browser** — if the gate note
+wraps to a different line count with the real font, that is the number to correct. This makes
+the signed-**out** transition jump-free. The signed-**in** transition still grows the popup,
+because `popup-features` is several hundred px tall — unavoidable for any neutral state, and
+identical to what already happens the moment you finish logging in.
+
+**No spinner**, deliberately: `popup.css` has no `@keyframes` and no `animation` anywhere
+(grepped), so a spinner here would be a new UI idiom rather than a reused one — the task said
+reuse or omit.
+
+**Failure handling — `AUTH_CHECK_TIMEOUT_MS = 3000`.** Chosen from measurement, not taste; the
+reasoning is in the comment at `popup.js:141`. The slow step is
+`supabaseClient.auth.setSession()`, which on the not-expired branch calls `_getUser()` — a real
+`GET {SUPABASE_URL}/auth/v1/user` (confirmed by reading `vendor/supabase.min.js`, not from
+memory). Measured to that endpoint from the authoring machine: **171–499ms cold** (DNS + TCP +
+TLS + request, 5 runs, median 226ms), **91–176ms warm**. 3000ms is ~6× the slowest cold round
+trip. The asymmetry matters: a timeout that fires on a check that was merely slow-but-working
+would show the login block to a signed-in user — this exact bug, 3s later. Too long only costs
+a longer neutral state. Two fallbacks, both logging `logger.error` (level 1, survives the quiet
+default):
+
+- `restoreSession().catch(...)` — it *can* reject: its `chrome.storage.local.get`
+  (`popup.js:237`) sits outside any handler. Previously survivable (a rejection left the
+  markup's default login block up, which happened to suit a logged-out user); with a neutral
+  default it would strand the dispatcher, so it is now handled. It was also an unhandled promise
+  rejection before, and no longer is.
+- A 3s `setTimeout` backstop for a check that never answers at all, cleared in `.finally()` so a
+  late fallback can't overwrite an answer that arrived at, say, 2990ms.
+
+Both fall back through `restorePendingOrEmailStep()`, **not** straight to `showAuthStep('email')`
+— a dispatcher who closed the popup mid-code-entry still returns to the code step even when the
+session check failed or timed out.
+
+**`restoreSession()` itself is unchanged** — no auth logic, no storage key, no Supabase call was
+touched. Only *when* each block becomes visible, plus error handling on the invocation.
+
+**Known edge case, deliberate:** if the timeout fires and the real answer arrives later saying
+signed-in, `showLoggedIn()` still runs and the popup switches a second time. The alternative —
+suppressing a late correct answer — would leave a signed-in dispatcher looking at a login form.
+
+**Verification.** No browser in the execution environment; the 6-point smoke checklist was **NOT
+RUN**. `node --check` passes. Sequencing was proved with a Node `vm` harness that loads the real
+`utils/constants.js`, `utils/storage.js`, `utils/logger.js` and `popup/popup.js` against a stub
+DOM, **seeding each element's starting `hidden` state by parsing the real `popup.html`** — and
+records every `.hidden` assignment, so "never visible at any point" is asserted across the whole
+run, not just at the end. 44 checks, all pass: signed-in (login block never visible), signed-out
+(features never visible), pending-OTP resume, `setSession` throwing, `chrome.storage` rejecting,
+never-answers → 3s timeout, timeout **with** a pending OTP still resuming the code step, and a
+slow-but-successful 2.5s check not tripping the timeout. Error capture is at the `console.error`
+layer against the real `logger` at the real shipped `DEBUG_LEVEL`, so a level-gating mistake
+would have surfaced. The stubs mean **layout is not covered** — the 92px `min-height` and the
+absence of a visual jump still need a real browser (TC-AUTH-9 step 6).
+
+---
+
+### 2026-07-30 — PART B (report only, nothing changed): what the popup's 1–1.5s actually is
+
+Requested as read-only analysis alongside the fix above. **Nothing here was optimised.**
+
+**Sequence, popup open → features visible:**
+
+| # | Step | Where | Cost |
+|---|---|---|---|
+| 1 | Chrome creates the popup document, parses `popup.html` + `popup.css` | `popup/popup.html` | not measured |
+| 2 | 6 blocking `<script>` tags fetch/parse/execute in order | `popup.html:226-232` | not measured; **`vendor/supabase.min.js` is 207,722 bytes**, ~84% of the 247KB total |
+| 3 | `supabase.createClient(...)` | `popup.js:42` | not measured |
+| 4 | `DOMContentLoaded` fires; element lookups; handlers wired | `popup.js:99` | not measured |
+| 5 | `restoreSession()` | `popup.js:230` | — |
+| 6 | `await chrome.storage.local.get(SUPABASE_SESSION_KEY)` | `popup.js:237` | not measured; local IPC, expected single-digit ms |
+| 7 | Local expiry check `expiresAt - nowSec > 30` | `popup.js:244` | free, synchronous |
+| 8 | **`await supabaseClient.auth.setSession(...)`** | `popup.js:249` | **the slow step — measured 171–499ms cold, 91–176ms warm** |
+| 9 | `showLoggedIn(...)` → `showAuthStep('loggedin')` reveals `popup-features` | `popup.js:254` → `172` | free |
+
+**Which step is slow, and what kind of slow.** Step 8, and it is a **network round trip**, not a
+`chrome.storage` read. Confirmed by reading the shipped bundle rather than from memory: minified
+`_setSession` decodes the JWT, and on the **not**-expired branch takes
+`await this._getUser(e.access_token)`; `_getUser` is
+``await Y(this.fetch, `GET`, `${this.url}/user`, {headers, jwt, xform})`` — i.e.
+`GET https://beoiwdadatcnobowfsvv.supabase.co/auth/v1/user`. (On the expired branch it is
+`_callRefreshToken` instead — also a network call.) **Measured** with `curl` to that exact
+endpoint from the authoring machine: 5 cold runs 171/206/226/243/499ms total, warm reuse
+91–176ms. Caveat: those returned **401** (no valid bearer token), so they skip the JWT
+verification and user-row read a real call performs — the true figure is somewhat higher, but
+the same order of magnitude.
+
+So step 8 accounts for roughly 0.2–0.5s+ of the reported 1–1.5s. The remainder is steps 1–4 —
+dominated, by inference, by fetching/parsing/executing the 207KB Supabase bundle on every popup
+open. **That part is inferred, not measured** (it needs devtools in a real Chrome).
+
+**Is the signed-in answer already available locally before that step?** **Yes.** The session
+object read at step 6 already contains everything the UI needs: `expires_at` (step 7 already
+makes a purely local signed-in/expired decision from it) and `user.email` (the only field
+`showLoggedIn()` displays). Independent proof from elsewhere in the same file: the
+`chrome.storage.onChanged` handler at `popup.js:620-623` renders the logged-in state straight
+from `changes[SUPABASE_SESSION_KEY].newValue.user.email` with **no** network call at all. The
+network round trip at step 8 is a **validation** of a locally-known answer, not a lookup of an
+unknown one.
+
+**Is any of it cached between popup opens?** **No.** Each open is a fresh document: the bundle
+is parsed again, `createClient` runs again (`popup.js:42`), and the client is configured
+`persistSession: false, autoRefreshToken: false` (`popup.js:43`), so it carries nothing in
+memory across opens. HTTP-level caching of `/auth/v1/user` is *inferred* not to apply (auth
+endpoints are conventionally `no-store`, and the request is `Authorization`-keyed) — I did not
+inspect the response headers. Note `utils/authGate.js:37` performs the **same** `setSession`
+network validation in every content script on every page load, independently of the popup.
+
+**Measured vs inferred, plainly.** Measured: the `/auth/v1/user` round-trip timings; the fact
+that `setSession` calls `_getUser` (read from the shipped bundle); file sizes; that the stored
+session carries `user.email` and `expires_at` (read from the code that consumes them). Inferred:
+the bundle parse/execute cost, the `chrome.storage` read cost, the popup document creation cost,
+and the HTTP-cache claim. **No end-to-end 1–1.5s measurement was taken — that needs a browser.**
+
+---
+
+### 2026-07-30 — Activation lockout fixed (audit B1, High) — `content/content.js` only
+
+**The bug.** `activateExtensionUI()` set `_extActivated = true` on its **second line**, before
+`await tabState.init()` and `buildSidebar()`. If either threw, the flag stayed `true` while no
+UI had been built — and since the function's first line is `if (_extActivated) return;`, every
+later activation call returned early on that flag. The dispatcher was left with a dead
+extension: no sidebar, no buttons, no error on screen, and no way back except reloading the
+page. Logging out and back in did not help — the fresh login's `activateExtensionUI()` hit the
+same early return. The extension could not recover on its own.
+
+**The fix.** `_extActivated = true` now happens **only after all three steps** (`tabState.init`,
+`buildSidebar`, `initManualToggle`) have completed without throwing. Three parts:
+
+1. **Failure leaves the flag `false`**, so the next activation attempt runs for real instead of
+   being swallowed by the guard. This is the whole point of the fix.
+2. **Failure logs `logger.error`** (level 1 — survives the shipped quiet `DEBUG_LEVEL`, unlike
+   `logger.log`) with a `step` field naming which of the three steps threw. A `step`-tracking
+   local is set before each step rather than wrapping each one in its own try, keeping the
+   happy path byte-for-byte the same sequence of calls it was before.
+3. **Failure rolls back through the existing teardown**, `deactivateExtensionUI()` — no second
+   teardown function to keep in sync. That function early-returns unless `_extActivated` is
+   true, so the catch sets it true purely to open that gate; `deactivateExtensionUI()` itself
+   sets it back to false on its first line, and a `finally` re-asserts `false` in case the
+   teardown threw before reaching it. Nothing can observe the momentary `true`:
+   `deactivateExtensionUI()` is fully synchronous, and any activation call arriving during it
+   is blocked by the in-flight guard below. This matters most when `buildSidebar()` throws
+   *after* `document.body.appendChild(container)` (sidebar.js:352) but *before* it attaches
+   `_runningSubscriber` / `_memoryPollInterval` / `_rateLimitStorageListener` (lines 608–672) —
+   a container in the DOM with none of its cleanup handles. `deactivateExtensionUI()` already
+   guards each handle with `if (sidebarEl._x)` and removes the element unconditionally, so that
+   half-built case tears down cleanly and a retry cannot produce a second sidebar.
+
+**New in-flight guard, `_extActivating`** — deliberately a *separate* flag from `_extActivated`,
+because the two now mean different things: `_extActivated` means "initialisation finished and
+the UI exists" (only true at the very end), while something still has to stop a second call
+arriving mid-`await` from starting initialisation a second time. Cleared in a `finally`, so a
+thrown step cannot leave it stuck `true` — that would have recreated the exact same lockout one
+flag over. Concurrent callers return immediately (with a log line) rather than awaiting the
+in-flight run; no current caller depends on the returned promise meaning "UI is ready"
+(`onAuthGateChange` only attaches a `.catch`, and the startup IIFE does nothing after its
+`await`).
+
+**Errors are now caught rather than propagated.** The `.catch()` at the `onAuthGateChange` call
+site is left in place as a safety net but will no longer fire for these three steps. Side
+benefit: the startup IIFE's `await activateExtensionUI()` had **no** catch, so a throw there was
+previously an unhandled promise rejection.
+
+**Out of scope, deliberately unchanged:** what `tabState.init()`/`buildSidebar()` do, the order
+of the steps, any naming, and any user-visible error UI (a visible failure signal was explicitly
+not approved — the failure is console-only for now).
+
+**Verification.** No browser available in the execution environment; the 6-point smoke checklist
+was **NOT RUN**. `node --check` passes. Control flow was proved with a Node harness that slices
+the **real** source text of `_extActivated` … end of `deactivateExtensionUI()` out of
+`content/content.js` and evals it against stubs (rather than testing a copy that could drift):
+44 checks covering happy path, `tabState.init()` throwing, `buildSidebar()` throwing both before
+and after it appends the container, retry-after-failure for both failing steps, three concurrent
+calls, concurrent calls where the first fails, and deactivate→activate. All pass. The stubs
+model DOM/Chrome effects as counters, so this proves flag/teardown/re-entrancy logic only — real
+DOM, real `chrome.storage`, and real Amazon page behaviour still need TC-AUTH-8 run by hand.
+
+**Adjacent race found, NOT fixed** (separate bug, outside this task's one-fix scope): a logout
+arriving *while* activation is in flight is still not handled. `deactivateExtensionUI()`
+early-returns because `_extActivated` is false during the flight, then the in-flight activation
+proceeds to build a sidebar for a logged-out session. This was equally broken before the fix
+(the flag was true, so teardown ran against nothing and `buildSidebar()` then ran anyway,
+leaving a sidebar with the flag `false`). Needs its own decision — likely a post-`await` gate
+recheck via `isAuthGateActiveSync()`.
+
+**Also noted, NOT fixed:** `buildSidebar()` appends `<style data-testid="ext-sidebar-styles">`
+to `document.head` (sidebar.js:214) and `deactivateExtensionUI()` never removes it, so every
+deactivate→activate cycle leaves another copy behind. Pre-existing, cosmetic (the rules are
+identical), and touching it would mean changing the teardown this task said to reuse as-is.
+
+### 2026-07-30 — PII log sweep finished; sidebar shows the shipped extension name
+
+Mechanical batch: log-payload and string edits only. No control flow, no parser logic, no
+renames. Logger call count is byte-identical before and after (183 log / 55 warn / 60 error /
+5 debug = **303**).
+
+**PART 1 — remaining personal data removed from logs.** Same rule as the previous task: the
+call stays, the value goes, each site still shows that the step ran and whether it worked.
+
+*Emails (4 named sites):* `authGate.js` `'gate transition'` → `hasEmail` boolean (this one
+fired on every login/logout in **every open tab**, the widest email leak in the codebase);
+`popup.js` `verifyOtp` → `emailLength` + `codeLength`; `resend signInWithOtp` → `emailLength`;
+`restorePendingOrEmailStep` → `emailLength`. The stored email is still used to prefill the
+input and status line — only the log lost it.
+
+*Addresses:* `patModal.js` — the `'city source comparison'` log (full street addresses for
+both stops, the largest remaining leak) plus the two `originStop`/`destStop` fallback warns.
+`patApi.js` — **13 sites, not the 5 in the task list.** The extra 8 found during the sweep:
+`parseBoardStop` entry (raw station code + CITY, ST ZIP), `resolvePATCity called (pre-parsed)`
+and `(board string)`, the four `prefix+subsequence` fallback logs — one of which emitted a
+**list of candidate city names** — and `submitOrder`, which logged the **entire PAT payload**
+including the resolved origin/destination city objects. All now emit lengths, booleans, and
+counts only.
+
+**`city source comparison` — diagnostic purpose preserved, not dropped.** Per its own comment
+the log exists to confirm which source supplied the city, because board stops can carry an
+unstripped state-code prefix that `parseBoardStop` mishandles. It now reports whether the two
+sources **agree** (does the board string contain the detail-parsed city, case-insensitively —
+a boolean), whether the detail source parsed at all, and both lengths. The agreement test is a
+pure inline helper that exists only to build this payload: it deliberately does **not** call
+`parseBoardStop`, which would add work and trigger that function's own log.
+
+**PART 2 — `EXT_NAME` is now `'Torren Relay'`** (`utils/constants.js`), was
+`'Amazon Relay Helper'`. **Sole reader across the entire codebase** is
+`content/sidebar.js:225` → `ext-sidebar-title`; verified by grep across `content/`, `utils/`,
+`popup/`, `background.js`, and the HTML/CSS. `manifest.json`'s description is deliberately
+untouched. `docs/UI_ELEMENTS.md`'s `ext-sidebar-title` row updated.
+
+**Verified** (no browser — see the report for the manual list): `parseDetailAddress` and
+`parseBoardStop` were **executed** against 7 real address strings each (street addresses,
+station-coded board stops, full-state-name and hyphenated-ZIP variants, garbage, empty) with
+the log payloads captured and asserted to contain no street number, city, state, or postcode,
+and never the raw input verbatim — while return values were checked unchanged against golden
+values for all 9 parse cases. The agreement helper was unit-tested including the exact
+state-prefix defect the log exists to catch. 59/59 total. `node --check` clean on all five
+touched files.
+
+**Still outstanding, reported not fixed:** two non-PII raw-value logs remain in `patApi.js` —
+`resolveLoadingType` (`"Drop"`/`"Live"`) and `parsePatStopTime` (`"07/10 10:42 EDT"`). Neither
+is an email, address, postcode, name, or token; the timestamp carries a timezone abbreviation
+only. Left in place deliberately.
+
+### 2026-07-30 — DEBUG_LEVEL now gates all four logger methods; PII removed from three log sites
+
+Two related audit findings, fixed together because level gating alone would still leak the
+dispatcher's email and street addresses whenever the level was raised.
+
+**FIX 1 — real level gating (`utils/logger.js`, `utils/constants.js`).** Only `logger.debug`
+consulted `DEBUG_LEVEL`. With 183 `logger.log` calls against 5 `logger.debug`, the knob
+silenced ~3% of output and the console stayed fully verbose at every setting. All four
+methods now gate on it:
+
+| level | emits |
+|---|---|
+| 0 | silent |
+| **1** | error only — **shipped default** |
+| 2 | error + warn |
+| 3 | error + warn + log |
+| 4 | everything, incl. debug |
+
+`DEBUG_LEVEL` stays in `utils/constants.js`, commented as the single line to raise while
+developing. No UI added. No call signature changed, no logger call removed, renamed, or
+re-tagged — the count is identical before and after (183 log / 55 warn / 60 error / 5 debug =
+303). A `typeof` guard makes the level read fall back to 1 if `constants.js` ever fails to
+load first: reading an undeclared `DEBUG_LEVEL` directly would throw a `ReferenceError` and
+turn every log call in the codebase into a crash, which the old `log`/`warn`/`error` could
+never do.
+
+**FIX 2 — PII removed from the three named sites.** Level gating is not sufficient; the value
+is gone entirely, so it cannot surface at level 4 either.
+- `content/content.js` — `'auth gate open', { email: gate.email }` → `{ hasEmail: !!gate.email }`.
+  Still shows whether the session carried a user record.
+- `popup/popup.js` — `'signInWithOtp', { email }` → `'signInWithOtp requested', { emailLength }`.
+  Still distinguishes a real submit from an empty one.
+- `content/patApi.js` — `parseDetailAddress` emitted the raw street address in **two** calls
+  (entry and the no-match warn). Both now emit `hasInput`/`inputLength`/`matched` only. The
+  task named the entry call; the warn was included because "log whether it succeeded" covers
+  the failure path and it leaked the identical value.
+
+**Verified** (no browser — see the report and TEST_CASES for the manual list): the real
+`logger.js` was loaded into a VM with a captured console and exercised at levels 0–4 —
+each level emits exactly the expected channels, level 1 emits errors only, and level 4 is
+byte-equivalent to the old behaviour (old `log`/`warn`/`error` unconditional + `debug` at
+`DEBUG_LEVEL>=2`). Missing-`DEBUG_LEVEL` fallback and data-less calls confirmed not to throw.
+`parseDetailAddress` was executed against five real address strings and the captured log
+payloads asserted to contain no street number, city, state, or postcode, and never the raw
+input verbatim — while still reporting that the step ran and whether it matched, with parsing
+output unchanged. Logger call counts identical before/after. `node --check` clean on all five
+touched files.
+
+**Not fixed, reported only** — the sweep for other PII/token logs found 5 further sites (see
+the task report): `authGate.js:76`, `popup.js:190`, `popup.js:278`, `popup.js:304` all emit an
+email; `patModal.js:468` emits full origin/destination addresses. `patApi.js` lines 200-320
+emit city/state only.
+
+### 2026-07-30 — waitForSheet() is now single-flight: rapid card switching can no longer render the wrong load
+
+**Fixes exactly one audit finding** (`inlinePanel.js:400-419`). Nothing else touched.
+
+**What was wrong:** `waitForSheet()` created a bare `setInterval` per call with no stored
+handle and no cancellation. Clicking card A then quickly card B left **both** pollers alive.
+A's poller was waiting for the sheet fingerprint to change away from A's — and B's sheet
+loading is exactly what changes it. So A's poller declared itself ready and called
+`showInlinePanel(cardA)`, which reads whatever sheet is currently in the DOM: **card B's**.
+The panel then showed card A's position with card B's stops, payout, and distance, and
+`showInlinePanel` merged that data into `loadStore` under A's `loadId`. A dispatcher could
+open the PAT modal from there and post a truck against the wrong load's data entirely.
+Confirmed by replaying the old function in a sandbox: two live timers, render order
+`["A","B"]`.
+
+**Implementation** (`content/inlinePanel.js` only):
+- Three module-level fields replace the anonymous interval: `_sheetPollInterval` (so a run
+  can be cancelled), `_sheetPollToken` (monotonic run id), `_sheetPollCard` (the card the run
+  belongs to).
+- New `cancelSheetPoll()` — clears the interval **and bumps the token**. The token bump is
+  the part that matters: `clearInterval()` alone does not stop a tick already queued on the
+  event loop, and that queued tick was one of the ways the wrong panel got rendered.
+- `waitForSheet()` calls `cancelSheetPoll()` before starting, so at most one run exists.
+  Three guards stop a superseded run from reaching its callback: a token check at tick entry,
+  a second token check immediately before firing, and a card check (`_sheetPollCard === card`
+  **and** `document.contains(card)`). Discards are silent — a superseded click is not an error.
+- The `document.contains(card)` half is safe by construction: `showInlinePanel()` renders via
+  `cardElement.parentNode.insertBefore(...)`, which already throws on a detached node today,
+  so this only converts a caught exception into a deliberate discard — it cannot suppress a
+  render that previously worked.
+- `removeInlinePanel()` now calls `cancelSheetPoll()`. That single site covers logout and
+  every bail-out checkpoint, because `content.js`'s `clearPipelineDom()` calls
+  `removeInlinePanel()`, and `clearPipelineDom()` is called both by `deactivateExtensionUI()`
+  and by all seven `shouldContinue()`-failing checkpoints in `runDetectionPipeline`. It also
+  covers the toggle-off path.
+- Timeout guard: the interval is cleared on **both** resolve and the existing 1500ms timeout,
+  and the handle nulled, so no orphan can survive either way. Firing the callback on timeout
+  is pre-existing behaviour and was deliberately preserved — but it is now subject to the same
+  staleness guards, so a superseded run stays silent even at its own timeout.
+
+**Scope note:** the `card` parameter is optional; a `waitForSheet(cb, fp)` call with no card
+still behaves as before (token guards only). The one production call site now passes it.
+
+**Verified:** 31/31 in a Node sandbox driving the *real* extracted `waitForSheet()` /
+`cancelSheetPoll()` against a controllable clock and fake sheet — the exact A-then-B
+interleaving (start A, start B, resolve after B: **A never renders**, exactly one timer, one
+render); the queued-stale-tick race; card-detachment and identity discards; teardown
+cancellation and idempotency; timeout cleanup including a superseded run's timeout; and the
+no-card backward-compatible path. **The same TC-1 scenario was replayed against the pre-fix
+function and does reproduce the bug** (`["A","B"]`, two live timers) — the regression test
+demonstrably detects it rather than passing vacuously. `node --check` clean.
+
+### 2026-07-30 — PAT modal: unreadable distance / stop count no longer post fabricated values
+
+**Fixes exactly one audit finding** (the top-ranked one, `patModal.js:493-499`). Nothing else
+in the audit was touched.
+
+**What was wrong:** `distMiles = parseNumStr(loadUnit.distance)` used a failure sentinel of
+`0` (`parseFloat(...) || 0`), indistinguishable from a genuine zero. An unreadable distance
+therefore produced `minMiles = max(0, 0-25) = 0` and `maxMiles = 0+25 = 25`, and
+`stopCount = parseInt(...) || 0` produced `0` stops. Those fabricated numbers were posted to
+the **live marketplace** with no warning and no gating: `updateConfirmEnabled()` gated payout
+and times only, and the submit-time check validated the *derived* min/max (which pass
+happily) rather than their origin. This is the same class of bug already fixed for Payout
+(2026-07-20) and for load times — the no-silent-fallback rule simply hadn't been applied here.
+
+**Implementation** (`content/patModal.js` only):
+- New local `parsePatMilesOrNull()` — same normalization as `parseNumStr` ("1,233.2 mi" →
+  1233.2) but returning **`null`** on unparseable input, so "unreadable" and "zero" are
+  distinguishable. A genuine `"0 mi"` still returns `0`.
+- Unreadable distance → Min/Max Miles render **empty** (not 0/25), a visible
+  `ext-pat-distance-warning` appears ("Load distance could not be read — enter it manually"),
+  and Confirm is disabled until both fields hold a coherent pair.
+- Unreadable stop count → the Stops slot renders a **number input** instead of the static
+  "0 Stops" div (same `data-testid="ext-pat-stops"`; only the element type varies), with a
+  visible `ext-pat-stops-warning` and Confirm disabled until a value ≥ 1 is entered. A parsed
+  count still renders exactly the read-only display it did before.
+- `updateConfirmEnabled()` now also gates on `stopsOk` / `milesOk`. Min/Max Miles previously
+  had **no input listeners at all**, so nothing re-evaluated Confirm when they were edited —
+  added.
+- Submit path: new `currentStopCount()` resolves the parsed *or* manually-typed count and
+  returns `null` (never `0`) when unknown; `formState.stopCount` now takes that value, and a
+  last-line-of-defence check blocks submission if it is null.
+- Warnings only appear for the genuinely-unreadable case — clearing a *prefilled* field
+  disables Confirm but shows no "could not be read" message, which would be untrue.
+
+**Interpretation flagged:** the brief asked for a `blockingErrors` entry, but `blockingErrors`
+is permanent for the modal instance (`confirmBtn.disabled = blockingErrors.length > 0 || …`),
+which would contradict the brief's own requirement that the dispatcher be able to type valid
+values and proceed. Implemented instead with the live-recoverable gate that Payout and times
+already use — whose own comment explains exactly this reasoning — so Confirm stays disabled
+until corrected, then re-enables. Same visible outcome, minus the permanent lockout.
+
+**Sentinel inventory** (for the future unification task — the other three were deliberately
+NOT changed here): `patApi.js parseNumStr` → **`0`**; `priceSurge.js parsePayoutNumber` →
+**`NaN`**; `loadStore.js _parsePayoutNum` → **`null`**; `content.js` inline sort parser →
+`NaN` coerced to **`-Infinity`**. This fix adds a fourth call site using **`null`**
+(`parsePatMilesOrNull`, PAT-modal-local), matching `loadStore`'s convention — the one to
+standardise on, since it is the only sentinel that cannot be confused with a real value.
+
+**Verified:** 66/66 in a Node sandbox running the *real* extracted `parsePatMilesOrNull()`
+and asserting the gate/submit logic: sentinel behaviour incl. genuine-zero vs unparseable,
+empty Min/Max on failure, stop-count NaN/<1 → null, Confirm disabled for each failure mode
+and re-enabled after valid manual entry (individually and combined), payload carrying the
+typed value, existing payout/times/blockingErrors gates unregressed, and that all three other
+parsers are byte-unchanged. `node --check` clean.
+
+### 2026-07-30 — Full-codebase audit: Part B auto-fixes only
+
+Full read-only audit of `content/`, `utils/`, `popup/`, `background.js`, `manifest.json`,
+and `docs/`. **Findings were reported separately and deliberately NOT fixed** — only the
+narrow auto-fix class the audit brief authorised was changed. Everything below is one of:
+dead CSS matching no element, an unused declaration, a string literal that should use an
+existing constant, or a duplicated identical CSS declaration. No refactors, no behaviour
+changes, and nothing touching Fast Book or `FORBIDDEN_SELECTORS` (explicitly out of scope).
+
+**1. `content/inlinePanel.js` — removed 2 dead CSS rules.**
+`.ext-inline-panel__header` and `.ext-inline-panel__header .ext-payout`. Neither class is
+assigned to any element anywhere in the codebase (`buildPanelElement()` never creates a load
+header), so both rules matched nothing. They were added speculatively earlier on 2026-07-30
+and were already flagged as dead in their own comment.
+
+**2. `content/nightMode.js` — removed 2 duplicated identical CSS declarations.**
+`html.ext-night #ext-sidebar [data-testid="ext-playpause"]` and
+`html.ext-night #ext-sidebar .ext-scanline__seg` were byte-identical in value to rules
+`content/sidebar.js` already injects for the same selectors. `sidebar.js` is the correct
+owner — both selectors only match inside `#ext-sidebar`, which only exists once
+`buildSidebar()` has injected that stylesheet. **Side effect worth noting:** the removed
+scanline copy carried `!important`, which was overriding `sidebar.js`'s
+`@media (prefers-reduced-motion: reduce)` rule (that one is not `!important`). Reduced-motion
+users in night mode were still getting the animated gradient; removing the duplicate restores
+the intended static fallback.
+
+**3. `popup/popup.js` — 14 string literals replaced with the existing `STORAGE_KEYS`
+constants.** `KEY_NIGHT_MODE`…`KEY_SHARED_LIMIT` were hardcoded copies of the storage-key
+strings, each carrying a comment naming the constant it duplicated — two places to keep in
+sync, and a silent-desync risk if a key were ever renamed in `utils/storage.js` (the popup
+would keep reading the old key while every content script moved to the new one). Now derived
+from `STORAGE_KEYS` directly. `utils/storage.js` loads before `popup.js` (see `popup.html`),
+so the constants are defined at that point. The local aliases are kept so the ~60 usages
+below stay untouched.
+
+**Unused variables/constants: none removed.** The one candidate class in the brief turned up
+no zero-reference declarations — every constant checked (`PAT_EQUIPMENT_TYPES_*`,
+`REFRESH_PATH_D`, `ABBREV_EXPAND`, `TZ_OFFSET_HOURS`, `DK_FAINT`, `DK_CHIP_BG`, `EXT_NAME`,
+`EXT_VERSION`, `refreshDryRun`, `resetKnownLoads`, `getAllLoadUnits`, `sortByPayoutDesc`,
+`ALLOWED_CLICK_INTENTS`, `AUTH_PENDING_KEY`) has at least one live reference.
+
+**Verified:** `node --check` clean on all three edited files. The 14 popup keys were
+re-evaluated in a VM sandbox and confirmed to resolve to byte-identical strings. Both edited
+stylesheets were regenerated by running the real `buildNightCss()` / `injectPanelStyle()` and
+asserted on: removed rules absent, retained rules present, brace balance intact.
+**Not verified:** any of this in a browser — no rendering check was possible in this
+environment.
+
 ### 2026-07-30 — Accordion leg cards: full-width action bar, light leg-header colour, fixed-column route alignment
 
 **Ask (CSS-only — no HTML/JS changes):** (1) the bottom action bar had a 10px horizontal

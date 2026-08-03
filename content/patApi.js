@@ -75,7 +75,14 @@ var ABBREV_EXPAND = [
 // no state-code prefix — and is the authoritative source for PAT city resolution.
 // Returns { city: '', state: '' } when no "CITY, 2-letter-state" pattern is found.
 function parseDetailAddress(address) {
-  logger.log('patApi', 'parseDetailAddress called', { address: address });
+  // PII (2026-07-30): both log calls in this function used to emit the raw `address`, i.e.
+  // a full street address. Never log the value — not the string, not a fragment, not the
+  // parsed city or postcode — at any DEBUG_LEVEL. What is kept is enough to debug a parse
+  // failure: that the step ran, whether there was any input, its length, and (below)
+  // whether a pattern matched.
+  logger.log('patApi', 'parseDetailAddress called', {
+    hasInput: !!address, inputLength: address ? String(address).length : 0
+  });
   if (!address) return { city: '', state: '' };
   var m;
   // "..., CITY, ST [ZIP]" — when a street address precedes the city (joined by ", ")
@@ -84,7 +91,12 @@ function parseDetailAddress(address) {
   // "CITY, ST [ZIP]" — city is the first (or only) component
   m = address.match(/^([A-Za-z][A-Za-z\s.'-]*),\s*([A-Za-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/);
   if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
-  logger.warn('patApi', 'parseDetailAddress: no match', { address: address });
+  // PII: was `{ address: address }`. Same rule as the entry log above — the failure is
+  // reported, the value is not. inputLength is the one thing that actually helps here
+  // (an empty-ish string vs a long one that simply lacks a "CITY, ST" pattern).
+  logger.warn('patApi', 'parseDetailAddress: no match — address not in "CITY, ST [ZIP]" form', {
+    matched: false, inputLength: String(address).length
+  });
   return { city: '', state: '' };
 }
 
@@ -102,7 +114,9 @@ function normalizeState(s) {
 //   "XRD4 GREENSBORO, North Carolina 27409"  → { city:"GREENSBORO",       state:"NC" }
 //   "LIT2 NORTH LITTLE ROCK, AR 72117-5026" → { city:"NORTH LITTLE ROCK", state:"AR" }
 function parseBoardStop(str) {
-  logger.log('patApi', 'parseBoardStop called', { str: str });
+  // PII (2026-07-30): was `{ str: str }` — the raw board stop (station code + CITY, ST ZIP).
+  // Not in the task list but the identical leak class, so removed here too.
+  logger.log('patApi', 'parseBoardStop called', { hasInput: !!str, inputLength: str ? String(str).length : 0 });
   if (!str) return { city: '', state: '' };
   // Drop leading station code ("DNA4 ", "XRD4 ", "LIT2 " — 3-5 alphanum + space)
   var afterCode = str.replace(/^\S+\s+/, '');
@@ -176,16 +190,26 @@ async function resolvePATCity(input) {
   var parsed;
   if (input && typeof input === 'object' && input.city !== undefined) {
     parsed = { city: String(input.city || ''), state: String(input.state || '') };
-    logger.log('patApi', 'resolvePATCity called (pre-parsed)', parsed);
+    // PII (2026-07-30): was the whole `parsed` object ({ city, state }).
+    logger.log('patApi', 'resolvePATCity called (pre-parsed)', {
+      cityLength: parsed.city.length, hasState: !!parsed.state
+    });
   } else {
-    logger.log('patApi', 'resolvePATCity called (board string)', { input: input });
+    // PII (2026-07-30): was `{ input: input }` — the raw board stop string.
+    logger.log('patApi', 'resolvePATCity called (board string)', {
+      inputLength: String(input || '').length
+    });
     parsed = parseBoardStop(String(input || ''));
   }
   var city   = parsed.city;
   var state  = parsed.state;
   try {
     if (!city) {
-      logger.error('patApi', 'resolvePATCity: empty city from parseBoardStop', { input: input });
+      // PII (2026-07-30): was `{ input: input }`.
+      logger.error('patApi', 'resolvePATCity: empty city from parseBoardStop', {
+        inputType: (input && typeof input === 'object') ? 'object' : typeof input,
+        inputLength: (typeof input === 'string') ? input.length : null
+      });
       return null;
     }
     var csrf = getCsrfToken();
@@ -194,12 +218,14 @@ async function resolvePATCity(input) {
       headers: { 'Accept': 'application/json', 'x-owp-csrf-token': csrf },
     });
     if (!resp.ok) {
-      logger.warn('patApi', 'resolvePATCity: non-OK', { status: resp.status, city: city });
+      // PII (2026-07-30): city removed — status is the real diagnostic here.
+      logger.warn('patApi', 'resolvePATCity: non-OK', { status: resp.status, cityLength: city.length });
       return null;
     }
     var results = await resp.json();
     if (!Array.isArray(results)) {
-      logger.warn('patApi', 'resolvePATCity: non-array response', { city: city });
+      // PII (2026-07-30): city removed.
+      logger.warn('patApi', 'resolvePATCity: non-array response', { cityLength: city.length });
       return null;
     }
     var lc    = city.toLowerCase();
@@ -223,7 +249,11 @@ async function resolvePATCity(input) {
         expandedCity = expandedCity.replace(ABBREV_EXPAND[ai][0], ABBREV_EXPAND[ai][1]);
       }
       if (expandedCity !== city) {
-        logger.log('patApi', 'resolvePATCity: retrying with expanded abbrev', { from: city, to: expandedCity });
+        // PII (2026-07-30): city names removed. The lengths still show that expansion changed
+        // something (e.g. "MT." -> "MOUNT" lengthens), which is what this log is for.
+        logger.log('patApi', 'resolvePATCity: retrying with expanded abbrev', {
+          fromLength: city.length, toLength: expandedCity.length
+        });
         var resp2 = await fetch(CITY_SEARCH_BASE + encodeURIComponent(expandedCity), {
           method: 'GET', credentials: 'include',
           headers: { 'Accept': 'application/json', 'x-owp-csrf-token': csrf },
@@ -253,8 +283,9 @@ async function resolvePATCity(input) {
         var abbrevLetters = city.replace(/[^A-Za-z]/g, '').toUpperCase();
         var prefix = city.slice(0, 4);
         if (abbrevLetters.length >= 4 && prefix.trim().length >= 3) {
+          // PII (2026-07-30): city/prefix/state removed (prefix is a literal city fragment).
           logger.log('patApi', 'resolvePATCity: trying prefix+subsequence fallback', {
-            city: city, prefix: prefix, state: state,
+            cityLength: city.length, prefixLength: prefix.trim().length, hasState: !!state,
           });
           var resp3 = await fetch(CITY_SEARCH_BASE + encodeURIComponent(prefix), {
             method: 'GET', credentials: 'include',
@@ -271,21 +302,24 @@ async function resolvePATCity(input) {
               }
               if (candidates.length === 1) {
                 match = candidates[0];
+                // PII (2026-07-30): city and the matched city NAME removed.
                 logger.log('patApi', 'resolvePATCity: prefix+subsequence matched', {
-                  city: city, matched: match.name, state: state,
+                  cityLength: city.length, matchedLength: match.name.length, hasState: !!state,
                 });
               } else if (candidates.length > 1) {
+                // PII (2026-07-30): this emitted a LIST of candidate city names — the widest
+                // location leak in this file. The count is what the message is actually about.
                 logger.warn('patApi', 'resolvePATCity: ambiguous prefix+subsequence — not guessing', {
-                  city: city, count: candidates.length,
-                  names: candidates.map(function (c) { return c.name; }),
+                  cityLength: city.length, count: candidates.length,
                 });
               }
             }
           }
         }
         if (!match) {
+          // PII (2026-07-30): city/state removed; n (result count) is the diagnostic.
           logger.warn('patApi', 'resolvePATCity: no match on any path', {
-            city: city, state: state, n: results.length,
+            cityLength: city.length, hasState: !!state, n: results.length,
           });
           return null;
         }
@@ -305,7 +339,8 @@ async function resolvePATCity(input) {
       isAnywhere:          false,
     };
   } catch (e) {
-    logger.error('patApi', 'resolvePATCity failed', { error: e, city: city, state: state });
+    // PII (2026-07-30): city/state removed; the error object is the diagnostic.
+    logger.error('patApi', 'resolvePATCity failed', { error: e, cityLength: city ? city.length : 0, hasState: !!state });
     return null;
   }
 }
@@ -407,7 +442,14 @@ function buildPatPayload(formState) {
 
 // POST the PAT payload. Returns { ok, status[, body] }.
 async function submitOrder(payload) {
-  logger.log('patApi', 'submitOrder called', { payload: payload });
+  // PII (2026-07-30): was the ENTIRE payload, which embeds the resolved origin/destination
+  // city objects (names included). Logged as a shape summary instead — enough to see the post
+  // was assembled correctly, with no location values.
+  logger.log('patApi', 'submitOrder called', {
+    keys: Object.keys(payload || {}).length,
+    hasOriginCity: !!(payload && payload.originCity),
+    hasDestCity: !!(payload && payload.destCity),
+  });
   try {
     var csrf = getCsrfToken();
     if (!csrf) {

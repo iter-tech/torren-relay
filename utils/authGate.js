@@ -73,7 +73,10 @@ function _handleGateResult(gate) {
   var wasActive = _lastGateActive;
   _lastGateActive = gate.active;
   if (wasActive !== null && wasActive !== gate.active) {
-    logger.log('authGate', 'gate transition', { from: wasActive, to: gate.active, email: gate.email });
+    // PII (2026-07-30): was `email: gate.email`. This fires on every login/logout in EVERY
+    // open tab, so it was the widest email leak in the codebase. hasEmail keeps the one
+    // diagnostic that mattered — did the transition carry a user record — without the value.
+    logger.log('authGate', 'gate transition', { from: wasActive, to: gate.active, hasEmail: !!gate.email });
     _authGateListeners.forEach(function (cb) {
       try { cb(gate); } catch (e) { logger.error('authGate', 'onAuthGateChange listener threw', { error: e }); }
     });

@@ -2,6 +2,25 @@
 
 Last updated: 2026-07-30
 
+**Full-codebase audit: 2026-07-30.** Scope: `content/`, `utils/`, `popup/`, `background.js`,
+`manifest.json`, `docs/`. Read-only except for a narrow authorised auto-fix class (dead CSS,
+unused declarations, literals→constants, duplicate CSS) — see CHANGELOG.md 2026-07-30 "Part B
+auto-fixes only" for exactly what changed. **The audit's substantive findings were reported,
+not fixed, and remain open.** Highest-ranked open items, by likelihood a real dispatcher hits
+them: PAT modal posts `distMiles`/`stopCount` as `0` on parse failure with no warning and no
+Confirm gating (posts a wrong load to a live marketplace); `waitForSheet()` has no cancel, so
+clicking a second card quickly renders one card's panel from another card's sheet;
+~~`_extActivated` is set before the awaits in `activateExtensionUI()`, so a failed activation
+permanently blocks retry~~ **(B1 — FIXED 2026-07-30, see below)**; manually-typed payout/per-mile are submitted unrounded; "Reset to
+Defaults" does not resync the live refresh interval in open tabs. Pre-launch blockers:
+`DEBUG_LEVEL = 2` and — more importantly — `logger.log/warn/error` ignore `DEBUG_LEVEL`
+entirely (only `logger.debug` respects it), so 178 `logger.log` sites stay live at any level;
+console logs include the dispatcher's email and full street addresses; `EXT_NAME` is still
+`'Amazon Relay Helper'` while the manifest ships as `Torren Relay`. Night Mode parity gap:
+the PAT modal and sidebar each carry their own graphite dark palette that never migrated to
+the navy-slate `DK_*` ramp. Doc drift: `GLOBAL_MIN_PERMIT_INTERVAL_MS` no longer exists but
+is still stated as current fact in STATE.md, UI_ELEMENTS.md, and TEST_CASES.md.
+
 **Note on this rewrite:** this file was previously maintained in Ukrainian, last content-updated
 2026-07-07 (Stage 14 PAT rework), and had fallen well behind actual repo state — commits
 `cb9dbf7`, `512381d`, `a5d1b21`, `23d9706`, plus this whole session's work, were never
@@ -197,11 +216,151 @@ backoff still pausing/showing the banner, Reset default, persistence across rest
 
 ## Що в роботі / In progress
 
-Nothing actively in-flight. All work above is implemented and syntax-checked but **not yet
+**FIXED 2026-07-31 — payout parsed as null for the entire "Similar matches" section**
+(`content/loadParser.js`, one selector). Cause: `.wo-total_payout` matches whole class tokens, and
+that section wraps the payout in `wo-total_payout__match-deviation-attr` — one indivisible token,
+not a suffixed variant. Selector now matches both. `|| null` guard untouched, `patModal.js` not
+modified. 25 automated checks against both real markup shapes; browser half is TC-PARSE-2.
+
+**🔶 Open, needs one capture:** `.wo-total_payout__modified-load-increase-attr` (price-increase
+highlight) is a documented third member of the same family and is **still unmatched** — those
+loads likely have the same silent null payout. Deliberately not added without proof it is the
+payout element and not a preceding badge, since `querySelector` takes document order and a badge
+would yield the wrong number. Capture a price-increased card's inner HTML → one-token fix. Also
+unverified in that section: the parser's non-`wo-*` selectors (`.equipment-type-text`,
+`.trailer-type-circle`, `.loading-type`, `span[title="Deadhead"]`, `#STARTING_SOON`, `div[id]`).
+See AMAZON_SELECTORS.md "Payout inner-class family".
+
+**Load row background → #F5F5F5, done 2026-07-31** (`content/inlinePanel.js`, `.ext-seg-body`,
+one hex). Light mode only by construction — `nightMode.js` overrides that exact selector with
+`DK_HIGH !important`. 12 automated checks; visual half is TC-PANEL-COLOUR-2, not run. **Flagged:**
+the zebra striping (`var(--ext-n100)` = #f5f7fa) is now nearly invisible against #F5F5F5. Also
+flagged: "load rows" was read as the per-leg body, not the table cells — one-line change if the
+other reading was meant.
+
+**⛔ STILL BLOCKED (2nd request) — collapse Amazon's left filters panel on START.** The new
+capture (`aria-label="Filter  "`, trailing spaces) **invalidated the selector this repo previously
+recommended** — exact-match `[aria-label="Filter"]` matches nothing; BACKLOG.md now has a
+trim-based lookup. Finding the button is solved. Reading whether the panel is open is not, and
+that is the blocker: the control is a toggle, so acting blind would open it when already
+collapsed. DevTools capture snippet unchanged, in BACKLOG.md.
+
+**FIXED 2026-07-31 — card click stopped stopping the refresh loop** (`content/inlinePanel.js`).
+Cause: `tabState.set('running', false)` sat inside `waitForSheet`'s callback, which is gated by
+guard 3 (`!document.contains(card)`) from the uncommitted 2026-07-30 single-flight fix. While the
+loop runs, `refreshNow()` makes Amazon re-render the list and detach the clicked card inside the
+poll window, so the run was discarded and the stop never executed. The stop now runs
+synchronously at the click, before `waitForSheet`; guard 3 still governs the render, which is all
+it was meant to protect. Still exactly one stop call in the file — nothing was added at another
+layer. 24 automated checks incl. a detached-card mechanism proof; browser half is TC-PANEL-2B,
+not run. **Note:** the log line quoted in the bug report is a `logger.log` requiring
+`DEBUG_LEVEL >= 3`, but the repo ships `DEBUG_LEVEL = 1` — it cannot appear in a stock build, so
+that build had the level raised.
+
+**Accordion leg-header colour → #CFDBFB, done 2026-07-31** (`utils/designTokens.js`, one token
+value). Light mode only by construction — `nightMode.js` overrides `.ext-seg-header`'s background
+with `!important`, so the token's value is never exercised in dark mode. 21 automated checks;
+visual half is TC-PANEL-COLOUR-1, not run. **Known contrast regression, reported not fixed:** the
+secondary text `#4A6570` (distance/duration, route arrow, chevron) drops 4.88:1 → **4.48:1**,
+just under WCAG AA 4.5:1 for 11–12px text. One-line fix available (`#49646F`, 4.55:1) at
+`inlinePanel.js:173/178/200` — awaiting a decision.
+
+**⛔ BLOCKED 2026-07-31 — collapse Amazon's left filters panel on auto-refresh START.** Nothing
+implemented; stopped deliberately rather than guess. This feature was built and removed once
+before (CHANGELOG 2026-06-18 — three strategies, none reliable), which also removed
+`CLOSE_FILTER_PANEL` from `ALLOWED_CLICK_INTENTS` and its SAFETY.md click-site section, so
+re-adding it needs click-site re-authorisation. **Solved this round:** all three prior attempts
+used `button[aria-label="Filter"]`, but the new capture shows the label is on an inner
+`<span role="img">` — so those selectors matched nothing, which explains the failures.
+**Still blocked:** no reliable way to read whether the panel is currently open. The control is a
+toggle, so acting without that read would OPEN it when already collapsed. The exact DevTools
+capture needed to unblock (a paste-in snippet, run once with the panel open and once collapsed)
+is in BACKLOG.md.
+
+**Sidebar paused/rate-limit message REMOVED 2026-07-31** (PM decision, `content/sidebar.js`
+only). The amber "Paused — Amazon has temporarily limited your IP…" line, its "i" icon, and that
+icon's tooltip are gone; nothing about the paused state renders any more. **The backoff/pause
+behaviour is untouched** — `background.js` and `content/networkObserver.js` were not edited at
+all, and the extension still stops polling on 429/503 and still auto-resumes. Verified with a
+Node `vm` harness driving the real `background.js` and the real `buildSidebar()` (79 checks);
+browser half is TC-RATELIMIT-6, not run. Two judgment calls flagged in CHANGELOG.md: the slider
+no longer hides during a pause (that hiding existed only to make room for the banner), and
+`renderSharedRateStatus()` was left as-is so row 2 still hides while paused. **Reinstatement
+record — verbatim original code — is in BACKLOG.md**, not commented out in the source.
+
+**✅ Spurious-pause bug FIXED 2026-07-31** (`content/networkObserver.js` + `background.js`). Was:
+the paused state was entered by **any** failed or aborted `/api/loadboard/search` request, so an
+ordinary saved-search switch (which aborts the in-flight request) silently stopped monitoring and
+escalated through 5/10/20/40/80s while the dispatcher's board carried on looking fine. Now:
+aborts are never reported (fetch checks `signal.aborted` + `err.name === 'AbortError'`; XHR
+subscribes to `load`/`error`/`timeout` instead of `loadend`), and only `RATE_LIMIT_STATUSES =
+[429, 502, 503, 504]` enter backoff — everything else returns without writing state, so an
+in-flight backoff is neither extended nor cleared. **The backoff machinery itself is unchanged**,
+proved by A/B against the committed `background.js` (identical step sequences and reset behaviour
+for all four statuses). 104 automated checks pass; browser half is TC-RATELIMIT-7, not run. The
+false comment at `background.js:208-212` was corrected as part of the same change.
+
+**502/504 are a deliberate safety-side default made WITHOUT captured evidence** (PM decision,
+same day). We have never observed Amazon throttling via a gateway status; they are included
+because the cost is asymmetric — an un-backed-off throttle risks a real IP block on the
+dispatcher's account, an ordinary gateway error costs a few seconds. Recorded at the constant in
+`background.js` so it can be revisited if evidence appears. **500 stays out.**
+
+**Open decisions still handed back (report only, CHANGELOG.md 2026-07-31):** what 500, 401/403
+(recommend a gate re-check, not backoff), 404 (recommend a loud log — sustained 404s mean
+`WATCH_PATH` went stale and we are blind), and status 0 (recommend leaving as-is) should each do.
+
+**Audit finding B1 (High) — activation lockout — FIXED 2026-07-30, `content/content.js` only.**
+The first of the audit's substantive findings to be fixed rather than just reported.
+`_extActivated` is now set only after `tabState.init()` + `buildSidebar()` + `initManualToggle()`
+have all succeeded; a throw logs `logger.error` with the failing step, rolls back through the
+existing `deactivateExtensionUI()` teardown, and leaves the flag false so the next activation
+retries. A separate `_extActivating` in-flight guard, cleared in a `finally`, keeps two
+concurrent calls from initialising twice. Proved at the control-flow level with a Node harness
+over the real source text (44 checks, all pass); **still unverified in a browser** — see
+TC-AUTH-8. Two adjacent issues were found and deliberately left unfixed (logout arriving
+mid-activation; the `ext-sidebar-styles` `<style>` tag never removed on teardown) — both written
+up in CHANGELOG.md 2026-07-30.
+
+**Popup opens straight into the panel, and a lost connection no longer signs anyone out —
+FIXED 2026-07-30** (`popup.html` / `popup.css` / `popup.js`). Both symptoms had one cause: the
+popup awaited a network round trip before deciding what to render. It now decides from the
+locally stored session (same 30s expiry margin, same comparison) and renders immediately, then
+validates in the background. When validation fails it distinguishes a server verdict from an
+unreachable server using the Supabase bundle's own `isAuthRetryableFetchError` — unreachable
+means the dispatcher stays signed in, the session is not cleared, and an inline "No connection"
+note appears in the existing status line. No Supabase call, storage key, or branch condition
+changed; only when results are applied. The interim "Checking your session…" state and its
+3000ms timer, added earlier the same day, are removed. Proved with a Node `vm` harness running
+the **real** Supabase bundle with only `fetch` swapped (51 checks); **visual/timing claims are
+unverified** — see TC-AUTH-9 steps 1, 2, 6.
+
+**Known slow path (library behaviour, unchanged):** on *expired session + offline*, gotrue's
+`_refreshAccessToken` retries internally for up to `N = 30*1e3` (measured ~25.6s) before the
+failure surfaces, so the "No connection" note on that one path is late. The login form still
+appears instantly and the session is still not cleared. Valid-session + offline is prompt —
+`setSession`/`_getUser` has no retry wrapper.
+
+**PART B analysis (report only, nothing optimised), CHANGELOG.md 2026-07-30:** established that
+`setSession()` is a real network `GET /auth/v1/user` (read out of the shipped bundle), measured
+171–499ms cold; that the signed-in answer including the email is already in
+`chrome.storage.local` before it runs; and that nothing is cached between popup opens. That
+report is what the fix above is built on. `utils/authGate.js:37` still does the same network
+validation in every content script on every page load — untouched, same opportunity.
+
+**Follow-up report (also 2026-07-30, nothing implemented):** whether `supabase.min.js` can be
+loaded after first paint. Yes in principle — first paint no longer needs it — but **not** by
+moving or deferring the `<script>` tag, which would leave `supabaseClient` null and route every
+dispatcher to the login form. It needs lazy client creation plus fixing five `if
+(!supabaseClient)` guards that currently say "Login not configured.". And the payoff is
+**inferred, not measured** — measure "Evaluate Script" for the bundle in the devtools
+Performance panel before deciding it is worth the failure modes.
+
+Otherwise nothing actively in-flight. All work above is implemented and syntax-checked but **not yet
 committed to git** (see `git status`) and **not yet manually driven through a loaded-unpacked
 Chrome session** — no browser available in these sessions. Everything from "Supabase login"
 onward needs a real browser pass before being considered verified. See `docs/TEST_CASES.md`
-TC-AUTH-1 through TC-AUTH-7, TC-PAT-CITY-1, TC-PAT-TIME-1, TC-PANEL-WIDTH-1/2,
+TC-AUTH-1 through TC-AUTH-8, TC-PAT-CITY-1, TC-PAT-TIME-1, TC-PANEL-WIDTH-1/2,
 TC-PANEL-POLISH-1, and TC-RATELIMIT-1 for exact steps.
 
 Also this session: `docs/CLAUDE.md` gained a new "Verification rules" section (PROOF BEFORE
@@ -233,6 +392,27 @@ intent was broader.
   (TC-RATELIMIT-2) — none of the CSS/UI work has been visually confirmed at all yet. Run
   the six-item SMOKE CHECKLIST from docs/CLAUDE.md's Verification rules section and report
   pass/fail per item.
+- **TC-AUTH-8 (activation lockout, B1)** — needs a browser pass with an induced
+  `buildSidebar()` throw; the recovery step (failed activation → next attempt builds a working
+  sidebar) is the one that actually proves the fix.
+- **TC-AUTH-9 (local-first popup render + offline handling)** — steps 1, 2 and 6 are
+  browser-only. Step 3 (offline while signed in) is the one that proves nobody gets signed out
+  by a dropped connection; step 6 documents the ~25–30s late message on the expired+offline
+  path so it is not mistaken for a hang.
+- **Decide on deferring `supabase.min.js`** — reported, not implemented (CHANGELOG.md
+  2026-07-30). Measure the bundle's evaluate-script cost first; the payoff is inferred.
+- **Consider the same local-first treatment for `utils/authGate.js`** — it still does a network
+  `setSession()` on every page load in every content script before features can activate. Not
+  analysed in depth; flagged by the popup work.
+- **Decide on the two adjacent issues left unfixed by the B1 fix:** (1) logout arriving while
+  activation is in flight still builds a sidebar for a logged-out session — likely wants an
+  `isAuthGateActiveSync()` recheck after the await; (2) `buildSidebar()`'s injected
+  `<style data-testid="ext-sidebar-styles">` is never removed by `deactivateExtensionUI()`, so
+  copies accumulate across deactivate→activate cycles. Both are cheap; both were out of the
+  one-fix scope.
+- **A user-visible failure signal for a failed activation** — the B1 fix logs to the console
+  only, by explicit instruction. A dispatcher who hits it still sees nothing on screen; they
+  just get a working retry path instead of a permanent lockout. Not yet approved as a task.
 - Extend the "Torren Relay" rebrand to `utils/constants.js`'s `EXT_NAME` (on-page sidebar
   title) and the manifest `description` — tracked in BACKLOG.md.
 - `docs/SAFETY.md` pass for the two new surfaces introduced by rate limiting — a background

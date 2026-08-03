@@ -1,4 +1,6 @@
 function buildSidebar() {
+
+
   logger.log('sidebar', 'buildSidebar called');
 
   if (document.querySelector('[data-testid="ext-sidebar"]')) {
@@ -25,18 +27,22 @@ function buildSidebar() {
       'border-bottom:1px solid var(--ext-n200);' +
       'font-family:Arial,sans-serif;font-size:13px;font-weight:600;' +
       'letter-spacing:.3px;white-space:nowrap;user-select:none;' +
-      // 2026-07-30: was overflow:hidden. Changed to visible because the info tooltips
-      // (ext-memory-tooltip, ext-rate-limit-tooltip) are absolutely positioned BELOW the
-      // bar and were being clipped away entirely by it. Nothing depended on the clip: the
+      // 2026-07-30: was overflow:hidden. Changed to visible because the info tooltip
+      // (ext-memory-tooltip; ext-rate-limit-tooltip also existed then) is absolutely
+      // positioned BELOW the bar and was being clipped away entirely by it. Nothing
+      // depended on the clip: the
       // scanline has its own overflow:hidden (.ext-scanline), and the border-radius still
       // rounds the bar's own background regardless. position:fixed would not have escaped
       // it either — this element's transform makes it the containing block for fixed
       // descendants, so they are clipped by its overflow too.
       'overflow:visible;' +
-      // The paused banner's text is far longer than any other row-1 content; without a cap
-      // the auto-width bar would grow past the viewport on narrow screens (it is centred,
-      // so it would run off BOTH edges). The banner's own flex:1/min-width:0/ellipsis then
-      // does the truncating instead.
+      // Added for the paused banner, whose sentence was far longer than any other row-1
+      // content: without a cap the auto-width bar would grow past the viewport on narrow
+      // screens (it is centred, so it would run off BOTH edges). 2026-07-31: the banner is
+      // gone, but this cap is KEPT deliberately — it is what bounds row 2's width so its
+      // own overflow:hidden/text-overflow:ellipsis can actually trigger (that line grows
+      // with the active-tab count), and removing a purely defensive cap is a layout change
+      // that could not be tested here. Harmless when nothing is wide enough to hit it.
       'max-width:calc(100vw - 16px);' +
     '}' +
     '#ext-sidebar .ext-sidebar-row1{' +
@@ -110,23 +116,9 @@ function buildSidebar() {
     '#ext-sidebar [data-testid="ext-slider-value"]{' +
       'font-size:11px;min-width:28px;opacity:.9;color:var(--ext-n700);' +
     '}' +
-    // Rate-limit banner (2026-07-20) — replaces the slider while the cross-tab rate limiter
-    // (background.js) reports a paused state. Fixed amber color (matches the existing
-    // memory-indicator amber tier, #d4a72c) rather than a --ext-* token, since this is a
-    // semantic caution signal that must stay visually consistent regardless of theme — same
-    // reasoning already used for the Fast Book button's fixed blue.
-    //
-    // 2026-07-30: the banner is now a flex CONTAINER (text + trailing info icon) rather than
-    // a bare text span, so the "i" sits immediately after the sentence instead of being
-    // pushed to the far right by flex:1. The ellipsis moved to the inner text span for the
-    // same reason — truncation must eat the sentence, never the icon.
-    '#ext-sidebar [data-testid="ext-rate-limit-banner"]{' +
-      'flex:1;min-width:0;display:flex;align-items:center;gap:6px;' +
-      'font-size:12px;font-weight:600;color:#d4a72c;' +
-    '}' +
-    '#ext-sidebar [data-testid="ext-rate-limit-text"]{' +
-      'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-    '}' +
+    // 2026-07-31: the ext-rate-limit-banner / ext-rate-limit-text rules lived here and were
+    // removed with the paused message. See BACKLOG.md "Sidebar paused/rate-limit message" for
+    // the exact declarations, in case this is reinstated.
     '#ext-sidebar [data-testid="ext-memory-indicator"]{' +
       'width:12px;height:12px;border-radius:50%;cursor:pointer;' +
       'border:1px solid var(--ext-n300);flex-shrink:0;' +
@@ -135,42 +127,29 @@ function buildSidebar() {
     '#ext-sidebar [data-testid="ext-memory-indicator"]:focus-visible{' +
       'box-shadow:0 0 0 2px var(--ext-accent);' +
     '}' +
-    // Geometry + tooltip anchoring shared by BOTH info icons (memory, rate limit) — one
-    // rule rather than two copies so the "circled i" convention stays identical everywhere.
-    '#ext-sidebar [data-testid="ext-memory-info"],' +
-    '#ext-sidebar [data-testid="ext-rate-limit-info"]{' +
+    // Geometry + tooltip anchoring for the memory info icon. 2026-07-31: these four rules
+    // used to be shared selectors also naming ext-rate-limit-info / ext-rate-limit-tooltip,
+    // plus two rate-limit-only rules (a currentColor override and a 340px tooltip width).
+    // Those selectors and rules went with the paused message — see BACKLOG.md. The memory
+    // declarations below are unchanged.
+    '#ext-sidebar [data-testid="ext-memory-info"]{' +
       'width:14px;height:14px;border-radius:50%;cursor:help;flex-shrink:0;' +
       'display:inline-flex;align-items:center;justify-content:center;' +
       'font-size:10px;font-weight:700;line-height:1;' +
       'background:var(--ext-n100);border:1px solid var(--ext-n200);color:var(--ext-n700);' +
       'outline:none;position:relative;' +
     '}' +
-    '#ext-sidebar [data-testid="ext-memory-info"]:focus-visible,' +
-    '#ext-sidebar [data-testid="ext-rate-limit-info"]:focus-visible{' +
+    '#ext-sidebar [data-testid="ext-memory-info"]:focus-visible{' +
       'box-shadow:0 0 0 2px var(--ext-accent);' +
     '}' +
-    // The rate-limit "i" lives INSIDE the amber banner, so it inherits the banner's amber
-    // via currentColor instead of the neutral chip fill above. This is also why it needs no
-    // html.ext-night override further down: the banner amber is already theme-independent.
-    '#ext-sidebar [data-testid="ext-rate-limit-info"]{' +
-      'background:transparent;border-color:currentColor;color:currentColor;' +
-    '}' +
-    '#ext-sidebar [data-testid="ext-memory-tooltip"],' +
-    '#ext-sidebar [data-testid="ext-rate-limit-tooltip"]{' +
+    '#ext-sidebar [data-testid="ext-memory-tooltip"]{' +
       'display:none;position:absolute;top:32px;right:0;width:220px;' +
       'background:var(--ext-n900);color:var(--ext-bar-bg);font-size:11px;font-weight:400;' +
       'line-height:1.4;padding:8px 10px;border-radius:6px;' +
       'box-shadow:0 2px 10px rgba(0,0,0,.4);white-space:normal;' +
       'letter-spacing:normal;z-index:2147483647;' +
     '}' +
-    // Wider than the 220px memory tooltip — this explanation is ~4x longer and at 220px it
-    // would be a very tall, thin column. right:0 keeps it growing leftward from the icon,
-    // which sits mid-bar, so the extra width stays on screen.
-    '#ext-sidebar [data-testid="ext-rate-limit-tooltip"]{' +
-      'width:340px;' +
-    '}' +
-    '#ext-sidebar [data-testid="ext-memory-tooltip"].ext-tooltip-visible,' +
-    '#ext-sidebar [data-testid="ext-rate-limit-tooltip"].ext-tooltip-visible{' +
+    '#ext-sidebar [data-testid="ext-memory-tooltip"].ext-tooltip-visible{' +
       'display:block;' +
     '}' +
 
@@ -200,8 +179,7 @@ function buildSidebar() {
     'html.ext-night #ext-sidebar [data-testid="ext-memory-info"]{' +
       'background:#23272d !important;border-color:#2c313a !important;color:#b0bcca !important;' +
     '}' +
-    'html.ext-night #ext-sidebar [data-testid="ext-memory-tooltip"],' +
-    'html.ext-night #ext-sidebar [data-testid="ext-rate-limit-tooltip"]{' +
+    'html.ext-night #ext-sidebar [data-testid="ext-memory-tooltip"]{' +
       'background:#e5edf5 !important;color:#1c1f24 !important;' +
     '}';
     // 2026-07-30: the old static 'body{padding-top:44px!important}' rule was removed —
@@ -258,47 +236,11 @@ function buildSidebar() {
   sliderValue.setAttribute('title', 'Applies to all open Relay tabs');
   sliderValue.textContent = '2.0s';
 
-  // Rate-limit banner (2026-07-20) — hidden by default; shown in place of the
-  // slider+sliderValue while background.js reports a rate-limited state. See
-  // updateRateLimitDisplay() below.
-  //
-  // 2026-07-30: the text is now STATIC. It used to end in "Retrying in Xs", counting down
-  // background.js's own backoff timer — which told the dispatcher nothing true: that number
-  // is when WE next retry, not when Amazon lifts the block, it restarted from scratch on
-  // every page reload, and reaching zero changed nothing visible. Removed entirely rather
-  // than re-based on some other clock, because no clock available to this extension knows
-  // Amazon's unblock time.
-  const rateLimitBanner = document.createElement('span');
-  rateLimitBanner.setAttribute('data-testid', 'ext-rate-limit-banner');
-  rateLimitBanner.setAttribute('role', 'status');
-  rateLimitBanner.style.display = 'none';
-
-  const rateLimitText = document.createElement('span');
-  rateLimitText.setAttribute('data-testid', 'ext-rate-limit-text');
-  rateLimitText.textContent =
-    'Paused — Amazon has temporarily limited your IP due to frequent refreshes. ' +
-    'Access returns on its own; the extension will resume automatically.';
-
-  // Trailing "i" — same hover/focus/tap tooltip convention as ext-memory-info below.
-  const rateLimitInfo = document.createElement('span');
-  rateLimitInfo.setAttribute('data-testid', 'ext-rate-limit-info');
-  rateLimitInfo.setAttribute('tabindex', '0');
-  rateLimitInfo.setAttribute('aria-label', 'About this pause');
-  rateLimitInfo.textContent = 'i';
-
-  const rateLimitTooltip = document.createElement('div');
-  rateLimitTooltip.setAttribute('data-testid', 'ext-rate-limit-tooltip');
-  rateLimitTooltip.setAttribute('role', 'tooltip');
-  rateLimitTooltip.textContent =
-    'Amazon limits how often the load board can be refreshed from a single IP address. ' +
-    'When the limit is hit, the whole site stops loading for a while — this is not an ' +
-    'account issue and nothing is wrong with your extension. It clears by itself. To ' +
-    'avoid it, turn on Shared refresh limit in the extension settings: it spreads one ' +
-    'refresh budget across all your open tabs instead of each tab refreshing on its own.';
-  rateLimitInfo.appendChild(rateLimitTooltip);
-
-  rateLimitBanner.appendChild(rateLimitText);
-  rateLimitBanner.appendChild(rateLimitInfo);
+  // 2026-07-31: the rate-limit banner (ext-rate-limit-banner + ext-rate-limit-text +
+  // ext-rate-limit-info + ext-rate-limit-tooltip) was built here and removed by PM decision.
+  // Nothing about the paused state renders any more. The backoff/pause machinery it reported
+  // on is untouched and still running — see background.js. Full record of what was here, for
+  // reinstatement, in BACKLOG.md "Sidebar paused/rate-limit message".
 
   // Memory indicator — dispatcher-controlled reload, no auto-reload (see content.js).
   const memoryIndicator = document.createElement('span');
@@ -342,7 +284,6 @@ function buildSidebar() {
   row1.appendChild(playpause);
   row1.appendChild(slider);
   row1.appendChild(sliderValue);
-  row1.appendChild(rateLimitBanner);
   row1.appendChild(memoryIndicator);
   row1.appendChild(memoryInfo);
   container.appendChild(row1);
@@ -460,15 +401,7 @@ function buildSidebar() {
     memoryTooltip.classList.remove('ext-tooltip-visible');
   }
 
-  function showRateLimitTooltip() {
-    rateLimitTooltip.classList.add('ext-tooltip-visible');
-  }
-
-  function hideRateLimitTooltip() {
-    rateLimitTooltip.classList.remove('ext-tooltip-visible');
-  }
-
-  // --- Global refresh interval + cross-tab rate-limit banner (2026-07-20) ---
+  // --- Global refresh interval + cross-tab rate-limit state (2026-07-20) ---
   // Local cache of background.js's rate-limiter state, kept in sync via
   // chrome.storage.onChanged below. Purely event-driven as of 2026-07-30 — the 1s tick
   // that used to redraw the countdown is gone along with the countdown itself.
@@ -479,8 +412,10 @@ function buildSidebar() {
   // Reads background.js's sticky `rateLimited` flag — deliberately NOT backoffUntil.
   // backoffUntil expiring only means "we may retry now"; the block is lifted only once a
   // request actually succeeds, which is exactly when background.js clears this flag. That
-  // is what makes the banner survive both a timer expiry and a page reload, and vanish on
-  // the first 2xx without any extra plumbing here.
+  // is what makes the paused state survive both a timer expiry and a page reload, and clear
+  // on the first 2xx without any extra plumbing here. 2026-07-31: its only remaining reader
+  // is renderSharedRateStatus() (row 2's visibility); it used to also drive the removed
+  // paused message.
   //
   // Fallback: state written by a build predating the flag has no `rateLimited` field, so
   // fall back to the old timer test rather than showing nothing. Transient — background.js
@@ -531,10 +466,12 @@ function buildSidebar() {
   }
 
   // Live "Active tabs: N -> each tab refreshes every X.Xs" line, X = interval * N — shown
-  // only in shared mode ON and only when NOT paused (requirement 4: the banner in row 1
-  // already fully explains the paused state; showing this line at the same time would be
-  // redundant/conflicting, so it hides instead). Uses the same paused test as the banner,
-  // so the two can never disagree about whether we are paused.
+  // only in shared mode ON and only when NOT paused. The original reason for the paused
+  // condition was that the row-1 banner already explained the paused state, so this line
+  // would have been redundant next to it; the banner is gone as of 2026-07-31 but the
+  // condition is deliberately LEFT AS IS — this is a different element and the task was
+  // scoped to the message only. Effect while paused: row 2 hides and the bar is 20px
+  // shorter (syncBodyPadding keeps body padding in step, so no gap or overlap).
   function renderSharedRateStatus() {
     var show = _sharedLimitEnabled && !isRateLimitPaused();
     sharedRateStatus.style.display = show ? '' : 'none';
@@ -550,23 +487,20 @@ function buildSidebar() {
     syncBodyPadding(show);
   }
 
-  // Swaps slider+sliderValue for the banner while paused, so the dispatcher is never left
-  // wondering whether the extension broke — per the task. Also the single entry point that
-  // keeps the mode label and shared-rate status line in sync — called from every trigger
-  // below (init, storage changes).
+  // Single entry point that re-renders everything derived from the rate-limiter state —
+  // called from init and from the storage listener below. Kept under its existing name and
+  // at its existing call sites; only its body shrank.
   //
-  // 2026-07-30: play/pause now STAYS VISIBLE while paused (it used to be hidden alongside
-  // the slider). Required by the state becoming sticky: the banner no longer clears itself
-  // on a timer, only on a successful response, and a stopped extension issues no requests —
-  // so hiding the only control that can restart it could strand the dispatcher with a
-  // permanent banner and no way to act on it. The banner text is unaffected; nothing about
-  // the retry/backoff machinery in background.js changed.
+  // 2026-07-31: used to also show the paused banner and hide slider+sliderValue behind it.
+  // Banner removed by PM decision (message only — the backoff/pause machinery in
+  // background.js is untouched). The slider swap went with it: it existed ONLY to make room
+  // for the banner, so keeping it would have made the speed control silently vanish during a
+  // pause with nothing left to explain why. Slider and its label now stay visible in every
+  // state. Reinstating the banner means restoring this swap too — see BACKLOG.md.
+  //
+  // isRateLimitPaused() is still live and still consulted: renderSharedRateStatus() below
+  // uses it to decide whether to show row 2. That behaviour is deliberately unchanged.
   function updateRateLimitDisplay() {
-    var paused = isRateLimitPaused();
-    rateLimitBanner.style.display = paused ? '' : 'none';
-    slider.style.display          = paused ? 'none' : '';
-    sliderValue.style.display     = paused ? 'none' : '';
-    if (!paused) hideRateLimitTooltip(); // never leave a tooltip orphaned on a hidden banner
     renderModeLabel();
     renderSharedRateStatus();
   }
@@ -621,7 +555,7 @@ function buildSidebar() {
   // driven by the sticky `rateLimited` flag rather than by a timestamp going stale.
   // content.js's deactivateExtensionUI() no longer clears _rateLimitPollInterval either.
 
-  // Cross-tab sync: the refresh-interval slider and the rate-limit banner both reflect
+  // Cross-tab sync: the refresh-interval slider and the rate-limit state both reflect
   // GLOBAL chrome.storage.local state now, so a change made in ANY tab (a different
   // tab's slider, or background.js updating backoff) must be reflected here live. Named
   // (not anonymous) and stashed on the container for the same reason as
@@ -641,9 +575,10 @@ function buildSidebar() {
         logger.log('sidebar', 'refresh interval synced from another tab', { ms: newMs });
       }
     }
-    // Sole driver of the paused banner as of 2026-07-30 (the 1s countdown tick is gone):
-    // background.js writes this key on every reported result, so the banner appears on the
-    // first failure and clears on the first success, in every open tab, with no local timer.
+    // background.js writes this key on every reported result, so the paused state flips on
+    // the first failure and clears on the first success, in every open tab, with no local
+    // timer. 2026-07-31: this used to drive the paused message; with that removed, the only
+    // remaining visible effect is row 2's visibility (see renderSharedRateStatus).
     if (changes[RATE_LIMITER_KEY] !== undefined) {
       adoptRateLimitState(changes[RATE_LIMITER_KEY].newValue);
       updateRateLimitDisplay();
@@ -722,19 +657,8 @@ function buildSidebar() {
     }
   });
 
-  // Same convention for the paused-banner "i" — hover (desktop), focus (keyboard), tap.
-  rateLimitInfo.addEventListener('mouseenter', showRateLimitTooltip);
-  rateLimitInfo.addEventListener('mouseleave', hideRateLimitTooltip);
-  rateLimitInfo.addEventListener('focus', showRateLimitTooltip);
-  rateLimitInfo.addEventListener('blur', hideRateLimitTooltip);
-  rateLimitInfo.addEventListener('click', function (ev) {
-    ev.stopPropagation();
-    if (rateLimitTooltip.classList.contains('ext-tooltip-visible')) {
-      hideRateLimitTooltip();
-    } else {
-      showRateLimitTooltip();
-    }
-  });
+  // 2026-07-31: the five ext-rate-limit-info tooltip listeners (mouseenter/mouseleave/
+  // focus/blur/click) were removed with the element they were bound to. See BACKLOG.md.
 
   logger.log('sidebar', 'sidebar injected');
 }

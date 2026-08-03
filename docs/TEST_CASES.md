@@ -517,6 +517,109 @@ on timing a logout to hit one of two narrow windows in a live tab.
    to before this fix — new loads highlight, sound plays, top load auto-opens, inline panel
    shows normally, no spurious "bailing" log lines appear.
 
+### TC-AUTH-8 — Failed activation does not lock the extension out; the next attempt recovers
+
+Regression test for the activation lockout fixed 2026-07-30 (audit finding B1, High —
+`_extActivated` was set before the awaits in `activateExtensionUI()`, so any throw in
+`tabState.init()` or `buildSidebar()` left the flag `true` with no UI, and every later
+activation returned early on it; only a page reload recovered). Control flow was proved with a
+Node harness against the real source text (see CHANGELOG.md 2026-07-30); **this is the
+outstanding real-browser check.**
+
+Steps 1–5 need an induced failure, since neither step throws on its own in normal operation.
+Induce it by temporarily adding `throw new Error('test');` as the first line of `buildSidebar()`
+in `content/sidebar.js` — remove it again before step 6, and never ship it.
+
+1. With the throw in place, log in (or reload an already-logged-in Relay tab).
+   **Expected:** no sidebar appears, and the console shows
+   `[EXT][…][content] activateExtensionUI failed — rolling back, extension stays inactive`
+   with `{ step: "buildSidebar", error: … }`. It must appear at the **shipped**
+   `DEBUG_LEVEL = 1` (it is a `logger.error`) — confirm at level 1, not just at 3 or 4.
+2. **Expected — nothing left behind:** `document.getElementById('ext-sidebar')` returns `null`,
+   no `.ext-new-load` / `.ext-surge-price` highlights, no `#ext-inline-panel`, and
+   `document.body.style.paddingTop` is empty (the bar's padding was reverted). The page looks
+   untouched, exactly as when logged out.
+3. **Now remove the induced `throw`** from `buildSidebar()` and — **without reloading the
+   page** — log out and log back in via the popup, which fires `activateExtensionUI()` again.
+   **Expected (this is the whole point):** the sidebar appears normally. Before the fix it did
+   not, and no reload-free path existed to get it back.
+4. **Expected — exactly one of everything after that recovery:** exactly one `#ext-sidebar`
+   element (`document.querySelectorAll('#ext-sidebar').length === 1`); Play/Pause toggles the
+   loop once per click, not twice; the memory indicator updates on a single ~7s cadence, not a
+   doubled one; the interval slider reacts once per change.
+5. **Expected — the recovered sidebar actually works:** Play starts the loop, new loads
+   highlight, the inline panel opens on a card click, and Pause stops it. A retry that produces
+   a visible-but-dead sidebar is a failure of this test.
+6. **Regression — happy path unchanged.** With no induced throw, reload a logged-in Relay tab.
+   **Expected:** identical to before the fix — one sidebar, `activateExtensionUI called` then
+   `extension UI activated — waiting for manual Start` in the console, and **no** `rolling back`
+   error line.
+7. **Regression — deactivate → activate still works** (overlaps TC-AUTH-6): log out, confirm the
+   sidebar disappears, log back in, confirm it returns — once, and working.
+8. **Re-entrancy.** Hard to force by hand; the harness covers it. The observable proxy: log out
+   and back in rapidly several times, or log in from the popup at the same moment a Relay tab is
+   finishing its own load. **Expected:** at most one `activateExtensionUI: activation already in
+   flight — ignoring` line, never two `buildSidebar called` lines for one activation, and always
+   exactly one `#ext-sidebar`.
+
+**Known limitation, out of scope for this fix (see CHANGELOG.md):** logging out *while*
+activation is still in flight can still leave a sidebar built for a logged-out session. Not a
+failure of this test case.
+
+### TC-AUTH-9 — Popup opens straight into the right block, and a lost connection never logs you out
+
+Covers the 2026-07-30 change to render from local storage and validate in the background.
+Sequencing and error classification were proved with a Node `vm` harness running the **real**
+Supabase bundle with only `fetch` swapped (51 checks — see CHANGELOG.md). **The browser-only
+parts are the visual/timing claims in steps 1, 2 and 6.**
+
+1. **Signed in — instant panel.** Sign in, close the popup, reopen it. **Expected:** the
+   logged-in panel is there essentially immediately — no "Checking your session…", no visible
+   delay, and the words "Free access — sign in with your email" never appear, not even for one
+   frame. Reopen 5–10 times including right after a browser restart. Screen-record and step
+   through the frames if you want proof rather than impression.
+2. **Signed out.** Log out, reopen. **Expected:** the login form immediately. Feature controls
+   (Night Mode, Sound, Filters, Booking, Reset) never appear, not even for one frame.
+3. **Offline while signed in — the second half of the fix.** Signed in, go offline (devtools →
+   Network → Offline, or pull the adapter), then open the popup. **Expected:** the panel opens
+   normally and **stays**. "No connection — check your internet." appears in the status line
+   under Account. The login form must **never** appear. Then go back online and reopen —
+   normal panel, no message, still signed in. Check `chrome.storage.local` in devtools:
+   `supabaseSession` must still be there throughout. Console shows a `logger.error`
+   "session validation could not reach the server — staying signed in, session NOT cleared"
+   with `errorName: "AuthRetryableFetchError"`. Confirm at the shipped `DEBUG_LEVEL = 1`.
+4. **Server says the session is invalid.** Sign in, then invalidate the session server-side
+   (Supabase dashboard → revoke, or delete the user's sessions), then open the popup.
+   **Expected:** the panel appears briefly and is then replaced by the login form, and
+   `supabaseSession` is gone from storage. *The brief panel is the accepted trade-off, not a
+   bug.* Alternative if you cannot revoke server-side: hand-edit `supabaseSession.access_token`
+   in devtools to a corrupted-but-still-3-part JWT — the server will 401 it.
+5. **Pending OTP resume** (regression against TC-AUTH-1). Enter your email, Send code, close the
+   popup without entering the code, reopen. **Expected:** the **code** step with the email
+   prefilled and "Enter the code sent to …" — not a blank email step. Repeat with a
+   server-invalidated session (step 4's setup) — the fallback must still land on the code step.
+6. **Expired session + offline — known slow path.** Let the stored session expire (or edit
+   `expires_at` in devtools to now+10s), go offline, open the popup. **Expected:** the login
+   form appears **immediately** (it no longer waits on anything), `supabaseSession` is **not**
+   cleared, and the "No connection" message appears **late — up to ~30s**. That delay is
+   gotrue's own retry loop (`_refreshAccessToken` retries while the error is retryable, bounded
+   by `N = 30*1e3`; measured at ~25.6s in the harness), not our code. Then go back online and
+   reopen: the silent refresh should succeed and you should land on the panel — proving nothing
+   was lost by not clearing the session.
+7. **Regression — login end to end.** From logged out: email → Send code → real code → Verify →
+   features appear. Then Log out. **Expected:** unchanged from TC-AUTH-4/6.
+8. **Regression — silent refresh** (TC-AUTH-3). Expired session, **online**, open the popup.
+   **Expected:** the login form appears first and is then replaced by the panel once the refresh
+   succeeds, and the refreshed session is written back to storage.
+9. **Regression — cross-page sync.** With the popup open and signed in, log out from a second
+   surface (or clear `SUPABASE_SESSION_KEY` in devtools). **Expected:** the popup switches to
+   the login form live, as before.
+
+**Deliberate, not bugs:** (i) the brief panel in step 4 — PM decision, access is free at this
+stage so there is nothing to gate; (ii) the popup paints its header and "Account" title before
+the decided block appears, because `chrome.storage.local.get` is async — that gap is a local IPC
+round trip, not a network one, and no *wrong* block is ever shown during it.
+
 ### TC-PANEL-WIDTH-1 — Inline panel segment table spans the full card width, with column/row borders
 
 **Superseded/incomplete:** the fix this test case covers (`.ext-inline-panel{width:100%}`)
@@ -957,6 +1060,15 @@ the popup.
 
 ### TC-RATELIMIT-5 — Paused banner: no countdown, honest copy, "i" tooltip, sticky until success
 
+> ## ⛔ OBSOLETE as of 2026-07-31 — DO NOT RUN
+>
+> The paused banner, its "i" icon, and its tooltip were **removed** by PM decision (see
+> CHANGELOG.md 2026-07-31 and BACKLOG.md "Sidebar paused/rate-limit message"). Every step below
+> checks something that no longer renders. Kept verbatim, not deleted, because the removal is
+> explicitly reversible — if the banner is reinstated, this is the test case to bring back with
+> it. **Superseded by TC-RATELIMIT-6**, which verifies the message is gone and the pause
+> behaviour survived.
+
 **Automated coverage already run (2026-07-30, no browser in the build environment):** 50/50
 on a DOM-stub harness driving the real `buildSidebar()` — exact banner and tooltip copy, no
 digits-plus-`s` anywhere in the banner text, show-on-failure / stay-shown-after-the-backoff-
@@ -1024,6 +1136,210 @@ Block request URL, or throttle to Offline briefly).
     confirm from the service-worker console that the gaps still grow ~5s → ~10s → ~20s →
     ~40s → ~80s → capped at 5 min, and reset after a success. The banner change must not
     have altered any of this.
+
+### TC-RATELIMIT-6 — Paused message removed; pause behaviour survives (2026-07-31)
+
+Supersedes TC-RATELIMIT-5. The message is gone by PM decision; **the backoff/pause behaviour
+must be exactly as before**. That behaviour half was verified automatically — a Node `vm`
+harness drove the real `background.js` through its real `chrome.runtime.onMessage` listener for
+both 429 and 503 (pause → permits refused → escalate → auto-resume on 2xx), and built the real
+`buildSidebar()` against a stub DOM in both paused and unpaused states: 79/79 pass, and
+`background.js` / `networkObserver.js` were never edited. **What follows is the real-browser
+half, which has NOT been run.**
+
+**Setup:** log in, open the load board, start the loop. Force a failure as in TC-RATELIMIT-1
+step 4 (DevTools → Network → right-click a `/api/loadboard/search` request → Block request URL,
+or throttle to Offline briefly).
+
+1. **Nothing appears while paused.** **Expected:** no amber line, no "Paused — Amazon has
+   temporarily limited your IP…" text, no circled "i" next to it, anywhere in the sidebar, in
+   any state. Search the page DOM for `ext-rate-limit` — **zero matches** in both light and
+   night mode.
+2. **The speed slider stays put.** **Expected:** the refresh slider and its label remain
+   visible and usable throughout the pause. (They used to hide to make room for the banner;
+   that hiding was removed with it.) No blank gap appears in row 1 where the banner used to be.
+3. **Row 1 is otherwise unchanged.** **Expected:** title, play/pause, slider, slider label,
+   memory dot, memory "i" — same order, same spacing, nothing missing, no stray empty element.
+   Play/pause still works while paused.
+4. **The memory tooltip still works.** Hover and keyboard-focus `ext-memory-info`. **Expected:**
+   its tooltip still appears fully below the bar and is not clipped — its CSS rules were
+   un-shared from the removed ones, so this is the specific regression risk. Check light **and**
+   night mode.
+5. **The bar shrinks while paused — expected, not a bug.** With shared mode ON and 2+ tabs, note
+   that row 2 ("Active tabs: N…") still hides during a pause, so the bar goes 60px → 40px.
+   **Expected:** the page content below shifts by exactly that amount and there is no gap,
+   overlap, or content hidden behind the bar (body padding tracks it). Flagged because with the
+   message gone there is now **no on-screen explanation of a pause at all**.
+6. **Polling really does still stop.** With the URL blocked, watch the service-worker console.
+   **Expected:** `REQUEST_PERMIT` is refused while backoff is active — the extension is not
+   quietly hammering Amazon now that the visible indicator is gone.
+7. **Auto-resume still works.** Unblock the URL. **Expected:** on the first successful
+   `/api/loadboard/search` the loop resumes by itself with no user action, in every open tab,
+   and row 2 reappears with the correct N.
+8. **Regression — backoff timing untouched.** As TC-RATELIMIT-5 step 13: gaps still grow ~5s →
+   ~10s → ~20s → ~40s → ~80s → capped at 5 min, reset after a success.
+
+### TC-RATELIMIT-7 — Only a genuine 429/503 pauses; aborts and other statuses do not (2026-07-31)
+
+Regression test for the fix that stopped ordinary saved-search switches pausing the extension.
+**Automated coverage already run (89/89, no browser):** the real `networkObserver.js` driven with
+a real `AbortController`, the real `background.js` driven through its real message listener, an
+end-to-end pipe between them, and an A/B against the committed `background.js` proving the
+backoff schedule is unchanged. **What follows is the real-browser half — NOT run.**
+
+**Setup:** log in, open the load board, start the loop. Keep the service-worker console open
+(`chrome://extensions` → Service worker) and the page console open.
+
+1. **The reported bug — saved-search switching.** With the loop running, switch between saved
+   searches 10+ times in a row, quickly. **Expected:** no pause. `[background] non-rate-limit
+   result ignored…` must **not** appear either (an abort should produce no report at all, so
+   there is nothing to ignore). Confirm in the service-worker console that `REQUEST_PERMIT` is
+   still being granted throughout, and in `chrome://extensions` → storage that
+   `extRateLimiterState` has `rateLimited: false` / `backoffUntil: null` — or does not exist at
+   all if nothing has ever failed.
+2. **Same, via ordinary navigation.** Navigate away from the load board mid-refresh, and use the
+   browser Back button. Any in-flight search is aborted. **Expected:** same as step 1 — no pause.
+3. **Genuine 429 still pauses.** DevTools → Network → right-click a `/api/loadboard/search`
+   request → *Block request URL* will give you a failed request, but **not** a 429 — for a real
+   status you need an override. Use DevTools **Local Overrides** or a proxy to force a `429` on
+   that path. **Expected:** the extension pauses — `extRateLimiterState.rateLimited: true`,
+   `backoffStepIndex: 0`, `backoffUntil` ~5s out, and `REQUEST_PERMIT` refused in the
+   service-worker console.
+4. **Genuine 503 still pauses.** Repeat step 3 forcing `503`. **Expected:** identical.
+5. **Escalation intact.** Keep the 429 (or 503) override in place across several retries.
+   **Expected:** gaps grow ~5s → ~10s → ~20s → ~40s → ~80s → capped at 5 min, ±20% jitter.
+6. **Auto-resume intact.** Remove the override. **Expected:** on the first successful
+   `/api/loadboard/search` the loop resumes by itself, `rateLimited` goes false, `backoffUntil`
+   null, `backoffStepIndex` back to -1.
+7. **Other statuses do not pause.** Force a `404`, then a `500`, then a `401` on that path (same
+   override mechanism). **Expected for each:** no pause, `extRateLimiterState` unchanged, and
+   `[background] non-rate-limit result ignored for backoff purposes { status: … }` in the
+   service-worker console. *This log line is the marker that the result arrived and was
+   deliberately ignored — distinct from step 1, where nothing should arrive at all.*
+   **Note `500` specifically:** it must NOT pause, while `502` and `504` must (step 7a). That
+   split is deliberate — see the comment at `RATE_LIMIT_STATUSES` in `background.js`.
+7a. **502 and 504 DO pause.** Force each in turn. **Expected:** identical to steps 3–6 — pause,
+   escalation, auto-resume. These were added on a safety-side default without captured evidence
+   that Amazon throttles via a gateway status; if you ever capture what Amazon *actually* returns
+   under a real throttle, revisit the constant.
+8. **Offline does not pause.** DevTools → Network → Offline for ~30s with the loop running.
+   **Expected:** no pause; you should see the ignored-result log with `status: 0` (fetch path) —
+   the loop keeps ticking and resumes cleanly when you go back online.
+9. **A non-rate-limit result mid-backoff changes nothing.** Force a 429 (step 3), then while
+   still paused force a 404. **Expected:** `backoffUntil`, `backoffStepIndex` and `lastFailureAt`
+   are all **unchanged** — the 404 neither extends nor clears the pause. Then remove the
+   override: the first 2xx still clears it.
+10. **XHR path specifically.** Steps 1 and 3 exercise whichever transport Amazon uses. If the
+    board uses `XMLHttpRequest` rather than `fetch` (check the Network panel's *Type* column),
+    that is the path that changed from a single `loadend` listener to `load`/`error`/`timeout` —
+    confirm both the abort case (step 1) and the 429 case (step 3) on it.
+11. **Regression — the page still works.** `networkObserver.js` wraps the page's own
+    `fetch`/`XHR` in the MAIN world, so a throw there would break Amazon's site. **Expected:** the
+    load board browses, searches, filters and books exactly as normal, with no new errors in the
+    page console.
+
+### TC-PANEL-COLOUR-1 — Accordion leg headers are #CFDBFB in light mode, unchanged in night mode
+
+Covers the 2026-07-31 token change (`--ext-leg-header-bg`, `#DCE6E9` → `#CFDBFB`). The CSS-level
+half is already verified automatically (21 checks against the real generated stylesheets — see
+CHANGELOG.md). **This is the visual half, NOT run.**
+
+1. **Light mode.** Open a multi-leg load's inline panel with night mode OFF. **Expected:** every
+   accordion leg header is the light periwinkle `#CFDBFB`. Sample it with the DevTools colour
+   picker rather than judging by eye — the previous value `#DCE6E9` is close enough to mistake.
+2. **Every leg, both states.** Expand and collapse legs. **Expected:** the colour is identical on
+   collapsed and expanded headers, and on every leg of a 3+ leg load — no odd one out.
+3. **Night mode unchanged — the main risk.** Toggle night mode ON with the panel open.
+   **Expected:** headers go to the dark elevation colour exactly as before; `#CFDBFB` must appear
+   **nowhere**. Toggle back and forth a few times, and also open a fresh panel while already in
+   night mode (a different code path from toggling with it open).
+4. **Contrast — the known regression.** On a light-mode header, look at the distance/duration
+   text, the connecting route arrow, and the chevron (all `#4A6570`). **Expected:** legible, but
+   be aware they now measure **4.48:1**, just under WCAG AA's 4.5:1 (was 4.88:1). If they read as
+   washed out to you, the one-line fix is `#4A6570` → `#49646F` in `inlinePanel.js:173/178/200` —
+   see CHANGELOG.md. The station codes (`#1F3A45`) are unaffected at 8.68:1.
+5. **Pills still stand out.** The Loaded / Empty pills sit on the new background. **Expected:**
+   still clearly distinguishable from the header behind them — their separation ratio improved
+   slightly, but confirm visually since it is a low ratio either way (~1.2:1) by design.
+6. **Regression — nothing else moved.** Column alignment between the leg header and the table
+   below it, the header's bottom border (`#C4D2D6`), corner radii, and the card shadow should all
+   be exactly as before. This was a colour-only change.
+
+### TC-PANEL-2B — Card click stops auto-refresh even when the refresh detaches the card (2026-07-31)
+
+Regression test for the fix that moved the stop out of `waitForSheet`'s callback. Supplements
+TC-PANEL-2 (which covers the basic case). Automated coverage: 24 checks incl. a mechanism proof
+with a detached card — see CHANGELOG.md. **Browser half NOT run.**
+
+1. **The reported case.** Start auto-refresh and let it run at a **fast interval (0.5–1s)** — the
+   faster the refresh, the more reliably Amazon re-renders the list and detaches the card, which
+   is what triggered the bug. Click any load card. **Expected:** the loop stops immediately —
+   the sidebar play/pause flips to paused and no further refresh occurs.
+2. **Watch for the fingerprint of the old bug.** Set `DEBUG_LEVEL = 4` in `utils/constants.js`
+   (it ships as **1**, at which none of these `logger.log` lines are visible at all). **Expected:**
+   `manual card open — stopping loop for dispatcher review` appears. If you instead see
+   `waitForSheet: card no longer the one being waited on — discarding result` *without* the stop
+   line, the regression is back.
+3. **Repeat 10×.** Click a card, restart the loop, click another card. **Expected:** stops every
+   single time — the old bug was timing-dependent, so one success proves little.
+4. **(b) Stays stopped after closing the panel.** Close the inline panel (click the same card
+   again). **Expected:** the loop stays stopped — it must **not** auto-resume.
+5. **(c) Restart works.** Press play. **Expected:** refreshing resumes normally.
+6. **(d) Click while already stopped.** With the loop stopped, click a card. **Expected:** panel
+   opens, nothing else changes, no error.
+7. **Regression — the panel still shows the RIGHT load.** This is what guard 3 protects and it
+   must still work: click card A, then quickly click card B before A's panel renders.
+   **Expected:** the panel shows **B's** data, never A's. Repeat a few times at speed. Then
+   confirm a PAT post created from that panel carries B's load.
+8. **Regression — slow sheet.** Click a card and let Amazon's sheet load slowly (throttle the
+   network). **Expected:** the loop stops immediately on the click, not only when the sheet
+   finishes; the panel appears when the sheet is ready.
+
+### TC-PANEL-COLOUR-2 — Load row background is #F5F5F5 in light mode, unchanged in night mode
+
+Covers the 2026-07-31 `.ext-seg-body` change. CSS-level half verified automatically (12 checks —
+see CHANGELOG.md). **Visual half NOT run.**
+
+1. **Light mode.** Expand a leg in the inline panel with night mode OFF. **Expected:** the body
+   behind the stop rows is `#F5F5F5`. Sample with the DevTools colour picker — it is close to the
+   previous `#FFFFFF` and to the surrounding greys.
+2. **Zebra striping — the thing most likely to look wrong.** Even rows are tinted
+   `var(--ext-n100)` = `#f5f7fa`, now almost identical to the `#F5F5F5` body. **Expected:**
+   striping is effectively invisible. Decide whether that is acceptable; if not, the zebra tint
+   needs changing (see CHANGELOG.md).
+3. **Night mode unchanged.** Toggle night mode ON with a leg expanded, and separately open a
+   fresh panel while already dark (different code path). **Expected:** the body is the usual dark
+   elevation colour; `#F5F5F5` appears nowhere.
+4. **Card seam.** The header (#CFDBFB) sits directly on top of this body. **Expected:** no gap,
+   no stray line, rounded bottom corners intact on the expanded body.
+5. **Regression — layout untouched.** Column alignment, padding, borders and the card shadow are
+   all as before. This was a colour-only change.
+
+### TC-PARSE-2 — Payout parses in the "Similar matches" section (2026-07-31)
+
+Regression test for the two-class payout selector. Parser-level half verified automatically
+(25 checks against both real markup shapes — see CHANGELOG.md). **Browser half NOT run.**
+
+1. **The reported case.** Scroll to a board view showing a **Similar matches** section. Open the
+   PAT modal (Create Post) from one of those cards. **Expected:** Payout is prefilled with the
+   board payout × 1.10, not empty, and Confirm is enabled. Before this fix the field was empty
+   with a warning.
+2. **Cross-check the number.** Compare the prefilled Payout against the card's own figure ×1.10
+   (e.g. `$309.08` → `$339.99`). **Expected:** they match — this catches the selector grabbing
+   the wrong element rather than merely a non-null one.
+3. **Main list unchanged.** Do the same from an ordinary (non-Similar-matches) card.
+   **Expected:** identical behaviour to before.
+4. **The guard still holds.** Find or force a card with no readable payout (DevTools: delete the
+   payout span from a card, then open the modal). **Expected:** Payout **empty**, warning shown,
+   Confirm **blocked**. This must not have been weakened.
+5. **⚠ Price-increase loads — known gap, expected to still fail.** Find a load showing Amazon's
+   price-increase highlight (`.wo-total_payout__modified-load-increase-attr`). **Expected today:**
+   payout may still be empty. **Please capture that card's inner HTML** — whether that class sits
+   on the payout span or a sibling badge decides a one-token follow-up fix. See
+   AMAZON_SELECTORS.md "Payout inner-class family".
+6. **Other fields in that section.** On a Similar-matches card, check equipment, loading type,
+   deadhead, trailer letter and tag in the inline panel. **Expected:** populated as usual. These
+   use non-`wo-*` selectors that no capture covers, so they are the next most likely silent gap.
 
 ### TC-PANEL-POLISH-3 — Full-width action bar, light leg-header colour, fixed-column route alignment
 
@@ -1101,3 +1417,164 @@ whole point of the route-alignment fix only shows up under exactly that conditio
     collapses (chevron rotates), Fast Book and the three icon buttons still work, single-
     segment loads render normally. This was a CSS-only pass — no `buildPanelElement()` or
     `buildActionBar()` changes.
+
+### TC-PAT-4 — Unreadable distance / stop count block Confirm (no fabricated post)
+
+Fixes the audit's top finding: an unreadable board distance used to prefill Min/Max Miles as
+**0 / 25**, and an unreadable stop count as **0 Stops**, and both were posted to the live
+marketplace with no warning and no gating. Same no-silent-fallback rule as Payout (TC-PAT-2)
+and load times.
+
+**Automated coverage already run (2026-07-30, no browser available):** 66/66 in a Node
+sandbox against the real extracted `parsePatMilesOrNull()` plus the gate/submit logic —
+sentinel behaviour (incl. genuine `"0 mi"` → 0 vs `"n/a"` → null), empty Min/Max on failure,
+stop count NaN/<1 → null, Confirm disabled per failure mode and re-enabled after valid manual
+entry, payload carrying the typed value, and no regression to the payout/times/blockingErrors
+gates. **The DOM rendering and live submit below are NOT covered by that** — they need a
+browser and a real load.
+
+**Setup:** log in, open the load board, open a load's inline panel, click the Create Post
+(document) icon in the bottom action bar to open the PAT modal.
+
+1. **Healthy load — regression baseline.** Open the modal for a load whose distance and stop
+   count both read normally. **Expected:** Min/Max Miles prefilled to (distance − 25) and
+   (distance + 25); Stops shows the read-only text (e.g. "3 Stops") exactly as before; no new
+   warning text anywhere; Confirm enables once cities resolve. **Nothing about this path
+   should look different from before the fix.**
+2. **Unreadable distance.** Reproduce by opening the modal for a load whose distance is
+   missing/garbled (if none occurs naturally, temporarily stub `loadUnit.distance` to `'n/a'`
+   via the console before opening). **Expected:** Min Miles and Max Miles are **empty** — not
+   0 and 25 — and a red line reading exactly *"Load distance could not be read — enter it
+   manually"* appears under Min Miles. Confirm is **disabled** even with cities resolved, a
+   valid payout, and valid times.
+3. **Distance — manual entry unblocks.** With the modal from step 2: type Min = 80, leave Max
+   empty → Confirm **stays disabled**. Type Max = 60 (less than Min) → **stays disabled**.
+   Type Max = 130 → Confirm **enables** and the red distance line **disappears**.
+4. **Unreadable stop count.** Open the modal for a load whose stop count is missing/garbled
+   (stub `detail.header.stopsCount` to `''` if needed). **Expected:** the Stops field is a
+   **number input**, not the read-only "0 Stops" text, and a red line reading *"Stop count
+   could not be read — enter it manually"* appears beneath it. Confirm **disabled**.
+5. **Stops — manual entry unblocks.** In step 4's modal: type `0` → Confirm **stays
+   disabled** (a zero-stop post is not a real load). Type letters → **stays disabled**. Type
+   `3` → Confirm **enables**, red line **disappears**.
+6. **Both unreadable at once.** With both stubbed: Confirm disabled and **both** warnings
+   visible. Fixing only one leaves Confirm disabled; fixing both enables it.
+7. **Submitted payload is the typed value.** After fixing step 6 manually (Stops 2, Min 80,
+   Max 130), click Confirm and inspect the outgoing `/api/loadboard/orders/upsert` request in
+   DevTools → Network. **Expected:** `stopCount` is **2** and the miles are 80/130 — the
+   typed values. **Critically: `stopCount` must never be 0 and miles must never be 0/25.**
+8. **Cleared-but-healthy field shows no false warning.** On a healthy load (step 1), manually
+   clear Min Miles. **Expected:** Confirm disables, but the "could not be read" line does
+   **not** appear — the board data was fine, so that message would be a lie. Re-typing a
+   value re-enables Confirm.
+9. **Regression — existing gates.** On a healthy load, confirm the pre-existing gates still
+   behave: clearing Payout disables Confirm and shows the payout warning; an unset start/end
+   time disables Confirm and shows the times warning; a load with an unknown loading type or
+   unrecognized timezone still shows its permanent blocking error and never enables Confirm.
+10. **Regression — Night Mode.** Repeat steps 2 and 4 with Night Mode on. **Expected:** both
+    new warning lines are legible against the dark modal (they reuse the existing
+    `.pat-payout-warning` red, which has no dark-mode override — flag if unreadable; the PAT
+    modal's separate dark palette is a known open audit finding).
+
+### TC-PANEL-RACE-1 — Rapid card switching never renders the wrong load's data
+
+Fixes the audit finding that `waitForSheet()` left one poller alive per click. Clicking card A
+then quickly card B rendered **card A's panel from card B's sheet data** — and merged that data
+into `loadStore` under A's `loadId`, so a PAT post created from it would carry the wrong load
+entirely. This is a correctness-of-data bug, not a cosmetic one.
+
+**Automated coverage already run (2026-07-30, no browser available):** 31/31 in a Node sandbox
+driving the real extracted `waitForSheet()`/`cancelSheetPoll()` on a controllable clock —
+the A-then-B interleaving, the queued-stale-tick race, card detachment/identity discards,
+teardown cancellation, and timeout cleanup. **The same scenario was replayed against the
+pre-fix function and reproduces the bug**, so the test is known to detect it. What follows is
+the real-browser half, which the sandbox cannot cover: Amazon's actual sheet-swap timing.
+
+**Setup:** log in, open the load board with at least 3 loads whose payouts/stop counts differ
+visibly (so a wrong render is obvious at a glance). Extension may be running or paused.
+
+1. **Baseline — single click.** Click one card, wait for the panel. **Expected:** the panel's
+   route, stops, and payout match that card. Unchanged from before the fix.
+2. **The race — two fast clicks.** Click card A, then click card B **within ~200ms** (before
+   A's panel appears). **Expected:** exactly one panel appears, attached to **card B**, showing
+   **B's** data. There must be no flash of a panel under card A, and no panel that shows B's
+   numbers under A's position. Repeat 5–10 times with varying gaps (~50ms, ~150ms, ~400ms,
+   ~900ms) — the ~50–300ms window is where the old bug reproduced most reliably.
+3. **Three fast clicks.** Click A → B → C in quick succession. **Expected:** one panel only,
+   under C, with C's data. No orphaned panels under A or B.
+4. **Cross-check the stored data (the part that actually mattered).** After step 2, open the
+   PAT modal from the rendered panel's Create Post icon. **Expected:** origin/destination,
+   distance, and stop count match **card B** — the card the panel is attached to. Before the
+   fix this could show A's identity with B's numbers. Cancel the modal; do not submit.
+5. **Slow alternating clicks — regression.** Click A, let its panel fully render, then click B,
+   let it render, then A again. **Expected:** each click produces the correct panel for that
+   card; clicking a card whose panel is already open still closes it (toggle-off unaffected).
+6. **Logout mid-poll.** Click a card and, within the ~1.5s poll window, log out via the popup.
+   **Expected:** no panel ever appears, and none appears late (wait ~5s). The sidebar and all
+   extension DOM are removed as usual.
+7. **Auto-open path — regression.** Start the loop and let it auto-open a new load.
+   **Expected:** the panel renders as before with correct data; this path does not go through
+   `waitForSheet`, so it should be entirely unaffected — confirm it did not regress.
+8. **Sheet that never loads (timeout).** Click a card while offline / with
+   `/api/loadboard/search` blocked in DevTools, so the detail sheet never renders.
+   **Expected:** after ~1.5s the poller stops; either no panel or a panel with no segments,
+   and — critically — **no repeating console output and no leaked interval**. Confirm with
+   several such clicks in a row that nothing accumulates.
+9. **Console check.** Through all of the above, watch the console for
+   `waitForSheet: run superseded — discarding result` / `card no longer the one being waited
+   on`. Seeing these during step 2 is **correct** — it is the fix working. Seeing
+   `manual toggle render failed` instead would mean a discard path was missed.
+
+### TC-LOG-1 — DEBUG_LEVEL gates every logger method; no PII in the console
+
+Covers two audit findings fixed together on 2026-07-30: `DEBUG_LEVEL` previously gated only
+`logger.debug` (≈3% of output), and three sites logged the dispatcher's email / full street
+addresses. Shipped default is now `DEBUG_LEVEL = 1` (errors only).
+
+**Automated coverage already run (no browser available):** the real `utils/logger.js` was
+loaded into a VM with a captured console and exercised at levels 0–4 (each level emits exactly
+the expected channels; level 4 is equivalent to the old behaviour); the missing-constant
+fallback and data-less calls were confirmed non-throwing; `parseDetailAddress` was executed
+against five real address strings with its log payloads asserted PII-free; and logger call
+counts were confirmed identical before/after (303). **None of this ran in a browser** — the
+steps below are what must be checked by hand.
+
+**Setup:** load the unpacked extension, open a Relay load board, open devtools console,
+filter on `[EXT]`.
+
+1. **Shipped default is quiet.** With `DEBUG_LEVEL = 1` (as committed), reload the page and
+   use the extension normally — start/stop the loop, open a card, open the PAT modal.
+   **Expected:** the `[EXT]` console is essentially empty. Only `console.error` lines appear,
+   and only if something actually failed. This is the state a Web Store reviewer sees.
+2. **Nothing broke from the silence.** Same session as step 1: confirm the sidebar builds,
+   the loop runs, cards open, the inline panel renders, the PAT modal opens and Confirm
+   enables. **Silencing logs must not change behaviour** — if any feature misbehaves only at
+   level 1, a log call had a side effect and that is a bug.
+3. **Level 3 restores the familiar chatter.** Set `DEBUG_LEVEL = 3` in `utils/constants.js`,
+   reload the extension. **Expected:** `log` + `warn` + `error` all appear — roughly today's
+   pre-fix volume minus debug.
+4. **Level 4 shows debug too.** Set `DEBUG_LEVEL = 4`, reload. **Expected:** additionally the
+   5 `logger.debug` lines appear (e.g. `getHeapUsageRatio called` every ~7s from the sidebar
+   memory poll). This should match old behaviour exactly.
+5. **Level 0 is truly silent.** Set `DEBUG_LEVEL = 0`, reload, then force an error (e.g. block
+   `/api/loadboard/search` so a fetch fails). **Expected:** no `[EXT]` output at all, not even
+   errors.
+6. **Level 2.** Set `DEBUG_LEVEL = 2`. **Expected:** warnings and errors, no plain logs.
+7. **PII — email never appears.** At **level 4** (worst case), open the popup and run a full
+   login: enter email → send code → enter code → verify. Search the console for your email
+   address. **Expected: zero hits from `[EXT][popup] signInWithOtp requested` and from
+   `[EXT][content] auth gate open`.** Those two lines should show `emailLength` and `hasEmail`
+   instead. *(Known and deliberately NOT fixed in this task — `verifyOtp`, `resend
+   signInWithOtp`, `restorePendingOrEmailStep`, and `authGate gate transition` still log the
+   email; expect hits from those four and ignore them here.)*
+8. **PII — street address never appears.** At **level 4**, open the PAT modal for a load whose
+   stops have full street addresses. Search the console for the street number, the city name,
+   and the postcode. **Expected: zero hits from `[EXT][patApi] parseDetailAddress …`** — it
+   must show `hasInput` / `inputLength` / `matched` only. *(Known and NOT fixed here:
+   `patModal openPostModal: city source comparison` still logs full addresses, and
+   `resolvePATCity` logs city/state — expect hits from those and ignore them here.)*
+9. **Diagnostic value retained.** At level 3, open a PAT modal for a load whose address does
+   not parse. **Expected:** you can still see that `parseDetailAddress` ran and that it did
+   not match (`matched: false`) — enough to debug the failure without the value.
+10. **Restore before shipping.** Confirm `utils/constants.js` is back to `DEBUG_LEVEL = 1`
+    before any build is packaged.

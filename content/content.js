@@ -376,18 +376,65 @@ tabState.subscribe('running', function (val) {
 // (popup.js writes it on verify/logout), so these two functions run immediately, no
 // reload required in either direction.
 
-var _extActivated = false; // idempotency guard — both functions are safe to call repeatedly
+var _extActivated  = false; // idempotency guard — both functions are safe to call repeatedly
+// Separate in-flight guard (2026-07-30, audit B1). Deliberately NOT the same flag as
+// _extActivated: _extActivated means "initialisation finished and the UI exists", which is
+// only true at the very end. Something still has to stop a second call arriving mid-await
+// from starting initialisation a second time, and that is this flag. Always cleared in a
+// finally — a thrown step must never leave it stuck true, or we would have recreated the
+// exact lockout this fix removes, just one flag over.
+var _extActivating = false;
 
 async function activateExtensionUI() {
   if (_extActivated) return;
-  _extActivated = true;
+  if (_extActivating) {
+    logger.log('content', 'activateExtensionUI: activation already in flight — ignoring');
+    return;
+  }
+  _extActivating = true;
   logger.log('content', 'activateExtensionUI called');
 
-  await tabState.init();
-  buildSidebar();
-  initManualToggle();
+  // 2026-07-30 (audit B1, High): _extActivated used to be set HERE, before the awaits. If
+  // tabState.init() or buildSidebar() threw, the flag stayed true with no UI built, and
+  // every later activateExtensionUI() call — including the one from a fresh login — hit the
+  // early return on line 1 and did nothing. The dispatcher got a dead extension (no sidebar,
+  // no buttons, nothing on screen) that could only be recovered by reloading the page. The
+  // flag is now set only after every step has actually succeeded.
+  var step = 'tabState.init';
+  try {
+    await tabState.init();
+    step = 'buildSidebar';
+    buildSidebar();
+    step = 'initManualToggle';
+    initManualToggle();
 
-  logger.log('content', 'extension UI activated — waiting for manual Start');
+    _extActivated = true; // ONLY after all three steps completed without throwing
+    logger.log('content', 'extension UI activated — waiting for manual Start');
+  } catch (e) {
+    // logger.error is level 1, so this survives the shipped quiet DEBUG_LEVEL — a failed
+    // activation must be visible in the console even on a default install. `step` names the
+    // step that threw.
+    logger.error('content', 'activateExtensionUI failed — rolling back, extension stays inactive', { step: step, error: e });
+    try {
+      // Roll back whatever the failed run already built, through the ONE existing teardown
+      // path — no second teardown to keep in sync. deactivateExtensionUI() early-returns
+      // unless _extActivated is true, so it is set true purely to open that gate; the very
+      // first thing deactivateExtensionUI() does is set it back to false. Nothing can observe
+      // the true in between: it is a synchronous call with no awaits, and any activation
+      // attempt reaching us during it is still blocked by _extActivating above.
+      // Every step it performs is a no-op when the thing was never built (buildSidebar may
+      // have thrown before or after appending #ext-sidebar; both cases are handled), which is
+      // what lets the NEXT activation start from a clean state instead of a half-built one.
+      _extActivated = true;
+      deactivateExtensionUI();
+    } catch (e2) {
+      logger.error('content', 'activateExtensionUI: rollback teardown threw', { step: step, error: e2 });
+    } finally {
+      _extActivated = false; // authoritative, even if the teardown threw before clearing it
+    }
+  } finally {
+    _extActivating = false; // never leave the retry path blocked
+  }
 }
 
 // Stops the loop, removes every DOM node/timer/listener the extension owns, and reverts
@@ -452,6 +499,10 @@ if (typeof onAuthGateChange === 'function') {
     logger.log('content', 'auth gate closed — extension inactive on this page load', {});
     return;
   }
-  logger.log('content', 'auth gate open', { email: gate.email });
+  // PII (2026-07-30): was `{ email: gate.email }`. The dispatcher's email must never reach
+  // the console at any DEBUG_LEVEL — a Web Store reviewer opening devtools would see it.
+  // hasEmail keeps the diagnostic value (did the session actually carry a user record?)
+  // without the value itself.
+  logger.log('content', 'auth gate open', { hasEmail: !!gate.email });
   await activateExtensionUI();
 })();

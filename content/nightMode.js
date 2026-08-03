@@ -446,9 +446,18 @@ function buildNightCss() {
 
     // Sidebar — dark graphite surface (belt-and-suspenders with sidebar.js overrides)
     'html.ext-night #ext-sidebar{background-color:#1c1f24 !important;color:#e5edf5 !important;}',
-    'html.ext-night #ext-sidebar input{background-color:transparent !important;border:none !important;}',
-    'html.ext-night #ext-sidebar [data-testid="ext-playpause"]{background:#23272d !important;border-color:#2c313a !important;color:#b0bcca !important;}',
-    'html.ext-night #ext-sidebar .ext-scanline__seg{background:linear-gradient(90deg,rgba(76,141,255,0),rgba(76,141,255,.9),rgba(76,141,255,0)) !important;}'
+    // AUDIT 2026-07-30 (Part B): two rules that used to follow this one were REMOVED as
+    // byte-identical duplicates of rules content/sidebar.js already injects for the same
+    // selectors:
+    //   - [data-testid="ext-playpause"] — identical values to sidebar.js's own night rule.
+    //   - .ext-scanline__seg gradient  — identical values to sidebar.js's own night rule,
+    //     except this copy carried !important, which additionally defeated sidebar.js's
+    //     @media (prefers-reduced-motion: reduce) override (that override is NOT !important,
+    //     so this rule won and the animated gradient kept applying for reduced-motion users
+    //     in night mode). Removing the duplicate lets the reduced-motion rule work again.
+    // sidebar.js is the correct owner: both selectors only ever match inside #ext-sidebar,
+    // which only exists once buildSidebar() has run and injected its own stylesheet.
+    'html.ext-night #ext-sidebar input{background-color:transparent !important;border:none !important;}'
   ].join('');
 }
 

@@ -6,20 +6,28 @@
 // utils/constants.js, utils/logger.js, utils/storage.js loaded before this file
 // (see popup.html) — STORAGE_KEYS and logger are available as globals.
 
-var KEY_NIGHT_MODE         = 'nightMode';          // STORAGE_KEYS.NIGHT_MODE
-var KEY_TAB_ALERT          = 'tabAlert';           // STORAGE_KEYS.TAB_ALERT
-var KEY_AUTO_OPEN          = 'autoOpenTopNew';     // STORAGE_KEYS.AUTO_OPEN (true-default)
-var KEY_HIDE_SIMILAR       = 'hideSimilarMatches'; // STORAGE_KEYS.HIDE_SIMILAR
-var KEY_VOLUME             = 'soundVolume';        // STORAGE_KEYS.VOLUME   (0–100, default 70)
-var KEY_SOUND_ID           = 'soundId';            // STORAGE_KEYS.SOUND_ID (string, default 'default')
-var KEY_HIDE_PROMOTED      = 'hidePromoted';       // STORAGE_KEYS.HIDE_PROMOTED
-var KEY_HIDE_STARTING_SOON = 'hideStartingSoon';   // STORAGE_KEYS.HIDE_STARTING_SOON
-var KEY_HIDE_TRAILER_READY = 'hideTrailerReady';   // STORAGE_KEYS.HIDE_TRAILER_READY
-var KEY_HIDE_PAST_BOOK     = 'hidePastBook';       // STORAGE_KEYS.HIDE_PAST_BOOK  (boolean, default false)
-var KEY_SURGE_ENABLED      = 'surgeEnabled';       // STORAGE_KEYS.SURGE_ENABLED  (boolean, default false)
-var KEY_SURGE_THRESHOLD    = 'surgeThreshold';     // STORAGE_KEYS.SURGE_THRESHOLD (number, default 50)
-var KEY_FAST_BOOK_ENABLED  = 'fastBookEnabled';    // STORAGE_KEYS.FAST_BOOK_ENABLED (boolean, default false)
-var KEY_SHARED_LIMIT       = 'sharedRefreshLimitEnabled'; // STORAGE_KEYS.SHARED_LIMIT_ENABLED (true-default)
+// AUDIT 2026-07-30 (Part B): these were hardcoded string literals duplicating the values in
+// STORAGE_KEYS, each with a trailing comment naming the constant it duplicated — two places
+// to keep in sync, and a silent-desync risk if a key is ever renamed in utils/storage.js
+// (the popup would keep reading/writing the old key while every content script moved to the
+// new one). Now derived from STORAGE_KEYS directly. utils/storage.js is loaded before this
+// file (see popup.html), so STORAGE_KEYS is already defined here. Values are unchanged —
+// verified key-by-key against STORAGE_KEYS before the swap; the local aliases are kept
+// purely so the ~60 usages below stay untouched.
+var KEY_NIGHT_MODE         = STORAGE_KEYS.NIGHT_MODE;
+var KEY_TAB_ALERT          = STORAGE_KEYS.TAB_ALERT;
+var KEY_AUTO_OPEN          = STORAGE_KEYS.AUTO_OPEN;          // true-default
+var KEY_HIDE_SIMILAR       = STORAGE_KEYS.HIDE_SIMILAR;
+var KEY_VOLUME             = STORAGE_KEYS.VOLUME;             // 0–100, default 70
+var KEY_SOUND_ID           = STORAGE_KEYS.SOUND_ID;           // string, default 'default'
+var KEY_HIDE_PROMOTED      = STORAGE_KEYS.HIDE_PROMOTED;
+var KEY_HIDE_STARTING_SOON = STORAGE_KEYS.HIDE_STARTING_SOON;
+var KEY_HIDE_TRAILER_READY = STORAGE_KEYS.HIDE_TRAILER_READY;
+var KEY_HIDE_PAST_BOOK     = STORAGE_KEYS.HIDE_PAST_BOOK;     // boolean, default false
+var KEY_SURGE_ENABLED      = STORAGE_KEYS.SURGE_ENABLED;      // boolean, default false
+var KEY_SURGE_THRESHOLD    = STORAGE_KEYS.SURGE_THRESHOLD;    // number, default 50
+var KEY_FAST_BOOK_ENABLED  = STORAGE_KEYS.FAST_BOOK_ENABLED;  // boolean, default false
+var KEY_SHARED_LIMIT       = STORAGE_KEYS.SHARED_LIMIT_ENABLED; // true-default
 
 // ── Supabase auth (email OTP) ──────────────────────────────────────────────────
 // vendor/supabase.min.js (global `supabase`) + utils/supabaseConfig.js
@@ -129,6 +137,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
   var pendingAuthEmail = '';
 
+  // Shown inline (in the existing popup-auth-status line — no new UI) when background
+  // validation could not REACH the server. Deliberately not a logout: see restoreSession().
+  var MSG_NO_CONNECTION = 'No connection — check your internet.';
+
   function setAuthStatus(msg, isError) {
     if (!authStatus) return;
     authStatus.textContent = msg || '';
@@ -179,7 +191,9 @@ document.addEventListener('DOMContentLoaded', function () {
     var data    = await chrome.storage.local.get(AUTH_PENDING_KEY);
     var pending = data[AUTH_PENDING_KEY];
     if (pending && pending.pendingEmail) {
-      logger.log('popup', 'restorePendingOrEmailStep: resuming pending code step', { email: pending.pendingEmail });
+      // PII (2026-07-30): was `email: pending.pendingEmail`. The stored email is still used
+      // below to prefill the input and the status line — only the LOG loses it.
+      logger.log('popup', 'restorePendingOrEmailStep: resuming pending code step', { emailLength: pending.pendingEmail.length });
       pendingAuthEmail = pending.pendingEmail;
       if (authEmailInput) authEmailInput.value = pending.pendingEmail;
       setAuthStatus('Enter the code sent to ' + pending.pendingEmail + '.');
@@ -189,6 +203,55 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  // "The server said no" vs "I could not get an answer from the server" — the distinction
+  // requirement 3 rests on, and the reason a lost connection must never log anyone out.
+  //
+  // Verified by reading the SHIPPED vendor/supabase.min.js, not from memory or docs:
+  //   - fetch itself rejecting (offline, DNS failure, connection refused, abort)
+  //       => AuthRetryableFetchError, status 0   [minified Vr: `catch(e){...throw new Zn(J(e),0)}`]
+  //   - HTTP 500,501,502,503,504,520-530
+  //       => AuthRetryableFetchError, that status [minified zr: `if(Rr.includes(e.status))`]
+  //   - a real auth verdict (401/403/400, bad or revoked token)
+  //       => AuthApiError carrying that status
+  // gotrue RETURNS these as `result.error` rather than throwing (its own catch does
+  // `if(isAuthError(e)) return {..., error:e}`), and _getUser passes the instance through
+  // untouched, so both the returned-error and thrown-error paths arrive here intact.
+  //
+  // The guard itself is the library's own exported predicate (the UMD bundle exports
+  // isAuthRetryableFetchError alongside createClient), with a name check as fallback in case
+  // a future bundle drops the export.
+  //
+  // Everything that is NOT a supabase auth error at all is also treated as "no answer": a
+  // TypeError out of the client, or the synthesized 'setSession failed' below, is not the
+  // server rejecting the session. Signing someone out therefore requires a POSITIVE
+  // server-issued verdict — nothing weaker.
+  function isServerVerdict(err) {
+    if (!err) return false;
+    if (typeof supabase !== 'undefined' && typeof supabase.isAuthRetryableFetchError === 'function') {
+      if (supabase.isAuthRetryableFetchError(err)) return false;
+    }
+    if (err.name === 'AuthRetryableFetchError') return false;
+    return err.__isAuthError === true;
+  }
+
+  // 2026-07-30 — renders from LOCAL storage first, validates over the network afterwards.
+  //
+  // Was: read storage, then await a network round trip, and only then render. That cost a
+  // 1-1.5s "Checking your session…" screen on every open, and — worse — a failed round trip
+  // dropped the dispatcher onto the login form, i.e. a lost connection logged them out.
+  //
+  // The network call never discovered anything: the stored session already carries
+  // expires_at and user.email, the expiry comparison below is a complete signed-in decision,
+  // and the storage.onChanged handler at the bottom of this file has always rendered the
+  // logged-in state from exactly this local data with no network at all. The call VALIDATES
+  // a known answer, so it now runs after the answer is already on screen.
+  //
+  // Every auth call, storage key, and branch condition below is unchanged from the previous
+  // version — only WHEN each result is applied, and what a failure is allowed to do.
+  //
+  // Accepted trade-off (PM decision, 2026-07-30): a session revoked server-side shows the
+  // panel for a few hundred ms until validation corrects it. Access is free at this stage,
+  // so there is nothing to gate.
   async function restoreSession() {
     logger.log('popup', 'restoreSession');
     if (!supabaseClient) {
@@ -205,23 +268,52 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var nowSec    = Math.floor(Date.now() / 1000);
     var expiresAt = session.expires_at || 0;
+    var locallyValid = expiresAt - nowSec > 30; // same 30s margin as before, same comparison
 
+    // ── FIRST PAINT — decided here, from local data only. Nothing above this line touches
+    // the network. This is the whole fix.
+    if (locallyValid) {
+      showLoggedIn(session.user && session.user.email);
+    } else {
+      await restorePendingOrEmailStep();
+    }
+
+    // ── BACKGROUND VALIDATION — the panel (or login form) is already on screen. Same two
+    // calls, same branch condition, as the pre-2026-07-30 version.
     try {
-      if (expiresAt - nowSec > 30) {
+      if (locallyValid) {
         var setResult = await supabaseClient.auth.setSession({
           access_token: session.access_token,
           refresh_token: session.refresh_token
         });
         if (setResult.error || !setResult.data.session) throw setResult.error || new Error('setSession failed');
+        // Re-render from the validated session: same call as before, and it also refreshes
+        // the displayed email if the server's copy differs from the stored one.
         showLoggedIn(setResult.data.session.user && setResult.data.session.user.email);
         return;
       }
+      // Expired locally — the login form is already showing. The silent refresh still runs
+      // (unchanged; TC-AUTH-3 depends on it) and promotes to the panel if it succeeds.
       logger.log('popup', 'restoreSession: refreshing expired session');
       var refreshResult = await supabaseClient.auth.refreshSession({ refresh_token: session.refresh_token });
       if (refreshResult.error || !refreshResult.data.session) throw refreshResult.error || new Error('refresh failed');
       await saveSession(refreshResult.data.session);
       showLoggedIn(refreshResult.data.session.user && refreshResult.data.session.user.email);
     } catch (e) {
+      if (!isServerVerdict(e)) {
+        // Could not reach the server. Change NOTHING: the stored session stays, the view
+        // stays, and the dispatcher stays signed in. Only an inline note explains the state.
+        // Losing the connection is not evidence the session is bad, and treating it as such
+        // is what used to sign people out on a flaky connection.
+        logger.error('popup', 'session validation could not reach the server — staying signed in, session NOT cleared', {
+          errorName: e && e.name, status: e && e.status
+        });
+        setAuthStatus(MSG_NO_CONNECTION, true);
+        return;
+      }
+      // A positive server-issued verdict: the session really is invalid/revoked/expired.
+      // Same handling as before — clear it and fall back to the auth block, which still
+      // routes through restorePendingOrEmailStep() so a pending OTP resumes at the code step.
       logger.warn('popup', 'restoreSession failed, clearing session', e);
       await clearSession();
       await restorePendingOrEmailStep();
@@ -233,7 +325,10 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!supabaseClient) { setAuthStatus('Login not configured.', true); return; }
       var email = authEmailInput ? authEmailInput.value.trim() : '';
       if (!email) { setAuthStatus('Enter your email.', true); return; }
-      logger.log('popup', 'signInWithOtp', { email: email });
+      // PII (2026-07-30): was `{ email: email }`. Never log the address itself at any
+      // DEBUG_LEVEL. The length keeps a little diagnostic value (distinguishes "user typed
+      // something" from an empty/whitespace submit) without being identifying.
+      logger.log('popup', 'signInWithOtp requested', { emailLength: email.length });
       authSendBtn.disabled = true;
       setAuthStatus('Sending code…');
       try {
@@ -264,7 +359,9 @@ document.addEventListener('DOMContentLoaded', function () {
       // Digits only, 6-10 chars — not a fixed length. Supabase sends 8-digit codes;
       // this input used to hard-cap at 6 and reject them.
       if (!/^\d{6,10}$/.test(code)) { setAuthStatus('Code must be 6-10 digits, numbers only.', true); return; }
-      logger.log('popup', 'verifyOtp', { email: pendingAuthEmail });
+      // PII (2026-07-30): was `email: pendingAuthEmail`. codeLength is the useful diagnostic
+      // here anyway — Supabase sends 8-digit codes and this input used to hard-cap at 6.
+      logger.log('popup', 'verifyOtp requested', { emailLength: pendingAuthEmail.length, codeLength: code.length });
       authVerifyBtn.disabled = true;
       setAuthStatus('Verifying…');
       try {
@@ -290,7 +387,8 @@ document.addEventListener('DOMContentLoaded', function () {
   if (authResendBtn) {
     authResendBtn.addEventListener('click', async function () {
       if (!supabaseClient || !pendingAuthEmail) return;
-      logger.log('popup', 'resend signInWithOtp', { email: pendingAuthEmail });
+      // PII (2026-07-30): was `email: pendingAuthEmail`.
+      logger.log('popup', 'resend signInWithOtp requested', { emailLength: pendingAuthEmail.length });
       authResendBtn.disabled = true;
       setAuthStatus('Sending code…');
       try {
@@ -338,7 +436,24 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  restoreSession();
+  // 2026-07-30: the 3000ms bounded-wait timer that used to sit here is GONE. It existed only
+  // to rescue the dispatcher from the neutral "Checking your session…" state if the network
+  // check never answered; nothing waits on the network to render any more, so there is no
+  // stuck state left for it to rescue — and a timeout that falls back to the login form is
+  // exactly the sign-out-on-bad-network behaviour this change removes.
+  //
+  // The .catch stays. restoreSession() can still reject: its chrome.storage.local.get sits
+  // outside any handler, and if the local read fails there is no session data to render
+  // from, so the login form is the only honest option (this is a storage failure, not a
+  // network one — no session is cleared here either way). Without it this would also be an
+  // unhandled promise rejection, as it was before 2026-07-30.
+  restoreSession().catch(function (e) {
+    logger.error('popup', 'restoreSession threw — falling back to the auth block', { error: e });
+    return restorePendingOrEmailStep().catch(function (e2) {
+      logger.error('popup', 'failure fallback restorePendingOrEmailStep threw', { error: e2 });
+      showAuthStep('email');
+    });
+  });
 
   // ── Read all settings from storage and initialise the UI ──────────────────
   chrome.storage.local.get(
