@@ -4,6 +4,186 @@ Status key: **UI-BUILT** = HTML/CSS exists in popup, logic not wired | **PLANNED
 
 ---
 
+## 🧭 POST-LAUNCH / UNSCHEDULED — Single-Tab Multi-Driver Monitor
+
+**Status: concept defined, data verified, NOTHING BUILT.** Not scheduled before the Chrome Web
+Store launch. Build after publication or alongside it, at Ihor's call. No task, no test case and
+no stub file exists for this yet, deliberately.
+
+### Problem
+A dispatcher covering several drivers in different regions opens **one Relay tab per driver**,
+each auto-refreshing. That multiplies requests from a single IP and trips Amazon's rate limit —
+the same throttle already documented in this repo (see the cross-tab rate-limiting blocker below,
+and `background.js`'s backoff).
+
+### Approach
+Use Amazon's own **multi-origin search**: one tab, up to **five origin cities in one query**, one
+request cycle. Our layer splits the merged result list per driver and shows **sub-tabs** (one per
+driver) with a **per-tab new-load counter**. A **colour stripe per driver** stays visible on the
+combined "All" view.
+
+### How the split works — settled by live capture, DO NOT REDESIGN
+
+Captured 2026-08-05 from a real five-city search (LITTLE ROCK AR, CHICAGO IL, TULSA OK, HEBRON KY,
+JACKSONVILLE FL; radius 25; 104 results).
+
+1. **Amazon does NOT attribute a load to the origin city that matched it.** Every field containing
+   `domicile` / `origin` / `search` / `query` / `filter` / `match` / `cluster` / `region` /
+   `market` was checked; **none names a searched city**. Searching the response text for the
+   searched city names is useless — the search is **radius-based**, so pickups come back as NORTH
+   LITTLE ROCK, MATTESON, HARVEY, ROMEOVILLE, SKOKIE and similar, names that never appear in the
+   filter.
+2. **Assignment is therefore by DISTANCE.** The pickup's coordinates are present and populated on
+   every work opportunity at:
+   ```
+   workOpportunities[].loads[0].stops[0].location.latitude
+   workOpportunities[].loads[0].stops[0].location.longitude
+   ```
+   That stop carries `stopType: "PICKUP"` and `stopSequenceNumber: 1`. The searched cities'
+   coordinates already come from the **cities endpoint we use for Post-a-Truck** (`name`,
+   `stateCode`, `latitude`, `longitude` — see api-samples.md §2). Assign each load to the
+   **nearest configured city**. Cost is trivial: ~5 comparisons per load.
+3. **Do NOT match on city or state strings.** State formatting is inconsistent across records —
+   the captures contain `"IL"` and `"Ohio"`, `"IN"` and `"Indiana"`, `"KY"` and `"KENTUCKY"`,
+   `"FL"` and `"Florida"`. City names alone are not unique either.
+4. **A single refresh fires MORE THAN ONE `/api/loadboard/search` call** when the dispatcher has
+   several saved-search tabs open. In the 2026-08-05 capture two fired together: one with
+   `totalResultsSize: 104` (the active tab) and one with `totalResultsSize: 11` and **`payout`
+   null on every record** (a different tab). **A consumer must select the response whose
+   `workOpportunities[].id` values match the load-card ids currently rendered — never simply the
+   first response seen.**
+5. **The DOM stays the source of truth for what is on screen.** Same narrow-hybrid decision
+   already recorded for the detail panel (STATE.md → JSON reconnaissance).
+
+### Known constraints
+- Amazon caps **Origin at five cities** per search.
+- **Radius is a single value applied to all origins**, so widely separated drivers share one
+  radius. **Effect on usability is UNTESTED.**
+- **Driver names are ours, not Amazon's** — the dispatcher assigns a name to each origin city in
+  our UI.
+
+### ⚠️ Provenance of the findings above — read before relying on them
+Findings 1–4 come from Ihor's 2026-08-05 five-city capture, **which is not in `samples/`**. What
+was independently verified against the captures that *are* on disk (`paired-search.json`, 50 work
+opportunities):
+
+| Finding | Verified here? |
+|---|---|
+| 1 — no origin-attribution field anywhere | **Yes.** Every candidate keyword walked across the whole document; the only hits were `searchAuditId` (one opaque UUID per response), `startLocation`/`endLocation`/`stops[].location.domicile` (the load's *own* facility, e.g. `"MDW"`), `matchDeviationDetails` (null throughout) and `searchChannelStampedDuration` (timing counters). None names a searched city. |
+| 2 — coordinate path and population | **Yes.** `loads[0].stops[0].location.latitude/longitude` populated **50 of 50**; that stop is `stopType: "PICKUP"`, `stopSequenceNumber: 1`. Note the coordinates sit on the nested `location` object — `'latitude' in stops[0]` is **false**. |
+| 3 — state-string inconsistency | **Partly.** `"IL"`/`"Ohio"`, `"IN"`/`"Indiana"` and `"KY"`/`"KENTUCKY"` were seen directly. **`"FL"`/`"Florida"` was not** — no Florida record exists in the on-disk captures. |
+| 4 — two simultaneous searches, 104 + 11 with null payout | **No.** Not reproducible from the on-disk captures; recorded as reported. |
+| 5 — DOM stays authoritative | Pre-existing recorded decision, unchanged. |
+
+**Before building, capture the five-city response into `samples/` and re-confirm findings 1, 3
+and 4 against it.** Finding 4 in particular is the one most likely to cause a subtle wrong-data
+bug, and it is currently the least verified. Note `samples/` is gitignored (see STATE.md).
+
+---
+
+## ✅ RESOLVED 2026-07-31 (later) — Inline panel colour: moved to the correct element
+
+**Status: DONE in code, pending a visual pass (TC-PANEL-COLOUR-2).** The dispatcher confirmed the
+intended surface was the segment **header**. `#F5F5F5` moved from `.ext-seg-body` to
+`--ext-leg-header-bg` (`utils/designTokens.js:48`, sole consumer `.ext-seg-header`), and
+`.ext-seg-body` was restored to `#FFFFFF`. Both contrast regressions listed below were **fixed by
+the move**: header secondary text `#4A6570` 4.48 → 5.69, stop address `#6B7280` 4.43 → 4.83.
+Zebra returned to its original 1.073:1. **New item to eyeball:** the header/body seam is now
+1.090:1 and may not read as a distinct band — TC-PANEL-COLOUR-2 step 3. Detail in CHANGELOG.md.
+
+*The original blocked entry is kept below for the record of how it was diagnosed.*
+
+### Original entry (superseded)
+
+**Status: NOT done. Do not treat the CHANGELOG entry as a completed change.**
+
+`#F5F5F5` was applied to **`.ext-seg-body`** (`content/inlinePanel.js`, `injectPanelStyle()`,
+was `#FFFFFF`). **The dispatcher reports the colour he wanted did not change**, so the target
+element is almost certainly wrong. The change is still in the tree.
+
+**Why it probably isn't visible — leading hypothesis, unverified:** `.ext-seg-body` is
+`display:none` until its leg is expanded (`.ext-open`). With the accordion collapsed the visible
+surface is `.ext-seg-header` (currently `#CFDBFB`), not the body. So either the dispatcher was
+looking at collapsed legs, or "load rows" means something else entirely — most likely the table
+cells `.ext-inline-panel__table td`, which carry **no** background of their own today (only even
+rows are tinted `var(--ext-n100)`).
+
+**To unblock:** a screenshot with the intended element circled, or the element's class from
+DevTools → Inspect. Candidates, in order of likelihood:
+1. `.ext-inline-panel__table td` — the actual stop rows
+2. `.ext-seg-header` — if "load rows" means the collapsed accordion rows
+3. `.ext-inline-panel` — the whole panel surface
+
+**Two measured side effects of the change as applied** (both computed to WCAG 2.1 from the real
+source colours, both would need revisiting wherever the colour finally lands):
+- **Zebra striping is now ~invisible.** Even rows are `var(--ext-n100)` = `#f5f7fa` against
+  `#F5F5F5` — a separation of **1.016:1** (was 1.073:1 on white).
+- **Stop-address contrast fell below AA.** `.ext-stop-addr` `#6B7280` measures **4.43:1**
+  against `#F5F5F5`, under the 4.5:1 bar for 13px text (was 4.83:1 on white). On even rows it
+  lands exactly on 4.50:1. One-line fix if wanted: `#6B7280` → `#6A7280` or darker at
+  `inlinePanel.js:282`. Station codes (`#111827`, 16.27:1) are unaffected.
+
+---
+
+## ⛔ BLOCKED 2026-07-31 — Post-a-Truck cannot post R-type (own-trailer) loads
+
+Amazon distinguishes **P** (Amazon-**P**rovided trailer) from **R** (carrier's own / **R**ented)
+across roughly **24 equipment types**. We support **4**, and **all of them are the provided
+variant**.
+
+**The hard block, `content/patApi.js:400-401`:**
+
+```js
+visibleProvidedTrailerType:  'AMAZON_PROVIDED',
+providedTrailerType:         'AMAZON_PROVIDED',
+```
+
+Both are hardcoded string literals in the upsert payload. Any post we create is therefore an
+Amazon-provided-trailer post, whatever the dispatcher actually drives. There is no UI for it and
+no branch in the payload builder.
+
+**To unblock:** a captured **own-trailer** upsert payload — same procedure as the existing
+captures in `docs/api-samples.md` (DevTools → Network → the `orders/upsert` POST → Copy request
+payload), created by posting an R-type truck manually on the live board. We need to see what
+`providedTrailerType` / `visibleProvidedTrailerType` become, and whether the `equipmentTypes`
+enum changes shape for R variants (e.g. a separate enum vs a flag).
+
+**Do not guess these values.** `docs/api-samples.md` already records that equipment enums differ
+in non-obvious ways between what the cities API returns and what upsert expects; inventing an
+R-type enum risks posting a wrong truck to a live marketplace.
+
+Scope once unblocked: extend the equipment map, add a P/R selector to the PAT modal, branch the
+two payload fields. Not started.
+
+---
+
+## ✅ RESOLVED 2026-08-05 — Collapse Amazon's left filters panel on auto-refresh START
+
+**Status: IMPLEMENTED, pending a browser pass (TC-FILTERS-1).** Blocked across four separate
+requests on "how do I read the panel's state?" — and the answer turned out to be **you don't**.
+
+**What unblocked it:** a live capture on 2026-08-05 showing that Amazon **removes
+`div.filters__column` from the DOM** when the panel is collapsed. Presence *is* the state, so
+`collapseFilterPanel()` in `content/panelCloser.js` checks for that one element and clicks the
+Filter button **only when the panel is confirmed open** — exactly one click, no verification
+pass, and nothing at all happens when it is already collapsed.
+
+**Superseded first attempt (same day), for the record:** the initial implementation could not
+read the state, so it clicked, measured a load card's `getBoundingClientRect().left` before and
+after with a 20px dead band, and clicked a **second time to revert** when it detected it had
+opened an already-collapsed panel. Self-correcting but visually wrong — the panel flashed open
+and shut on every START with filters already collapsed. Deleted the same day; **do not
+reintroduce layout measurement on this path.**
+
+`CLOSE_FILTER_PANEL` restored to `ALLOWED_CLICK_INTENTS` (`utils/constants.js`) and its click-site
+section restored to `docs/SAFETY.md` as **Click 4** (Fast Book renumbered to Click 5). Detail in
+CHANGELOG.md 2026-08-05; selector and the no-state finding in AMAZON_SELECTORS.md.
+
+*The original blocked entry is kept below as the record of how it was diagnosed — including the
+selector correction that explains why the three June attempts failed.*
+
+### Original entry (superseded)
+
 ## ⛔ BLOCKED 2026-07-31 — Collapse Amazon's left filters panel on auto-refresh START
 
 Requested 2026-07-31. **Nothing implemented** — blocked on one missing piece of evidence, by the
@@ -55,6 +235,20 @@ clicking it while already collapsed would OPEN it: the opposite of the requireme
 is truncated (`…`) exactly where the button's own attributes would appear, and the 2026-06-18
 notes explicitly say Amazon *"may not put `aria-expanded` on the button at all"*. No captured
 markup of this panel exists anywhere in the repo.
+
+> ### THE ONE FACT THAT UNBLOCKS THIS
+> **When the filters panel is collapsed, is it removed from the DOM, or merely hidden?**
+>
+> Either answer is enough. If it is **removed**, presence/absence of the panel node is itself a
+> reliable state test and no attribute is needed. If it is **hidden**, we need whichever
+> attribute differs between the two states — `aria-expanded`, `aria-pressed`, `aria-controls`,
+> a `data-*` flag, or a computed `display`/`width`.
+>
+> This was requested four times across the 2026-07-31 session and never supplied. The task was
+> re-issued with new markup each time (most recently revealing the `aria-label` has trailing
+> spaces, `"Filter  "`), but the state question was never answered, so it stayed blocked
+> throughout. **Do not implement without it** — a blind click opens the panel, which is the
+> exact failure the requirement calls out.
 
 ### To unblock: paste this in DevTools on the load board, once with the panel OPEN and once with it COLLAPSED
 

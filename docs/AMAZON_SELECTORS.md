@@ -23,6 +23,58 @@ Strategy 2 (SVG fallback):
 If both strategies fail: log error, return null, do NOT attempt click.
 Implementation: content/refreshManager.js → findRefreshButton()
 
+## Filter button / left filters panel ✅
+Verified: 2026-08-05
+Used by: `content/panelCloser.js` → `collapseFilterPanel()`
+
+```html
+<button type="button" mdn-popover-offset="-9" class="css-14evw8c">
+  …<span aria-label="Filter  " role="img">…
+</button>
+```
+
+**Lookup (no hash dependency):**
+
+```js
+const icon = Array.prototype.find.call(
+  document.querySelectorAll('[role="img"][aria-label]'),
+  el => el.getAttribute('aria-label').trim() === 'Filter'
+);
+const btn = icon && icon.closest('button');
+```
+
+- `aria-label` is on the inner **`<span role="img">`**, NOT on the button. Three June 2026
+  attempts all used `button[aria-label="Filter"]`, which matches nothing — that is why they
+  failed.
+- The label carries **trailing spaces** (`"Filter  "`). Compare trimmed, never with `=`.
+- `css-14evw8c` is a generated CSS-in-JS hash. **Never select on it.** Recorded here only as
+  evidence of what was captured.
+
+### THE PANEL ITSELF IS THE STATE — captured 2026-08-05
+```
+panel OPEN      →  div.filters__column   PRESENT
+panel COLLAPSED →  div.filters__column   ABSENT entirely
+```
+Amazon **unmounts** the panel rather than hiding it. Both states captured in the same session
+with no reload. So the state test is presence, one line, no ambiguity:
+
+```js
+const panel = document.querySelector('div.filters__column');
+if (!panel) return;   // already collapsed — do not click, the button is a toggle
+```
+
+**⚠️ THE BUTTON CARRIES NO STATE.** Its attributes are **byte-identical open vs collapsed**:
+`type="button"`, `mdn-popover-offset="-9"`, `class="css-14evw8c"`. There is **no
+`aria-expanded`** on it or anywhere related to it. Do not go looking for one — this was checked
+live and it does not exist. Use `div.filters__column` above instead.
+
+**Do not reintroduce layout measurement.** An earlier implementation (2026-08-05, same day)
+derived the state from a load card's `getBoundingClientRect().left` before and after clicking,
+with a dead band, and clicked a **second** time to revert when it guessed wrong — which made the
+panel flash open and shut whenever it was already collapsed. It was deleted the same day.
+Pixel measurement is unreliable across monitors and zoom levels and is not needed: presence
+answers the question outright. See SAFETY.md → Click 4.
+
 ## Load card (Layout A) ✅
 Verified: 2026-06-02
 Container:        div.load-card, div.load-card__selected  (both states)

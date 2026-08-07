@@ -1,12 +1,14 @@
-// panelCloser.js — closes the load-detail sheet when the loop starts.
+// panelCloser.js — closes the load-detail sheet, and collapses Amazon's left filters panel,
+// when the loop starts.
 // Called once per loop start from content.js (tabState 'running' subscriber, val=true).
-// Uses the sheet's own close control (not CSS hiding) to avoid FOUC.
+// Uses each panel's own control (not CSS hiding) to avoid FOUC.
 //
-// One allowed click site — authorized in docs/SAFETY.md:
+// Two allowed click sites — both authorized in docs/SAFETY.md:
 //   CLOSE_DETAIL_PANEL: detail-sheet close control  (cannot trigger booking)
+//   CLOSE_FILTER_PANEL: Amazon's Filter toggle      (cannot trigger booking)
 //
-// Guarded by isForbiddenElement() before the click.
-// If the sheet is not open (element not found), logs and skips — never throws.
+// Both guarded by isForbiddenElement() before the click.
+// If a panel is not open (element not found), logs and skips — never throws.
 
 // Returns the load-detail sheet's close button, or null if the sheet is not open.
 // The detail sheet has the stable ID #selected-work-sheet.
@@ -68,10 +70,81 @@ function findDetailCloseButton() {
   }
 }
 
-// Closes the load-detail sheet if it is currently open.
-// Called once per loop start. Left filter panel is intentionally left alone.
+// Collapses Amazon's left filters panel. Called once per loop START only.
+//
+// STATE TEST IS PRESENCE, NOTHING ELSE (captured live 2026-08-05, same session, no reload):
+//   panel OPEN      -> div.filters__column is present in the DOM
+//   panel COLLAPSED -> div.filters__column is ABSENT entirely
+// Amazon unmounts the panel rather than hiding it, so a single querySelector answers the
+// question outright. If it is already gone we return without clicking — the button is a
+// toggle, so clicking it then would OPEN the panel.
+//
+// Deliberately NOT used here, and none of it should come back:
+//   - pixel measurement of any kind (widths, offsets, getBoundingClientRect, viewport) — this
+//     runs on any monitor and any zoom level, so layout is not a reliable signal
+//   - aria-expanded — the Filter button has none; its attributes are byte-identical in both
+//     states (type="button" mdn-popover-offset="-9" class="css-14evw8c")
+//   - click-then-verify — the previous implementation clicked, measured, and clicked a second
+//     time to undo itself when it guessed wrong. That made the panel visibly flash open and
+//     shut every time it was already collapsed. Presence removes the guess entirely.
+//
+// Synchronous, never throws, and never blocks START.
+// Returns true only when this call actually collapsed an open panel.
+function collapseFilterPanel() {
+  logger.log('panelCloser', 'collapseFilterPanel called');
+  try {
+    // 1. Presence IS the state. Absent means already collapsed — do nothing, click nothing.
+    var panel = document.querySelector('div.filters__column');
+    if (!panel) {
+      logger.log('panelCloser', 'filters panel already collapsed — nothing to do');
+      return false;
+    }
+
+    // 2. Find the button. The aria-label sits on an inner <span role="img">, NOT on the
+    // button, and carries trailing spaces ("Filter  ") on the live board — hence the trim
+    // rather than an exact match. No dependency on the generated css-14evw8c hash.
+    var icon = Array.prototype.find.call(
+      document.querySelectorAll('[role="img"][aria-label]'),
+      function (el) { return el.getAttribute('aria-label').trim() === 'Filter'; }
+    );
+    var btn = icon && icon.closest('button');
+    if (!btn) {
+      logger.warn('panelCloser', 'collapseFilterPanel: panel is open but Filter button not found — skipping', {
+        iconFound: !!icon, labelledIcons: document.querySelectorAll('[role="img"][aria-label]').length
+      });
+      return false;
+    }
+
+    // 3. SAFETY gate — same check every other click site in this extension runs.
+    if (isForbiddenElement(btn)) {
+      logger.error('panelCloser', 'collapseFilterPanel: Filter button matched a forbidden selector — NOT clicking', {});
+      return false;
+    }
+
+    // 4. Click. No verification pass: the presence test above already established the state.
+    btn.click();
+    logger.log('panelCloser', 'filters panel collapsed', {
+      intent: ALLOWED_CLICK_INTENTS.CLOSE_FILTER_PANEL
+    });
+    return true;
+  } catch (e) {
+    logger.error('panelCloser', 'collapseFilterPanel threw', { error: e });
+    return false;
+  }
+}
+
+// Closes the load-detail sheet if it is currently open, and collapses the left filters panel.
+// Called once per loop start (val === true only), so neither runs on stop, pause or resume.
 function closePanelsForStart() {
   logger.log('panelCloser', 'closePanelsForStart called');
+  // collapseFilterPanel is synchronous now (it was async while it waited on layout to settle)
+  // and swallows its own errors. The try/catch is belt-and-braces so a filters-panel problem
+  // can never stop the detail-sheet close below from running, or block START.
+  try {
+    collapseFilterPanel();
+  } catch (e) {
+    logger.error('panelCloser', 'collapseFilterPanel could not be invoked', { error: e });
+  }
   try {
     var detailBtn = findDetailCloseButton();
     if (!detailBtn) {

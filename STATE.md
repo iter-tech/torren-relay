@@ -1,6 +1,220 @@
 # Project State
 
-Last updated: 2026-07-30
+> ## 📌 HANDOVER — READ THIS BLOCK FIRST (2026-07-31)
+>
+> Written at the end of the 2026-07-31 session for an incoming project manager. **This block is
+> authoritative and current.** Everything below it is older narrative kept as history; where the
+> two disagree, this block wins.
+>
+> ### Git state — read before you assume anything is safe
+>
+> **Most of this session IS committed**, as `9673465` *"Pre-launch fixes: PAT validation,
+> logging, activation, popup, rate limiting"* — 23 files, ~2,968 insertions.
+>
+> **Still UNCOMMITTED in the working tree**, on top of that commit:
+> - `content/networkObserver.js`, `utils/constants.js`, `content/content.js` — the entire
+>   **flag-gated response-body capture** (the whole feature is uncommitted)
+> - `utils/designTokens.js`, `content/inlinePanel.js` — the **inline-panel colour move**
+> - `content/panelCloser.js`, `utils/constants.js`, `docs/SAFETY.md`, `docs/AMAZON_SELECTORS.md`
+>   — the **filters-panel auto-collapse** (2026-08-05)
+> - **`content/originCities.js` (NEW, untracked)**, `manifest.json`, `content/content.js` — the
+>   **Active origin cities panel** (2026-08-05), step 1 of the multi-driver monitor
+> - `docs/PRODUCT.md` (NEW, untracked) — product-level record
+> - `STATE.md`, `docs/CHANGELOG.md`, `docs/BACKLOG.md`, `docs/TEST_CASES.md`,
+>   `docs/UI_ELEMENTS.md` — this handover and the colour-move docs
+> - `.gitignore`
+>
+> ### ⚠️ `samples/` IS GITIGNORED — the raw evidence does not survive a clone
+>
+> `.gitignore` line 8 is `samples/`. Every capture — `paired-card.html`, `paired-search.json`,
+> `search-1/-2.json`, `similar-1.json`, `similar-empty.json` — exists **only on the machine that
+> captured it**. A fresh clone gets none of it.
+>
+> The *findings* below survive because they are written here in prose. The *evidence* does not.
+> Anyone wanting to re-verify the join key, re-derive a JSON path, or check a field I marked
+> ABSENT will have to re-capture from a live board. **Decide deliberately whether to un-ignore
+> `samples/`** — they contain real load data (addresses, payouts, carrier scores), which is
+> presumably why they were excluded, so this is a genuine trade-off and not an oversight to
+> silently reverse.
+>
+> ### Current phase
+> Pre-launch hardening. The core loop (detect → highlight → sound → auto-open → auto-stop),
+> Post-a-Truck, login gating and cross-tab rate limiting are all built. This session was almost
+> entirely bug-fixing, verification and one day of reconnaissance. No new features shipped.
+>
+> ### ✅ Done AND verified by the dispatcher on a live board
+> | What | Where |
+> |---|---|
+> | PAT modal: unparseable distance / stop count gate Confirm, with visible warnings | `content/patModal.js` |
+> | Logger: `DEBUG_LEVEL` gates all four methods; **ships at 1**. Email and street addresses removed from every log payload | `utils/logger.js`, `utils/constants.js`, sweep across all files |
+> | `EXT_NAME` corrected to `Torren Relay` | `utils/constants.js` |
+> | Activation lockout fixed — `_extActivated` set only after every init step succeeds | `content/content.js` |
+> | Popup renders from the locally stored session immediately; a network failure no longer signs the dispatcher out | `popup/popup.js`, `popup.html`, `popup.css` |
+>
+> ### ⚠️ Done, NOT yet verified by the dispatcher — each needs a live-board pass
+> | What | Test case to run |
+> |---|---|
+> | Rate limiting: only 429/**502**/503/**504** trigger backoff; aborts are no longer reported at all | **TC-RATELIMIT-7** (esp. step 7a) |
+> | **502 and 504 WERE added** to `RATE_LIMIT_STATUSES` — `background.js` now reads `[429, 502, 503, 504]`. A deliberate safety-side default made **without captured evidence** that Amazon throttles via a gateway status; reasoning is in the comment at the constant. **500 is deliberately excluded.** | **TC-RATELIMIT-7 step 7a** |
+> | Payout selector widened for the Similar-matches variant class `wo-total_payout__match-deviation-attr` | **TC-PARSE-2** |
+> | Auto-refresh stop moved into the click handler (the `waitForSheet` guard-3 regression) | **TC-PANEL-2B** |
+>
+> ### 🔌 Done, SHIPPED OFF — response-body capture
+> `CAPTURE_RESPONSES` **exists in TWO places and BOTH must be flipped together**:
+> 1. `utils/constants.js` — gates the isolated-world log line
+> 2. `content/networkObserver.js` — the **MAIN-world mirror**, which is the copy that actually
+>    gates the body read
+>
+> They are duplicated because `networkObserver.js` runs in the page's MAIN world and cannot see
+> isolated-world globals (same reason, same pattern, as `background.js` mirroring
+> `RATE_LIMITER_KEY`). **BOTH MUST BE `false` BEFORE ANY BUILD.** Live-board proof is
+> **TC-CAPTURE-1** and has **not** been run — nothing may depend on this capture until step 3 of
+> it passes.
+>
+> ### 🔬 JSON reconnaissance — durable findings (cost a full day; do not re-derive)
+> Evidence was in `samples/` — **which is gitignored, see above.** These written findings are
+> therefore the surviving record. Full working in CHANGELOG.md 2026-07-31 recon entries.
+>
+> - **The join key is PROVEN.** A load card's inner `<div id="…">` equals
+>   `workOpportunities[].id`. Established from `samples/paired-card.html` +
+>   `samples/paired-search.json`, captured at the same moment: 13 values cross-checked with
+>   **zero mismatches** (payout, price/mile, distance, deadhead, stop count, both locations
+>   including postcodes, duration, STARTING_SOON).
+> - **Clicking a card fires zero requests to relay.amazon** — all detail already arrives with the
+>   list response. *(Observed by the dispatcher in DevTools; not independently measured here.)*
+> - **Both `/search` and `/similar` paginate, page size 50.** `paired-search.json`: 50 of 338 with
+>   `nextItemToken: 50`. So one response is **one page, not the board** — a JSON-sourced store
+>   would diverge from what is rendered.
+> - **Price per mile is derived, not a field**: `payout.value / totalDistance.value`.
+> - **Field availability:** `STARTING_SOON` present exactly (`workOpportunities[].tags[]`);
+>   trailer "P" has a *candidate* only (`…loads[].stops[].trailerDetails[].assetOwner`, per-stop,
+>   mapping unproven); the **price-increase highlight is ABSENT** from the JSON entirely.
+> - **Also absent:** per-segment duration. Stop times are UTC (`actions[].plannedTime`) and need
+>   per-stop timezone formatting the DOM supplies pre-formatted. The board's single
+>   loading-type label is **derived** from per-stop `loadingType`+`unloadingType`, not 1:1.
+> - **Cost:** ~7.7 kB/load raw JSON vs ~241 B/load for today's flat Phase-1 strings — **~32×**.
+>
+> **THE DECISION — narrow hybrid.** The DOM stays the source of truth for *what is on screen*.
+> JSON is looked up **by id, for the clicked load only**, to populate panel content. This keeps
+> pagination irrelevant (the DOM defines the rendered set) and memory bounded (one load at a
+> time). **Full JSON rendering is a NO-GO.**
+>
+> ### 🚫 Open and blocked — ONE remaining (was three)
+> 1. **Post-a-Truck cannot post R-type (own-trailer) loads** — blocked on a captured own-trailer
+>    upsert payload. `providedTrailerType` is hardcoded `AMAZON_PROVIDED` at
+>    `content/patApi.js:400-401`. ~24 equipment types exist across P and R variants; we support 4,
+>    all provided. Full record in BACKLOG.md — **do not guess the R-type enums**, a wrong guess
+>    posts a wrong truck to a live marketplace.
+>
+> *(The other two — inline-panel colour and filters-panel auto-collapse — are both RESOLVED. See
+> below and CHANGELOG.md 2026-08-05.)*
+>
+> ### 🆕 Filters-panel auto-collapse — IMPLEMENTED 2026-08-05, REWRITTEN same day, needs a browser pass
+> Blocked across four requests on "how do I read the panel's open/closed state?" Answered by a
+> live capture: Amazon **removes `div.filters__column` from the DOM** when collapsed, so
+> **presence is the state**. (The Filter *button* carries nothing — its attributes are
+> byte-identical in both states, no `aria-expanded` — which is what stalled every earlier
+> attempt, including three in June 2026.)
+>
+> `collapseFilterPanel()` (`content/panelCloser.js`, called from the existing
+> `closePanelsForStart()`, START only): `querySelector('div.filters__column')` → absent means
+> already collapsed, **return without clicking**; present means click once. No verification pass,
+> no second click, synchronous.
+>
+> **A first implementation was written and deleted the same day.** It clicked, then measured a
+> load card's `.left` before/after with a 20px dead band, and clicked a **second time to revert**
+> when it guessed wrong — making the panel flash open and shut whenever it was already collapsed.
+> Rejected and fully removed (`FILTER_ANCHOR_SELECTORS`, `findFilterAnchor`, `DEAD_BAND`, the
+> rAF/350ms wait, the async/await and the call-site `.catch` all went with it; file 210 → 161
+> lines). **Do not reintroduce pixel measurement on this path** — it is unreliable across
+> monitors and zoom levels and is not needed.
+>
+> ⚠️ **Unverified in a browser: that `div.filters__column` is really the panel's container.**
+> All 38 automated checks used a stubbed DOM and prove only the decision logic. **TC-FILTERS-1
+> step 5** checks the selector assumption directly (expect 1 when open, 0 when collapsed) and
+> should be done first; **step 2** confirms the flash is gone.
+>
+> ### 🎨 Inline-panel colour — RESOLVED 2026-07-31 (later), needs a visual pass
+> `#F5F5F5` moved from the wrong surface to the right one, confirmed by the dispatcher:
+> `--ext-leg-header-bg` (`utils/designTokens.js:48`, sole consumer `.ext-seg-header`)
+> `#CFDBFB → #F5F5F5`, and `.ext-seg-body` (`content/inlinePanel.js:209`) restored
+> `#F5F5F5 → #FFFFFF`. `nightMode.js` untouched; it already overrides both selectors with
+> `!important`, so dark mode is unaffected.
+>
+> **The move fixed both contrast regressions the earlier placement had introduced:** header
+> secondary text `#4A6570` 4.48 → **5.69**, stop address `#6B7280` 4.43 → **4.83** (bar 4.5:1).
+> Zebra striping is back to its original 1.073:1 — subtle by design, not "fixed".
+>
+> **One new thing to eyeball:** the header/body seam is now **1.090:1** (`#F5F5F5` on `#FFFFFF`).
+> The blue header used to read as an obvious band; now only its `border-bottom` separates them.
+> **TC-PANEL-COLOUR-2 step 3.** If it reads as one flat block, that is a design call to make —
+> it was outside this change's scope.
+>
+> ### 🧭 Future work — defined, NOT scheduled, nothing built
+> **Single-Tab Multi-Driver Monitor.** One tab monitors several drivers in different regions via
+> Amazon's five-city multi-origin search, splitting the merged list into per-driver sub-tabs.
+> Removes the cause of the multi-tab rate limiting rather than managing it. **Post-launch or
+> alongside launch, at Ihor's call — it is not part of the current phase and does not block the
+> Chrome Web Store submission.**
+>
+> Data is verified: Amazon does **not** attribute a load to the origin that matched it, so the
+> split is by **distance** from `workOpportunities[].loads[0].stops[0].location.latitude/longitude`
+> (populated 50 of 50 in the on-disk capture) to the configured city coordinates, which the
+> Post-a-Truck cities endpoint already supplies. Never match on city/state strings — formatting is
+> inconsistent within a single response.
+>
+> ⚠️ **Two things to settle before building:** the 2026-08-05 five-city capture is **not in
+> `samples/`**, so the "one refresh fires multiple `/search` calls" finding is recorded but
+> unverified here — and it is the one most likely to cause a wrong-data bug. And Amazon applies
+> **one radius to all five origins**, whose usability effect for widely separated drivers is
+> **untested**.
+>
+> Full record: **BACKLOG.md → Single-Tab Multi-Driver Monitor** (five numbered findings with
+> per-finding provenance), **docs/PRODUCT.md** (why it differentiates), **api-samples.md §6**
+> (captured evidence).
+>
+> ### Next, in priority order
+> 0. **TC-ORIGIN-1 step 6e** — newest fix: the panel used to flash to the top-left corner on
+>    **every** board refresh (the anchor row vanishes while Amazon re-renders the list). It now
+>    holds its last measured position through the gap. **Start the loop, let it refresh several
+>    times, and watch the panel — any flash to the corner is a regression.** Steps 6f (first paint
+>    still uses the corner fallback) and 6g (logout→login does not restore a stale coordinate)
+>    cover the two edges of the same change.
+> 0a. **TC-ORIGIN-2** — driver-name renaming. **Step 7 is the one that matters**: with the
+>    rename input open, type `r` / `f` / `/` / space / arrows and confirm **nothing happens on
+>    Amazon's board** — that is the key-event containment. Then step 3 (name present on first
+>    paint, no raw-city flash) and step 8 (input survives a mid-edit board refresh).
+>    **Known behaviour, not a bug:** names are per-profile, so a second tab showing the same city
+>    shows the same name — but a tab already open won't repaint until its list changes or it
+>    reloads.
+> 0a. **TC-ORIGIN-1** — origin-cities panel placement. Repositioned **twice** on
+>    2026-08-05; current placement anchors to Amazon's **"Showing N results"** line and follows it
+>    via a `requestAnimationFrame` loop.
+>    - **Step 1 first**: confirm in the console that the `"Origin city: "` spans exist, and that
+>      a leaf matching `/^Showing\b.*\bresults?$/` exists. Both assumptions are unverified in a
+>      browser; everything rests on them.
+>    - **Step 6a** is the reason for the rewrite: collapse/expand Amazon's left filter panel and
+>      watch the panel **travel** with the reflow rather than snapping into place afterwards.
+>    - **Step 6d**: after logout, confirm no ~60fps callback is left running. That is the specific
+>      risk a rAF loop introduces.
+>    - **Step 6**: the panel is now expected to clear the load cards, but **can overlap the chip
+>      band** in the narrow branch, and its relationship to Amazon's **sort control is
+>      unverified**. Both are judgement calls for the dispatcher.
+>    - **Step 8** (panel fully removed on logout) remains the regression risk.
+> 0a. **TC-FILTERS-1** — newest feature, and the only one that clicks Amazon's DOM. **Step 2** is
+>    the safety case: start with the panel already collapsed and confirm it ends collapsed, not
+>    open. The layout measurement it rests on has never run in a browser.
+> 0b. **TC-PANEL-COLOUR-2** — step 3 (header/body seam at 1.090:1) is a judgement by eye.
+> 1. Run the other outstanding test cases above (TC-RATELIMIT-7, TC-PARSE-2, TC-PANEL-2B) — they
+>    cover changes already in the working tree.
+> 2. TC-CAPTURE-1 on a live board, then turn both `CAPTURE_RESPONSES` flags back off.
+> 3. Unblock the three blocked items (one DevTools capture each — see BACKLOG.md).
+> 4. Pre-launch blockers that predate this session: cross-tab rate limiting unverified in a real
+>    multi-tab session (TC-RATELIMIT-1); the full six-point smoke checklist has **never** been
+>    run in a browser by an agent — every change this session was verified by Node harness only.
+> 5. Commit. The tree has a full session of uncommitted work.
+
+Last updated: **2026-07-31** (was 2026-07-30)
 
 **Full-codebase audit: 2026-07-30.** Scope: `content/`, `utils/`, `popup/`, `background.js`,
 `manifest.json`, `docs/`. Read-only except for a narrow authorised auto-fix class (dead CSS,
@@ -215,6 +429,40 @@ hover/keyboard behavior, live cross-tab sync, OFF-mode independent timers, OFF-m
 backoff still pausing/showing the banner, Reset default, persistence across restart).
 
 ## Що в роботі / In progress
+
+**RECON 2026-07-31 — JSON rendering: NO-GO on full replacement, conditional GO on detail
+enrichment.** No code changed. Analysed `samples/search-1/-2.json`, `similar-1.json`. Three
+unknowns: STARTING_SOON **found exactly** (`workOpportunities[].tags[]`), trailer "P" has a
+**candidate** (`…loads[].stops[].trailerDetails[].assetOwner` = AZNG/NCSL/HUBG, per-stop, mapping
+unproven), price-increase **ABSENT** (0 occurrences of `INCREASE`) — though we do not render it
+today either, so it blocks nothing current. The real blockers are pagination (one response = one
+page: 50 of 232, `nextItemToken` = offset; JSON holds far more than the board renders ⇒ false
+new-load alerts) and memory (~7.7 KB/load vs ~241 B today, **~32×**; ~1.8 MB per similar query per
+tab). Full detail in CHANGELOG.md 2026-07-31.
+
+**BUILT 2026-07-31 — flag-gated response-body capture (capture & discard), shipped OFF.**
+`utils/constants.js` + `content/networkObserver.js` + one additive listener in `content/content.js`.
+Renders nothing, stores nothing. **⚠ The flag is a TWO-FILE edit** — networkObserver runs in the
+MAIN world and cannot see `constants.js`, so it carries a mirrored constant (same pattern as
+background.js's RATE_LIMITER_KEY); the mirror is what gates the body read. `logger` is likewise
+absent in MAIN, so the summary is postMessaged over and logged isolated-side, which is what makes
+it silent at `DEBUG_LEVEL = 1`. Capture scope (`CAPTURE_PATHS`: search + similar) is deliberately
+separate from `WATCH_PATH` (search only) so `/similar` never feeds the rate limiter. 38 automated
+checks incl. a reproduced double-read failure and a byte-identical A/B of the OFF path against
+HEAD. **Live-board proof is TC-CAPTURE-1 and has NOT been run — nothing may depend on this
+capture until step 3 of it passes.**
+
+**RECON part 3, 2026-07-31 — paired capture analysed** (`samples/paired-card.html` +
+`paired-search.json`). **Join key PROVEN** — card's inner `<div id>` = `workOpportunities[3].id`,
+13 values cross-checked, **zero mismatches** (payout, ppm, distance, deadhead, stopCount, both
+locations incl. postcodes, duration, STARTING_SOON). **/search DOES paginate** — 50 of 338,
+`nextItemToken: 50` — so the "one response ≠ the board" finding now holds for the main feed, not
+just `/similar`. **Trailer "P" narrowed but NOT settled:** badge present ↔ `assetOwner: "AZNG"`
+(pickup stop only), but positive-only — needs a card *without* the badge. Ready-made candidates
+in the same file: `31e38152-e11b-4a04-8cc7-5ae71784aff7` (NCSL) or
+`5aa112da-cbbd-43f4-9b39-6d09e509a9f5` (HUBG). **New gap found:** the board's single loading-type
+label (Drop/Live/Live-Drop/Drop-Live) is derived from per-stop `loadingType`+`unloadingType`, not
+1:1 — rule unknown from one card. Go/no-go unchanged.
 
 **FIXED 2026-07-31 — payout parsed as null for the entire "Similar matches" section**
 (`content/loadParser.js`, one selector). Cause: `.wo-total_payout` matches whole class tokens, and
@@ -454,3 +702,4 @@ intent was broader.
   spec or changelog entry. Do not commit or build on top of this until the user explicitly
   confirms intent, scope, and review process for a booking feature. See SAFETY.md "Safety
   rules → Unsure about booking safety → ASK".
+

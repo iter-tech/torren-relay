@@ -68,7 +68,45 @@ Gates:
 Intent logged as `ALLOWED_CLICK_INTENTS.CLOSE_DETAIL_PANEL`.
 Selector strategy: see AMAZON_SELECTORS.md → Detail panel close.
 
-### Click 4 — Fast Book sequence
+### Click 4 — Filters panel collapse (panelCloser.js → collapseFilterPanel())
+
+**RESTORED 2026-08-05.** This section was deleted in June 2026 when three attempts at the
+feature were abandoned; the feature is back with a different mechanism and is re-authorized here.
+
+**Rationale:** Amazon's own Filter toggle shows/hides the left filters panel. It is a display
+control — it books nothing, submits nothing, and changes no load state. Clicking it is
+equivalent to the dispatcher clicking it himself.
+
+**Safety:** `isForbiddenElement()` verifies the button is not a booking element before the
+click, exactly as every other click site here.
+
+**EXACTLY ONE CLICK, EVER — and only when the panel is confirmed open.** The control is a
+toggle carrying no readable state (verified live 2026-08-05: attributes are byte-identical open
+vs collapsed, no `aria-expanded` anywhere). But the *panel* does carry state: Amazon **removes
+`div.filters__column` from the DOM** when it is collapsed. A single `querySelector` therefore
+settles the question before anything is clicked. Absent ⇒ already collapsed ⇒ **return without
+clicking**.
+
+**Superseded 2026-08-05 (same day):** the first implementation of this click site measured a
+load card's `getBoundingClientRect().left` before and after clicking and issued a **second**
+click to undo itself when it guessed wrong. That made the panel visibly flash open and shut
+whenever it was already collapsed. It has been deleted. **No layout measurement, no
+click-then-verify, and no second click exist on this path any more.** If either reappears, this
+section is out of date.
+
+Gates:
+1. `document.querySelector('div.filters__column')` is non-null (panel is genuinely open).
+   **Absent ⇒ no click at all**
+2. A `[role="img"][aria-label]` whose trimmed label is `Filter` exists, and `.closest('button')`
+   from it is non-null. **Absent ⇒ no click at all**
+3. `isForbiddenElement(btn)` === false  **(MANDATORY)**
+4. Fires on loop START only (`tabState 'running'` subscriber, `val === true`). Never on stop,
+   pause, resume, or page load. The panel is never reopened automatically.
+
+Intent logged as `ALLOWED_CLICK_INTENTS.CLOSE_FILTER_PANEL`.
+Selector strategy: see AMAZON_SELECTORS.md → Filter button.
+
+### Click 5 — Fast Book sequence
 Allowed to programmatically execute the booking sequence (including interacting with Amazon's DOM booking buttons) when the user interacts with the extension's explicit 'Fast Book' trigger.
 ---
 

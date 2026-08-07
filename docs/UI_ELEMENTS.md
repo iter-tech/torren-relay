@@ -43,6 +43,95 @@ section. Logged out ⇒ none of the elements below exist in the DOM.
 | ext-memory-tooltip | div | Child of `ext-memory-info`. Positioned absolute under the info icon, shown via `.ext-tooltip-visible` class. Text set with `textContent` only. **Note (2026-07-30): this was silently clipped away by `#ext-sidebar{overflow:hidden}` and had never actually rendered**; fixed as a side effect of adding `ext-rate-limit-tooltip` — see the `ext-sidebar` row. |
 | (ext-scanline) | div.ext-scanline | No testid — purely decorative. CSS-only animation along bottom edge when running. Speed tied to `--ext-scan-dur` CSS var. |
 
+### Active origin cities panel (`content/originCities.js`) — new 2026-08-05
+
+Floating panel listing the origin cities currently active in Amazon's load-board filters. Built
+by `activateExtensionUI()`, removed by `deactivateExtensionUI()`. Read-only with respect to
+Amazon — no clicks, no writes, no requests.
+
+| testid | Type | Function |
+|--------|------|----------|
+| ext-origin-cities | div[role=complementary] | Panel container, `aria-label="Active origin cities"`. `position:fixed` with **`top`/`left` written by JS at runtime, never in CSS** — see "Placement is measured" below. Wrapping flex **row**: `display:flex; flex-wrap:wrap; align-items:center; gap:8px`, `max-width:calc(100vw - 16px)`. `z-index:2147483646`, one below the sidebar so the sidebar wins any overlap. **Repositioned 2026-08-05** from a fixed bottom-left pin. |
+| ext-origin-cities-title | div | Caption "Active origin cities", 10px uppercase muted. **Inline at the left of the row**, not a block heading above it; `flex-shrink:0` keeps it whole when the cities wrap. |
+| ext-origin-cities-list | div | Flex **row**, `flex-wrap:wrap; gap:6px`. Cities run left to right and wrap to a second row only when they do not fit. |
+| ext-origin-city | div[role=button] | One pill per city. **Clickable** (`tabindex="0"`, Enter/Space also open it) — clicking swaps it for `ext-origin-name-input`. Carries `data-city` = the exact extracted city string, which is also the storage key. Subtle token-coloured pill (`--ext-n100` bg, `--ext-n200` border): city values contain their own comma, so whitespace alone reads as one run-on string. `white-space:nowrap`; `title` shows the full label plus a rename hint. |
+| ext-origin-city-label | div | The city text when **no** driver name is set — the pill's only child in that state. `textContent` only (page data). |
+| ext-origin-driver-name | div | The driver name, primary label, shown when a name **is** set. 12px/600, `--ext-n700`. `textContent` only — dispatcher-entered string, never `innerHTML`. |
+| ext-origin-city-sub | div | The city text beneath a driver name — 10px, `--ext-n500`. **Never dropped**: the dispatcher must always be able to see which city a name belongs to. (`--ext-text-muted` does not exist in `designTokens.js`; `--ext-n500` is the nearest existing muted token and matches this panel's own caption.) |
+| ext-origin-name-input | input[type=text] | The rename field. Pre-filled with the current name, empty if unnamed; `placeholder` is the city; `maxlength="24"`. **Enter or blur commits, Escape cancels, empty clears.** Accent border, `--ext-surface` background. |
+
+**Driver names (2026-08-05).** Persisted in `chrome.storage.local` under
+`ORIGIN_DRIVER_NAMES_KEY` (`extOriginDriverNames`) as `{ "LITTLE ROCK, AR": "Mike" }` — key is the
+city string exactly as extracted. Declared **outside `STORAGE_KEYS`** so "Reset to Defaults"
+(which removes `Object.values(STORAGE_KEYS)`) cannot wipe them. **Never pruned** when a city
+leaves the filters. Loaded before the first render, so no raw-city flash; a storage failure logs
+and renders plain city names.
+
+Names are **per-profile, not per-tab** — the same city shows the same name in every tab. An
+already-open tab does **not** repaint when another tab renames (no `chrome.storage.onChanged`
+listener); it picks the change up on its next list change or reload.
+
+**Max name length 24**, enforced on the input and again on commit. Long names make the panel
+**grow and wrap**, never truncate.
+
+**Key events (`keydown`/`keypress`/`keyup`) are stopped at the panel** so typing a driver name
+cannot reach Amazon's document-level shortcut handlers. `stopPropagation`, not
+`stopImmediatePropagation` — the input's own Enter/Escape handlers must still run.
+
+**Anchored to the results-count line, placed by a rAF loop (rewritten 2026-08-05).** The anchor is
+Amazon's `Showing N results` text — matched by TEXT, **never by class or id**: the first **leaf**
+element (no element children) whose trimmed `textContent` matches `/^Showing\b.*\bresults?$/`.
+`findAnchorRow()` walks up to the nearest **ancestor** with a non-zero height — that is the row.
+
+| Branch | When | Placement |
+|---|---|---|
+| **BESIDE** | ≥200px free to the right of the text (measured against the **viewport**, since the panel is `position:fixed`) | vertically centred on the row via `transform:translateY(-50%)`, left = text's right + 16px |
+| **BELOW** | under 200px free | `row.bottom + 6px`, left = `row.left`, transform cleared |
+| **fallback** | anchor not found | `top:8px / left:8px` + `logger.warn` |
+
+Each branch logs once on transition, not per frame.
+
+**Why this anchor, not the chips:** the results-count line sits **above** the chip band, so the
+panel no longer lands on the load list — which the previous below-the-chips placement did.
+
+**Placement runs on a `requestAnimationFrame` loop, not a debounce.** The dispatcher collapsing
+Amazon's left filter panel reflows the whole board; a debounced reposition made the panel visibly
+**snap** into place afterwards. The loop reads the anchor every frame and writes `top`/`left` only
+when either moved by more than 0.5px. Started on build, cancelled in teardown — leaving it running
+after logout would be a permanent ~60fps callback. The former `resize` and `scroll` listeners were
+**removed as redundant**: both only ever signalled "the anchor may have moved", which the loop
+observes directly.
+
+**Cost per frame: 2 `getBoundingClientRect()` calls, 0 style writes when still.** The anchor
+element is **cached**; it is not re-queried per frame. A full-document rescan happens only when
+the cached node leaves the DOM.
+
+**⚠️ Overlap.** It cannot cover the results-count text (BESIDE starts 16px to its right; BELOW
+clears the whole row). It **can** cover the **chip band** in the BELOW branch, which places it at
+`row.bottom + 6px` — exactly where the chips are — at narrow widths. Its relationship to Amazon's
+**sort control** is **unverified**: that control's position relative to the results-count row has
+never been captured. z-index `2147483646` vs the sidebar's `2147483647`; against Amazon's own
+elements it is **unverified** — no capture of Amazon's z-index exists in this repo.
+| ext-origin-cities-empty | div | Shown instead of rows when no origin filter is applied: "No origin cities in filters". Italic/muted. The panel stays visible rather than disappearing, so its absence never reads as a broken extension. |
+| ext-origin-cities-style | style | Injected stylesheet, id `ext-origin-cities-style`, removed on teardown. |
+
+**Extraction is text-based, never class-based.** The chips are `div.css-1w1nhw5 > div.css-e7fmj9 >
+span`, all generated CSS-in-JS hashes. `readActiveOriginCities()` instead collects every `<span>`
+whose trimmed `textContent` starts with `"Origin city: "` and slices off that prefix. It trims
+(Amazon ships stray whitespace on this board — the Filter button's `aria-label` is literally
+`"Filter  "`) and de-duplicates (a nested outer span's `textContent` also matches the prefix).
+
+**Night mode needs no work.** Every colour is a `var(--ext-*)` design token, and those already
+carry `html.ext-night` overrides in `utils/designTokens.js`. `content/nightMode.js` was **not**
+modified.
+
+**Live updates** via a debounced (200ms) `MutationObserver` on `document.body`
+(`childList` + `subtree`) — anchored on body for the same reason `loadObserver.js` is, since
+Amazon is a React SPA that unmounts and remounts the filter containers. Two self-trigger guards:
+mutations originating inside the panel are ignored, and `refreshOriginCities()` re-renders **only
+when the extracted list actually changed**, which makes a feedback loop impossible even if the
+first guard were loosened.
+
 **Removed sidebar elements:** `sidebar-surge-label`, `sidebar-surge-threshold` (removed 2026-06-18 — per-tab threshold still live in tabState/priceSurge, just no longer surfaced in sidebar UI). `ext-rate-limit-banner`, `ext-rate-limit-text`, `ext-rate-limit-info`, `ext-rate-limit-tooltip` (removed **2026-07-31** by PM decision — the paused/rate-limit message and the "i" icon that existed only to accompany it. The backoff/pause behaviour behind it is unchanged and still live; **nothing about the paused state renders in the UI any more**. Full reinstatement record — elements, CSS, call sites, driving state — in BACKLOG.md "Sidebar paused/rate-limit message"). Side effects of that removal: `ext-slider-speed`/`ext-slider-value` no longer hide during a pause (the hiding existed only to make room for the banner), and `ext-shared-rate-status` still hides while paused, so the bar is simply 20px shorter with no explanation shown.
 
 **Removed elements (no longer in DOM):** `ext-btn-toggle`, `ext-status`, `ext-count`.
@@ -201,14 +290,14 @@ Injected below the clicked load card. No data-testid (dynamic, managed by `PANEL
 | Class | Type | Function |
 |-------|------|----------|
 | ext-inline-panel | div | Outer wrapper. `id="ext-inline-panel"`. **`width:100%;box-sizing:border-box` added 2026-07-20** — fixes a layout bug where the panel (inserted as a sibling of the load card, likely into a flex/grid list container) shrank to its content's natural width instead of filling the card's row, making the segment table below render at roughly half width, left-aligned. |
-| ext-seg-header | div | Collapsible segment header (multi-segment loads only). `display:grid` with 6 fixed columns: `40px minmax(0,3fr) 1.4fr 1fr 1fr 32px` — number / route / dist·time / action / status / arrow. Always 6 child spans. Toggles `ext-open` on self + paired body. |
+| ext-seg-header | div | Collapsible segment header (multi-segment loads only). `display:grid` with 6 fixed columns: `40px minmax(0,3fr) 1.4fr 1fr 1fr 32px` — number / route / dist·time / action / status / arrow. Always 6 child spans. Toggles `ext-open` on self + paired body. **Background `var(--ext-leg-header-bg)` = `#F5F5F5` as of 2026-07-31** (history: `#1B3A57` dark navy → `#DCE6E9` → `#CFDBFB` → `#F5F5F5`; the last move brought the spec colour here from `.ext-seg-body`, which had been the wrong surface). Light mode only — `content/nightMode.js:130` overrides `background-color` with `DK_HIGH !important`, so the token value is never exercised in dark mode. Text on it: `#1F3A45` base/route codes (11.01:1) and `#4A6570` distance/arrow/chevron (5.69:1), both clearing WCAG AA. **Note:** against the now-`#FFFFFF` body this header is only 1.090:1, so the `border-bottom:1px solid #C4D2D6` is what actually separates the two. |
 | (ext-route-origin) | span | Origin code, column 1 (`1fr`) of `.ext-seg-route` 3-column grid. Monospace, centered, wraps within its half. `min-width:0`. |
 | (ext-route-arrow) | span | Route connector `→`, column 2 (`auto`) — glyph width only, always centered. Bold, 1.15em, `#1a5c38`. |
 | (ext-route-dest) | span | Destination code, column 3 (`1fr`). Monospace, centered, wraps within its half. `min-width:0`. Contains an `.ext-stop-num` circle (destination global stop#) prepended before the code text. |
 | (ext-seg-loaded) | class on `.ext-seg-status` | "Loaded" — plain text, `#1a5c38` green, font-weight 500. No pill. |
 | (ext-seg-empty) | class on `.ext-seg-status` | "Empty" — plain text, muted `#878787`. No pill. |
 | (ext-seg-action) | span | Action text (Drop/Live/Preloaded) — plain text, muted `#565959`. No pill. |
-| ext-seg-body | div | Segment table container. `display:none` until `ext-open`. |
+| ext-seg-body | div | Segment table container. `display:none` until `ext-open`. **Background `#FFFFFF`** — briefly `#F5F5F5` on 2026-07-31 before that colour was moved to `.ext-seg-header` (wrong surface); restored the same day. Light mode only — `content/nightMode.js:224` overrides it with `DK_HIGH !important`. Text on it: `.ext-stop-addr` `#6B7280` at 4.83:1 and `.ext-inline-panel__table td b` `#111827` at 17.74:1, both clearing AA. Even-row zebra tint `var(--ext-n100)` = `#f5f7fa` sits at 1.073:1 against it — its original designed subtlety, decorative only. |
 | ext-inline-panel__table | table | Stop rows. `table-layout:fixed`, columns 40/20/20/20% (Stop widest; Equipment/Id, Arrival, Departure equal — unchanged by the 2026-07-20 fix, was already correct). **2026-07-20:** cell padding unified to `10px 14px` for both `th`/`td` (was `8px`/`10px`, inconsistent); `border-bottom` unified to `var(--ext-n200)` for both (was `var(--ext-n200)`/`var(--ext-n100)`, a mismatched shade); new `border-right:1px solid var(--ext-n200)` on all but the last column (column separators, matching Amazon's own current bordered-table style — previously row separators only); `th` gained `background:var(--ext-n100)` (header now visually distinct from data rows — previously no background at all) and explicit `vertical-align:middle`. All new colors are `var(--ext-n200)`/`var(--ext-n100)`; `content/nightMode.js`'s existing overrides (universal border-color reset + explicit `thead th`/`tbody td` rules) already adapt these for Night Mode — no `nightMode.js` change made. |
 | ext-stop-num | span | Blue circle with stop number. `display:inline-flex`, 18×18 px, `#185FA5` background, white text, `border-radius:50%`, 11px. Used in three places: (1) stop-detail table rows; (2) inside `.ext-route-dest` in segment header rows (destination global stop#); (3) inside `.ext-seg-title` in segment header rows (origin global stop#, `margin-right:0` override applied). |
 | ext-stop-addr | div | Grey address line under stop name. |

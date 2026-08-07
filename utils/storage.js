@@ -59,6 +59,18 @@ const RATE_LIMITER_KEY = 'extRateLimiterState';
 // "how many tabs are active" — see background.js's ACTIVE_TABS_KEY comment.
 const ACTIVE_TAB_COUNT_KEY = 'extActiveTabCount';
 
+// Driver names the dispatcher assigns to origin cities in the origin-cities panel
+// (content/originCities.js). Shape: { "LITTLE ROCK, AR": "Mike", ... } — key is the city
+// string EXACTLY as extracted from Amazon's filter chip, value is the name.
+//
+// Deliberately NOT in STORAGE_KEYS, same reasoning as SUPABASE_SESSION_KEY and
+// AUTH_PENDING_KEY above: this is dispatcher-entered DATA, not a settings toggle, and
+// "Reset to Defaults" wiping every driver name would be a destructive surprise.
+//
+// Entries are never pruned. A city dropping out of the current filters keeps its name, so it
+// comes back already labelled the next time that city is searched.
+const ORIGIN_DRIVER_NAMES_KEY = 'extOriginDriverNames';
+
 const storage = {
 
   async get(key, defaultValue) {

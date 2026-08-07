@@ -99,6 +99,30 @@ window.addEventListener('message', function (ev) {
   }
 });
 
+// DEVELOPMENT DIAGNOSTIC (2026-07-31) — response-body capture summary, shipped OFF.
+//
+// Deliberately a SEPARATE listener from the REPORT_RESULT relay above, not a branch inside
+// it: that relay, the rate-limit path and the abort handling are done and verified, and this
+// keeps their diff at zero lines.
+//
+// content/networkObserver.js runs in the MAIN world and has no `logger` and no DEBUG_LEVEL,
+// so it postMessages five counters across and this side does the logging — which is what
+// makes the line level-gated. logger.log needs DEBUG_LEVEL >= 3; shipped is 1, so this is
+// silent in a stock build even if the MAIN-world mirror is left on by accident.
+//
+// The payload is counters only — count, total, cursor, length. No ids, cities, addresses or
+// payouts, by construction on the sending side. Nothing here is stored or rendered.
+window.addEventListener('message', function (ev) {
+  if (ev.source !== window) return;
+  var d = ev.data;
+  if (!d || d.__extRelayCaptureSummary !== true) return;
+  if (typeof CAPTURE_RESPONSES !== 'undefined' && !CAPTURE_RESPONSES) return;
+  logger.log('networkObserver', 'response captured (dev switch)', {
+    endpoint: d.endpoint, workOpportunities: d.woCount,
+    totalResultsSize: d.totalSize, nextItemToken: d.nextToken, bodyLength: d.bodyLength
+  });
+});
+
 // Shared heap reader — used by sidebar.js's memory indicator (polled independently
 // of the orchestrator loop). Returns null where performance.memory is unsupported.
 function getHeapUsageRatio() {
@@ -407,8 +431,14 @@ async function activateExtensionUI() {
     buildSidebar();
     step = 'initManualToggle';
     initManualToggle();
+    // Origin-cities panel (2026-08-05). Last, and deliberately not guarded by `step`:
+    // buildOriginCitiesPanel() swallows its own errors, so a failure there degrades to "no
+    // panel" instead of rolling back the whole activation and costing the dispatcher the
+    // sidebar and the monitoring loop.
+    step = 'buildOriginCitiesPanel';
+    buildOriginCitiesPanel();
 
-    _extActivated = true; // ONLY after all three steps completed without throwing
+    _extActivated = true; // ONLY after every step completed without throwing
     logger.log('content', 'extension UI activated — waiting for manual Start');
   } catch (e) {
     // logger.error is level 1, so this survives the shipped quiet DEBUG_LEVEL — a failed
@@ -453,6 +483,11 @@ function deactivateExtensionUI() {
   // as one shared function so this stays authoritative: whichever path (a real deactivate,
   // or a mid-flight tick catching the closed gate) runs last, the result is identical.
   clearPipelineDom();
+
+  // Origin-cities panel (2026-08-05) — removes the panel, its <style>, its MutationObserver
+  // and any pending debounce. Without this a logout would leave a floating panel and a live
+  // observer on the page, breaking the "reverted to fully untouched" guarantee below.
+  removeOriginCitiesPanel();
 
   var sidebarEl = document.getElementById('ext-sidebar');
   if (sidebarEl) {

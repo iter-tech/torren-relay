@@ -2,6 +2,752 @@
 
 ## [Unreleased]
 
+### 2026-08-05 — FIX: origin panel no longer flashes to the corner on every board refresh
+
+**File:** `content/originCities.js`, the not-found branch of `positionOriginPanel()` plus the
+cache it reads/writes. Nothing else touched.
+
+**The bug.** Every refresh clears and re-renders Amazon's load list, and the "Showing N results"
+row — the panel's anchor — is briefly absent while that happens. The rAF loop found no anchor,
+took the not-found fallback, and slammed the panel to `top:8px / left:8px`. A moment later the
+row returned and it snapped back. Once per refresh, so continuously while the loop runs.
+
+**The fix — hold the last good position.** A new `_originHasMeasured` flag records whether the
+anchor has *ever* been measured successfully. In the not-found branch:
+- **measured before** ⇒ `return` immediately, touching nothing. The panel's inline `top`/`left`
+  are already right, so leaving them alone *is* holding position.
+- **never measured** ⇒ the `top:8px / left:8px` fallback still applies. That is genuine first
+  paint, where there is no last-good position to hold.
+
+`_originHasMeasured` is armed only by a real measurement — `applyOriginPosition()` sets it when
+`mode !== 'fallback'` — so a first-paint fallback is never mistaken for a good position and is
+correctly replaced the moment the row appears.
+
+**No timeout, no retry counter, no visibility toggle.** The hold is a bare early return. The loop
+already runs every frame, so a missing anchor for a few frames needs no timing logic — it just
+keeps the last value until the anchor is back. Asserted in the harness that none of those
+mechanisms exist in the code.
+
+**Logged once, not per frame.** `_originHoldLogged` gates a single `logger.log` on entering a
+hold and resets when the anchor returns, so a later gap logs its own line. The
+`results-count text not found` **warn** no longer fires during refresh gaps at all — it is now
+reserved for the genuine never-measured case, which makes it meaningful again.
+
+**⚠️ Teardown: CLEARED, not carried over — you asked me to confirm which.** `_originHasMeasured`
+and `_originHoldLogged` are both reset to `false` in `removeOriginCitiesPanel()`, alongside the
+existing `_originLastTop`/`_originLastLeft` reset. Without that, a logout→login cycle would start
+with the hold already armed and the previous session's coordinates still cached — so a rebuild
+whose anchor had not yet appeared would hold a stale position from a board that may have scrolled
+or resized in between. Cleared, the rebuild correctly treats itself as a first paint. Verified by
+a logout→login test that asserts the rebuild does **not** restore the old coordinate.
+
+**⚠️ Known remaining path, deliberately not changed.** The `catch` in `positionOriginPanel()`
+still applies the corner fallback. It is a different failure mode (an exception during measuring,
+not a missing anchor) and the task scoped this fix to the not-found branch. If an exception ever
+does fire mid-refresh the panel would still snap. Say the word and it becomes the same two lines.
+
+**Verified — 26 checks, plus 60-check rename and 47-check positioning suites re-run green.**
+Removing the results row and pumping **60 frames** (a full second) leaves the position byte-identical
+with **zero style writes** and no fallback warn; the row returning resumes measuring; a second gap
+logs its own hold; a never-measured panel still takes the corner fallback and is correctly
+replaced by a late-arriving row; and the logout→login cycle does not restore a stale coordinate.
+One failure during the run was a harness bug matching `retry`/`attempts` inside comments — including
+the fix's own comment saying it uses neither. **Six-point smoke checklist NOT RUN.**
+
+### 2026-08-05 — Origin-cities panel: driver-name renaming
+
+**Files:** `content/originCities.js` (feature), `utils/storage.js` (+`ORIGIN_DRIVER_NAMES_KEY`).
+Extraction, dedupe, the self-trigger guard, the anchor logic, the rAF loop and teardown are
+unchanged apart from two guards and resetting the new state.
+
+**What it does.** Each city pill is clickable. Clicking swaps it for a text input pre-filled with
+the current name (empty if unnamed). **Enter or blur commits, Escape cancels, an empty value
+clears the name** and reverts the pill to city text alone. Once named the pill shows the driver
+name as the primary label with **the city still beneath it**, smaller and muted — the dispatcher
+can always see which city a name belongs to.
+
+**⚠️ `var(--ext-text-muted)` does not exist** in `utils/designTokens.js` (0 occurrences). Used
+**`--ext-n500`**, the nearest existing muted token and the one this panel's own caption already
+uses. No new colour invented, `nightMode.js` untouched.
+
+**Storage.** New `ORIGIN_DRIVER_NAMES_KEY = 'extOriginDriverNames'` — one object, city string
+exactly as extracted → driver name. Declared **outside `STORAGE_KEYS`**, deliberately: "Reset to
+Defaults" does `chrome.storage.local.remove(Object.values(STORAGE_KEYS))` (`popup.js:617`), and
+wiping every driver name on a settings reset would be a destructive surprise. Same reasoning as
+`SUPABASE_SESSION_KEY`/`AUTH_PENDING_KEY`. **Entries are never pruned** — a city leaving the
+filters keeps its name and comes back labelled.
+
+**No flash.** The first render is deferred until stored names load: `refreshOriginCities()`
+early-returns while `_originNamesReady` is false **without recording the signature**, so the
+load callback still renders. A storage failure logs with context and renders plain city names.
+
+**Two new guards in the refresh path** — both required, both minimal:
+1. `!_originNamesReady` — prevents the raw-city flash above.
+2. `_originEditingCity !== null` — **Amazon re-renders the board on every refresh tick**, which
+   would otherwise destroy the input under the dispatcher's cursor mid-typing. Neither records
+   the signature, so the deferred render lands as soon as the condition clears.
+
+**Keystroke containment — which events and why.** `keydown`, `keypress` and `keyup` are all
+stopped at the **panel** element. Amazon's board listens for keys at document level; typing a
+driver name must not trigger its shortcuts. All three because handler styles differ — `keydown`
+for modern shortcuts, `keypress` for legacy, `keyup` for toggles. **`stopPropagation`, not
+`stopImmediatePropagation`**: our own input handlers sit on a descendant and have already run by
+the time bubbling reaches the panel, and cancelling them would break Enter/Escape.
+
+**⚠️ Same city in two saved-search tabs — actual behaviour, not a design guess.** Names are keyed
+by city string in `chrome.storage.local`, which is **per-profile, not per-tab**. So the name
+follows the city: any tab whose filters include `LITTLE ROCK, AR` shows the same driver name.
+**But a tab that is already open does not repaint when another tab renames.** There is no
+`chrome.storage.onChanged` listener here, so tab B picks the change up only when its own city
+list changes or on reload. Adding live cross-tab sync is a small addition following the pattern
+`sidebar.js` already uses — **not done, because it was not asked for.**
+
+**⚠️ Max name length: 24 characters**, enforced twice — `maxlength` on the input stops typing, and
+a `.slice(0, 24)` on commit stops a paste getting past it. **Layout: the panel GROWS, it does not
+truncate.** Each pill is `white-space:nowrap`, the panel is `flex-wrap:wrap` with
+`max-width:calc(100vw - 16px)` — so a long name widens its pill, and once the row exceeds the max
+width the pills wrap to a second line and the panel grows taller. In the BESIDE branch it stays
+vertically centred while growing (`translateY(-50%)`); in the BELOW branch it extends downward
+and can reach further over the chip band.
+
+**Verified — 60 checks + a 47-check regression run of the positioning suite, no browser.** Real
+module, stub DOM and stub storage: two-line rendering with the city retained; names loaded before
+the first render (observer firing early does **not** produce a raw-city render); pre-filled and
+empty inputs; Enter/blur commit and persist; **blur after Enter does not double-commit**;
+**Escape reverts and writes nothing, and the following blur does not commit the abandoned
+value**; empty/whitespace clears the entry; a 60-char paste is sliced to 24; the name survives
+the city leaving the filters and a teardown+rebuild; storage failure renders plain names without
+throwing; **an open input survives a mid-edit board refresh with the typed value intact**, and
+the deferred render catches up after commit; all three key events stopped; teardown leaves
+nothing while **stored names survive**. Three failures during the run were harness faults, not
+code: a greedy regex spanning the whole file, a stub predating the panel's listeners, and a
+baseline captured before the now-deferred first render. **Six-point smoke checklist NOT RUN.**
+
+### 2026-08-05 (later still) — Origin panel: anchored to the results-count line, follows via rAF
+
+Positioning rewrite of `content/originCities.js`. Two parts of the same logic: a new anchor, and
+a new update mechanism. Extraction, dedupe, the self-trigger guard and teardown were out of scope
+and are unchanged apart from cancelling the new loop.
+
+**Removed:**
+
+| Removed | What it was |
+|---|---|
+| `findChipElements()` | page-wide scan for laid-out origin-city chips |
+| `getChipElements()` + `_originChipEls` | the chip cache |
+| `ORIGIN_PANEL_GAP_PX` | the 8px gap under the chip band |
+| `positionOriginPanel()` call inside `refreshOriginCities()` | repositioning on the 200 ms debounced path |
+| `_originOnReflow`, `_originPosDebounce` | the debounced reflow handler and its timer |
+| `window.addEventListener('resize' / 'scroll', …)` | both reflow listeners, and their teardown |
+
+Verified by grep: zero occurrences of any of them remain. Nothing behind a flag or commented out.
+
+**Why the anchor moved off the chips.** The chip band sits *below* the results count, so a panel
+glued under the chips sat directly on top of the load list — the previous entry recorded that it
+*would* cover the first load card. Anchoring to the results-count line, which sits **above** the
+chips, puts the panel in the gap between them instead.
+
+**PART 1 — new anchor.** `findAnchorElement()` matches by TEXT, never class or id: the first
+**leaf** element (no element children) whose trimmed `textContent` matches
+`/^Showing\b.*\bresults?$/`. `findAnchorRow()` then walks up to the nearest **ancestor** with a
+non-zero height — that is the row. Two branches:
+- **BESIDE** — vertically centred on the row, left edge at the *text's* right + 16px. Centring
+  uses `transform: translateY(-50%)`, so the panel's own height is never measured.
+- **BELOW** — when free width to the right is under 200px: `row.bottom + 6px`, aligned to
+  `row.left`. Free width is measured against the **viewport**, not the row, because the panel is
+  `position:fixed` and the viewport edge is what actually clips it.
+
+Each branch logs once **on transition**, not every frame. Anchor not found ⇒ `logger.warn` with
+the pattern and what was missing, plus `top:8px / left:8px`; also applied in the `catch`.
+
+**PART 2 — rAF follow loop replaces the debounce.** The dispatcher collapses Amazon's left filter
+panel, the whole board reflows, and the panel is glued to content that moves. A debounced
+reposition made it visibly **snap** into place after the reflow finished. The loop reads the
+anchor rect every frame and writes `top`/`left` only when either changed by more than **0.5px**,
+so it travels with the content instead. Started in `buildOriginCitiesPanel()`, cancelled in the
+existing teardown.
+
+**The resize and scroll listeners were removed as redundant, not merely superseded** — both
+existed only to signal "the anchor may have moved", which the loop now observes directly.
+
+`refreshOriginCities()` is back to being purely about the list: its early-return on an unchanged
+signature is untouched, and it no longer positions anything.
+
+**⚠️ MEASURED COST PER FRAME — asked for explicitly.** Steady state is **2 `getBoundingClientRect()`
+calls and 0 style writes**, counted by the harness over 10 frames (20 reads / 0 writes).
+- The anchor is **CACHED** (`_originAnchorEl`). It is **not** re-queried per frame — a
+  full-document `querySelectorAll('*')` at 60fps would be indefensible. Measured: **zero**
+  rescans across 10 steady frames on a 40-chip page.
+- The rescan runs only when the cached node leaves the DOM (Amazon's React re-render); the
+  harness confirms exactly one rescan in that case.
+- It was **3** reads per frame in first draft — `findAnchorRow()` measured the row and the caller
+  measured it again. `findAnchorRow()` now returns `{ el, rect }` so the caller reuses it.
+- A still board costs **zero** style writes, so no layout is invalidated when nothing moves.
+  Sub-0.5px jitter is also confirmed not to write.
+
+**⚠️ OVERLAP — reported, not silently adjusted.**
+- **Results-count text:** cannot overlap it in the BESIDE branch — the panel starts 16px to its
+  right. In the BELOW branch the panel drops under the whole row, so it clears the text too.
+- **Chip band:** **YES, it can overlap.** In the BELOW branch the panel is placed at
+  `row.bottom + 6px`, which is exactly where the chips live. At narrow widths (under ~200px free
+  to the right) the panel will sit on top of the chip band. It no longer reaches the load cards,
+  which was the point, but it has traded that for covering the chips in the narrow case.
+- **Sort control:** unknown. Its position relative to the results-count row has never been
+  captured, so I cannot say whether it sits inside that row to the right. If it does, the BESIDE
+  branch would cover it. **Flagged for the dispatcher rather than guessed at** —
+  TC-ORIGIN-1 step 6.
+
+**Verified — 47 checks, no browser.** Real module, stub DOM with real rects and a manually pumped
+rAF so frames are deterministic: both branches and their exact arithmetic; `Showing 1 result`
+(singular) and `Showing 1-50 of 338 results` both anchoring while `Showing results for your
+search` correctly does not; anchor-missing fallback with the warn logged once rather than every
+frame; following within a **single frame** when the board shifts 240px; the cost counters above;
+the render path no longer positioning; and teardown leaving **zero** queued frames with a rebuild
+restarting exactly one loop. Two failures during the run were a genuine spec mismatch I fixed in
+the code (`findAnchorRow` started at the element instead of its parent, centring on the text
+rather than the row); one was a harness bug matching `setInterval` inside a comment.
+**The six-point smoke checklist is NOT RUN.**
+
+### 2026-08-05 (later) — Origin-cities panel REPOSITIONED: measured placement, horizontal layout
+
+Layout and position rewrite of `content/originCities.js`. **The old positioning is deleted, not
+disabled.** Extraction, dedupe, the self-trigger guards and teardown were explicitly out of scope
+and are unchanged.
+
+**Removed:**
+
+| Removed | What it was |
+|---|---|
+| `left:12px; bottom:12px` on `#ext-origin-cities` | the bottom-left corner pin |
+| `flex-direction:column; gap:4px` on the list | the vertical stack |
+| `max-height:40vh; overflow-y:auto` on the list | scroll containment, only needed by a tall vertical stack |
+| `min-width:150px; max-width:230px` on the panel | narrow-column sizing, wrong for a horizontal band |
+| `margin-bottom:6px` on the title | the block heading's spacing above its own line |
+| `overflow:hidden; text-overflow:ellipsis` on each city | per-row truncation inside a fixed-width column |
+
+Nothing kept behind a flag or commented out. Verified by grep: no `bottom:` offset, no
+`flex-direction:column`, no `max-height:40vh`, no `min-width:150px`/`max-width:230px` remain.
+
+**New layout — horizontal.** The panel is a wrapping flex **row**: the `ACTIVE ORIGIN CITIES`
+caption sits **inline at the left** (`flex-shrink:0` so it stays whole), then the cities left to
+right, wrapping to a second row only when they do not fit. `max-width:calc(100vw - 16px)` bounds
+it. Each city gained a subtle token-coloured pill — a deliberate readability call, because city
+values contain their own comma (`LITTLE ROCK, AR`) and read as one run-on string when separated
+by whitespace alone.
+
+**New position — measured, never hardcoded.** `positionOriginPanel()` runs on every render:
+collect every element whose trimmed `textContent` starts with `"Origin city: "` (the same text
+anchor `readActiveOriginCities()` uses — Amazon's container is never queried by class or id),
+walk **up** from each to the first ancestor with a non-zero `getBoundingClientRect().height`
+(the `<span>` itself is usually a zero-height inline node), then take the **largest bottom** and
+the **smallest left** across them. `top = bottom + 8px`, `left = smallest left`. Panel stays
+`position:fixed` and is never inserted into Amazon's DOM.
+
+**Why measured rather than a fixed offset:** the band's height is not a constant. Chips wrap to a
+second row on narrow windows, and the band moves with page scroll — so any hardcoded top would
+detach from it. Largest-bottom is what handles the wrap case; the lowest row is the one that must
+be cleared.
+
+**Fallback:** if no chip resolves to a laid-out element, `logger.warn` with the candidate count
+and `top:8px / left:8px`. Also applied in the `catch`, because an unset `top`/`left` on a fixed
+element renders it at its static position — overlapping page content at the origin.
+
+**Reflow handling.** Position is recomputed on the existing 200 ms-debounced observer, plus
+**debounced `resize` and `scroll` listeners** — no second observer. `scroll` uses capture
+(`true`): scroll events from an inner scrolling container do not bubble but do pass through the
+capture phase at `window`, which catches the load list scrolling without querying Amazon's
+container. Those two use their own timer so a scroll tick only re-measures rects instead of
+re-running the page-wide span scan. A small cache of the resolved chip elements is reused while
+they stay `isConnected`, and dropped when the list changes or any node is unmounted.
+
+**One structural change to `refreshOriginCities()`, deliberately:** the list-change guard now
+gates **only the render**, and `positionOriginPanel()` runs unconditionally. The band moves on
+scroll, resize and wrap — none of which changes the list — so gating position on the signature
+would leave the panel detached. The render guard itself is untouched, and repositioning writes
+only inline `style.top`/`left`, an **attribute** mutation, which the `childList`+`subtree`
+observer does not watch. No feedback loop.
+
+**⚠️ Z-INDEX AND OVERLAP — reported, not silently adjusted.**
+- Panel `2147483646`; sidebar `2147483647` — **the sidebar wins**, by one, as before.
+- **Against Amazon's filter band: unknown.** No capture of Amazon's own z-index exists anywhere
+  in this repo (checked `samples/` and AMAZON_SELECTORS.md). `2147483646` is one below the 32-bit
+  maximum and will realistically sit above anything Amazon uses, but that is **inference, not
+  evidence**.
+- **YES — the panel can now cover a load card.** It sits fixed 8px below the chip band, which is
+  directly above the load list, and it is out of document flow so nothing reflows around it. On a
+  narrow window both the chips *and* the panel wrap to two rows, pushing it further down over the
+  list. It will overlay the top of the first load card at small window sizes. That is the direct
+  consequence of "directly below the filter band" + `position:fixed`, and it is **not** adjusted
+  here. TC-ORIGIN-1 step 6 asks the dispatcher to judge it.
+
+**Verified — 45 checks, no browser.** Drives the real module against a stub DOM with real rects:
+measured placement, the **wrapped-chips case** (lowest bottom / smallest left win, not the first
+chip), the zero-height-span walk-up, the fallback (warn + 8/8, no throw), debounced scroll and
+resize repositioning, the render guard still firing zero extra renders on an unchanged list while
+the panel still repositions, teardown removing both reflow listeners with no resurrection, and
+that extraction/dedupe/empty-state are unchanged. **The six-point smoke checklist is NOT RUN.**
+
+### 2026-08-05 — NEW: floating "Active origin cities" panel (step 1 of the multi-driver monitor)
+
+**New file `content/originCities.js`**, plus three wiring edits: `manifest.json` (script listed
+before `content.js`), and `content/content.js` — `buildOriginCitiesPanel()` in
+`activateExtensionUI()`, `removeOriginCitiesPanel()` in `deactivateExtensionUI()`.
+
+**What it does.** A small fixed panel, bottom-left, listing the origin cities currently active in
+Amazon's load-board filters, updating live as the dispatcher adds or removes them.
+
+**Extraction is text-based, never class-based (requirement 1).** The chips are
+`div.css-1w1nhw5 > div.css-e7fmj9 > span` — all generated CSS-in-JS hashes. `readActiveOriginCities()`
+collects every `<span>` whose **trimmed** `textContent` starts with `"Origin city: "` and slices
+off the prefix. Two details that are not obvious and are covered by tests:
+- **trims first** — Amazon ships stray whitespace on this board (the Filter button's `aria-label`
+  is literally `"Filter  "`, see AMAZON_SELECTORS.md), so an untrimmed `startsWith` would miss chips
+- **de-duplicates** — a nested outer `<span>`'s `textContent` also starts with the prefix, so the
+  same chip can match twice
+
+**Placement.** Bottom-left deliberately: the sidebar is fixed top-centre and Amazon's own refresh
+control is bottom-right (`refreshManager.js`), so bottom-left is the only corner colliding with
+neither. `z-index` one below the sidebar's.
+
+**Night mode required no work and `nightMode.js` was NOT touched.** Every colour is a
+`var(--ext-*)` token, and those already carry `html.ext-night` overrides in `designTokens.js`.
+
+**Live updates** via a 200ms-debounced `MutationObserver` on `document.body`, anchored there for
+the same reason `loadObserver.js` is (React unmounts the filter containers). **Two self-trigger
+guards**, because our own render mutates the DOM the observer watches: mutations originating
+inside the panel are skipped, and a re-render happens **only when the extracted list actually
+changed**. The second makes a feedback loop impossible independently of the first.
+
+**Existing functionality protected — three things worth calling out:**
+1. **`buildOriginCitiesPanel()` swallows its own errors.** `activateExtensionUI()` rolls the whole
+   activation back if a step throws (the 2026-07-30 lockout fix), so a failure in a secondary
+   panel must not cost the dispatcher the sidebar and the monitoring loop. It degrades to "no
+   panel" instead.
+2. **Teardown is wired into `deactivateExtensionUI()`.** Without it, logging out would leave a
+   floating panel *and a live MutationObserver* on the page, breaking the documented "reverted to
+   fully untouched" guarantee.
+3. **The panel id starts with `ext-`**, so `loadObserver.js`'s `isExtManagedNode()` already skips
+   it and our own injection cannot wake the detection pipeline.
+
+**Read-only with respect to Amazon.** No `.click()`, no writes to Amazon's DOM, no requests — so
+no new SAFETY.md click site, and `FORBIDDEN_SELECTORS` is untouched.
+
+**Verified — 44 checks, no browser.** Drives the real module against a stub DOM: extraction
+(prefix match, trim, nested-span de-dup, non-matching spans ignored, empty case), injection
+(idempotent, one stylesheet, every element carries a `data-testid`, **no `innerHTML` used
+anywhere**), live add/remove/empty transitions through the observer, the self-trigger guard
+(repeated fires with an unchanged list produce **zero** re-renders), teardown (panel, stylesheet
+and observer all gone; no resurrection; safe twice; rebuild works), and that a thrown DOM error
+is swallowed and logged. **The six-point smoke checklist is NOT RUN.**
+
+### 2026-08-05 — DOCS ONLY: Single-Tab Multi-Driver Monitor recorded as future work
+
+**No code changed. Nothing built. No task, test case or stub created** — deliberately, per the
+instruction. This entry exists because this project logs every change to the doc trail.
+
+A new post-launch feature is now defined and evidence-backed in the docs: one Relay tab monitors
+several drivers in different regions using Amazon's five-city multi-origin search, splitting the
+merged list into per-driver sub-tabs with per-tab new-load counters and a colour stripe on the
+combined view. It removes the *cause* of multi-tab rate limiting (N tabs → N request streams from
+one IP) rather than managing the symptom.
+
+**Files written:** `docs/BACKLOG.md` (the feature block, five numbered findings, constraints),
+`docs/PRODUCT.md` (**new file** — did not previously exist), `docs/api-samples.md` (§6, captured
+evidence), `STATE.md` (future-work entry only — **current phase deliberately unchanged**),
+`docs/GLOSSARY.md` (three new terms).
+
+**⚠️ Provenance is recorded per-finding, because it is uneven.** The 2026-08-05 five-city capture
+(LITTLE ROCK / CHICAGO / TULSA / HEBRON / JACKSONVILLE, radius 25, 104 results) **is not in
+`samples/`**. Verified against the on-disk captures: the absence of any origin-attribution field
+(every candidate keyword walked; only `searchAuditId`, the load's own `domicile` fields,
+`matchDeviationDetails` and `searchChannelStampedDuration` exist, none naming a searched city),
+and the pickup-coordinate path `loads[0].stops[0].location.latitude/longitude` (populated 50 of
+50, `stopType "PICKUP"`, `stopSequenceNumber 1`). **Partly** verified: state-string inconsistency
+— `"IL"`/`"Ohio"`, `"IN"`/`"Indiana"`, `"KY"`/`"KENTUCKY"` seen directly, `"FL"`/`"Florida"` not
+(no Florida record on disk). **Not** verified: that one refresh fires multiple `/search` calls
+(104 + 11-with-null-payout). That last one is the most likely source of a wrong-data bug and
+should be captured before any build starts.
+
+### 2026-08-05 (later) — Filters-panel collapse REWRITTEN: presence test replaces layout measurement
+
+**This replaces the implementation added earlier the same day. The old one is deleted, not
+disabled.**
+
+**Why the old approach failed.** It could not read the panel's state, so it clicked first and
+measured afterwards: a load card's `getBoundingClientRect().left` before and after, a 20px dead
+band, and — when the measurement showed it had *opened* a panel that was already collapsed — a
+**second click to undo itself**. Functionally self-correcting, visually unacceptable: the panel
+**flashed open and shut** every time the dispatcher pressed START with the filters already
+collapsed. It was also inherently fragile, since it inferred state from pixels across arbitrary
+monitors and zoom levels.
+
+**What replaced it.** Amazon **removes `div.filters__column` from the DOM** when the panel is
+collapsed (captured live 2026-08-05, both states, same session, no reload). So presence *is* the
+state:
+
+1. `document.querySelector('div.filters__column')` — absent ⇒ already collapsed, `logger.log`,
+   **return without clicking**
+2. Find the button (`[role="img"][aria-label]` trimmed to `Filter`, then `.closest('button')`) —
+   absent ⇒ `logger.warn` with context, return
+3. `isForbiddenElement(btn)` ⇒ `logger.error`, return
+4. `btn.click()`, `logger.log`, return true
+
+**Exactly one click, only when the panel is confirmed open. No verification pass, no second
+click, no flash.**
+
+**Deleted from `content/panelCloser.js`** (the orphan sweep the task asked for):
+
+| Removed | Why it existed |
+|---|---|
+| `collapseFilterPanel()` — the whole async body | the measurement implementation |
+| `FILTER_ANCHOR_SELECTORS` | measurement anchor list |
+| `findFilterAnchor()` | measurement anchor lookup |
+| `DEAD_BAND` (20px) | measurement tolerance |
+| `before` / `after` locals, the delta arithmetic | measurement |
+| the `requestAnimationFrame` + 350ms settle wait | waiting for layout to settle |
+| the `anchor.isConnected` re-query | re-finding a node detached by the re-render |
+| `async` / `await`, and the `.catch()` at the call site | the function no longer returns a Promise |
+
+**Nothing was kept as a fallback, a flag, or a commented-out copy.** Verified by grep: zero
+occurrences of any identifier above remain anywhere in `content/`, `utils/` or `background.js`.
+`getBoundingClientRect` still appears twice in the file — both inside the **pre-existing**
+`findDetailCloseButton()`, which is unrelated to this path and untouched.
+
+**Net line count: `content/panelCloser.js` 210 → 161 lines (−49).** The deletion removed 109
+lines; the replacement added 60. It did shrink.
+
+**Call site unchanged:** still the existing `closePanelsForStart()`, still fired once per loop
+start on `val === true` only. The invocation form changed from fire-and-forget-with-`.catch` to a
+plain call in a try/catch, because the function is synchronous now — that try/catch also keeps a
+filters-panel failure from stopping the detail-sheet close that follows it.
+
+**Registry:** `CLOSE_FILTER_PANEL` in `ALLOWED_CLICK_INTENTS` and the SAFETY.md click site were
+already restored by the previous task and were **not duplicated** — verified one occurrence each.
+The SAFETY.md section itself **was** corrected: it described the two-click revert as current
+behaviour, which is no longer true. `FORBIDDEN_SELECTORS` untouched.
+
+**Verified — 38 checks, no browser.** Drives the real rewritten function: panel open ⇒ exactly
+one click; panel absent ⇒ **zero** clicks and the button is never even looked up; button missing
+⇒ warn, zero clicks; `isForbiddenElement` ⇒ error, zero clicks; a filters no-op still lets the
+detail sheet close. The harness also **throws if the code touches `requestAnimationFrame`,
+`setInterval` or `MutationObserver`**, and records any `getBoundingClientRect` call — **zero
+layout reads occur on this path in any scenario.** Plus hygiene assertions that every deleted
+identifier is gone. **The six-point smoke checklist is NOT RUN.**
+
+### 2026-08-05 — Filters panel auto-collapses on START (unblocked after 3 failed attempts)
+
+**What:** pressing START on the sidebar now collapses Amazon's left filters panel. It is never
+reopened automatically — not on stop, pause, resume, or page load.
+
+**Files:** `content/panelCloser.js` (new `collapseFilterPanel()`, called from the existing
+`closePanelsForStart()`), `utils/constants.js` (`CLOSE_FILTER_PANEL` restored to
+`ALLOWED_CLICK_INTENTS`), `docs/SAFETY.md` (click site re-authorized as Click 4; Fast Book
+renumbered to Click 5).
+
+**Why it was blocked, and what unblocked it.** Three attempts in June 2026 were built and
+removed because none could read whether the panel was open. Captured live 2026-08-05: the Filter
+button's attributes are **byte-identical open vs collapsed** (`type="button"`,
+`mdn-popover-offset="-9"`, `class="css-14evw8c"`) and carry **no `aria-expanded`**. There is no
+state to read, which is why every prior attempt stalled.
+
+**The mechanism is a measurement, not a lookup.** An open panel occupies horizontal space on the
+left, so the load list sits further right; collapsing it moves the list left. `collapseFilterPanel()`
+reads the first `div.load-card`'s `getBoundingClientRect().left` before and after clicking, waits
+one `requestAnimationFrame` plus 350ms for layout to settle, then decides with a **20px dead band**:
+
+| Measurement | Meaning | Action |
+|---|---|---|
+| `after < before − 20` | collapsed as intended | `logger.log`, return `true` |
+| `after > before + 20` | **we opened it** — it was already collapsed | **click once more to revert**, `logger.warn`, return `false` |
+| within ±20 | no layout change | `logger.warn` with both numbers, **do NOT click again**, return `false` |
+
+**The self-correcting revert is the whole design.** Because the starting state is unknowable, the
+click may be wrong — and the measurement detects exactly that and undoes it. This makes the
+feature safe without ever knowing the panel's state, which is precisely what three earlier
+attempts could not achieve. In the ambiguous third case we deliberately do **not** click again: a
+second click on an unknown state is the blind toggle this design exists to avoid.
+
+**Never blocks START.** `closePanelsForStart()` fires it and does not await it (it waits ~350ms),
+with a `.catch` so a rejection can never surface on Amazon's page. Guarded by
+`isForbiddenElement()` before the click, like every other click site. Button missing, or no load
+card to measure against ⇒ `logger.warn` and **zero clicks**.
+
+**Selector:** `aria-label` is on the inner `<span role="img">`, not the button — the reason all
+three prior attempts' `button[aria-label="Filter"]` matched nothing — and it carries trailing
+spaces (`"Filter  "`), so the comparison is trimmed. No dependency on the `css-14evw8c` hash;
+it appears only in comments as captured evidence. Full record in AMAZON_SELECTORS.md.
+
+**Untouched as required:** `FORBIDDEN_SELECTORS`, no MutationObserver or polling, no persistence
+of panel state, no second call site, no reopen on any event.
+
+**Verified — 42 checks, no browser.** Drives the real `collapseFilterPanel()` through every
+branch of step 5 including both dead-band boundaries (−20.1px collapses, +20.1px reverts, ±20px
+exactly does neither), the already-collapsed revert (asserting exactly **two** clicks), button
+missing, no anchor, `isForbiddenElement` blocking (all asserting **zero** clicks), and the anchor
+detaching mid-flight. Plus call-site checks: one call site, not awaited, `.catch` present, still
+only in the `val === true` branch. **The six-point smoke checklist is NOT RUN.**
+
+### 2026-07-31 (later) — Inline-panel #F5F5F5 moved from the body to the header
+
+One change, two selectors. `#F5F5F5` had been applied to the wrong surface on 2026-07-31; the
+dispatcher confirmed the intended target was the segment **header**.
+
+| File | Selector | Was | Now |
+|---|---|---|---|
+| `utils/designTokens.js:48` | `--ext-leg-header-bg` (sole consumer: `.ext-seg-header`) | `#CFDBFB` | **`#F5F5F5`** |
+| `content/inlinePanel.js:209` | `.ext-seg-body` | `#F5F5F5` | **`#FFFFFF`** (restored) |
+
+**⚠️ One premise in the task did not hold, so edit 1 landed elsewhere than instructed.** The
+header background is **not** a literal inside `injectPanelStyle()` — `inlinePanel.js:96` reads
+`background:var(--ext-leg-header-bg)`, with the value in `utils/designTokens.js`. Only the body
+colour is a literal. Changing the token was chosen over replacing the `var()` with a hex, because
+the token is the existing mechanism, its sole consumer is that one rule, and inlining would have
+left `--ext-leg-header-bg` defined but unused. No new stylesheet, no `!important`, and
+`nightMode.js` untouched.
+
+**Night-mode check (asked for explicitly): the override EXISTS.** `content/nightMode.js:130-131`
+carries `html.ext-night #ext-inline-panel .ext-seg-header{ background-color: DK_HIGH !important; }`.
+Dark mode is therefore unaffected by this move and nothing was invented. `.ext-seg-body` has the
+same protection at `nightMode.js:224`.
+
+**Contrast — the move FIXES both regressions the previous placement introduced.** Recomputed to
+WCAG 2.1 with colours read from source (bar is 4.5:1; every one of these is under 18px, so the
+large-text 3:1 allowance does not apply):
+
+| Text | Was | Now | |
+|---|---|---|---|
+| `.ext-seg-dist` / `.ext-route-arrow` / chevron `#4A6570` on the header | 4.48 (**FAIL**) | **5.69** | ✅ fixed |
+| `.ext-seg-header` base + route codes `#1F3A45` on the header | 8.68 | **11.01** | ✅ |
+| `.ext-stop-addr` `#6B7280` back on `#FFFFFF` | 4.43 (**FAIL**) | **4.83** | ✅ fixed |
+| `.ext-inline-panel__table td b` `#111827` on the body | 16.27 | **17.74** | ✅ |
+
+**Zebra striping: restored, not rescued.** `var(--ext-n100)` = `#f5f7fa` on `#FFFFFF` measures
+**1.073:1**, up from 1.016:1 on `#F5F5F5`. That is its original designed value — but it is a very
+subtle tint either way, and "legible" would be overclaiming. It is decorative banding, not text,
+so no WCAG text bar applies.
+
+**⚠️ New side effect to eyeball — the header/body seam is now nearly invisible.** `#F5F5F5`
+header against `#FFFFFF` body is **1.090:1**. Previously the blue `#CFDBFB` header read as a
+distinct band; now the only thing separating header from body is `.ext-seg-header`'s existing
+`border-bottom:1px solid #C4D2D6`. Not changed — it was not in scope — but the dispatcher should
+confirm the header still reads as a header. See TC-PANEL-COLOUR-2 step 4.
+
+**Verified:** 6 structural checks (token value, body value, `#CFDBFB` fully gone, no `!important`
+on either rule, `nightMode.js` unmodified, night override present) plus the contrast table above,
+all computed from the real source files. `node --check` passes on both files. **No browser — the
+six-point smoke checklist is NOT RUN.**
+
+### 2026-07-31 — SESSION SUMMARY & HANDOVER INDEX
+
+Index of the 2026-07-31 session for an incoming project manager. Individual entries below carry
+the detail; this exists so nobody has to infer verification status from prose. **Read STATE.md's
+HANDOVER block first — it is the authoritative current state.**
+
+**Git:** most of this session is committed as `9673465`. The **response-body capture is still
+uncommitted** (`content/networkObserver.js`, `utils/constants.js`, `content/content.js`), as is
+this handover. **`samples/` is gitignored** — the raw captures do not survive a clone; the written
+findings in STATE.md are the surviving record. See STATE.md's HANDOVER block.
+
+**Verification vocabulary used throughout this file, so it is not misread:**
+"Verified" in an individual entry means *verified by a Node harness against real source files* —
+never in a browser. **No agent has run a browser at any point this session.** The six-point smoke
+checklist in `docs/CLAUDE.md` was **NOT RUN** for any change below. "Verified by the dispatcher"
+means a human exercised it on the live board.
+
+| Change | Code state | Dispatcher-verified? | Outstanding test |
+|---|---|---|---|
+| PAT: unparseable distance/stop count gate Confirm with warnings | in tree | ✅ **yes** | — |
+| Logger level-gating (ships at `DEBUG_LEVEL = 1`) + PII sweep (email, addresses) | in tree | ✅ **yes** | — |
+| `EXT_NAME` → `Torren Relay` | in tree | ✅ **yes** | — |
+| Activation lockout (`_extActivated` set only after all init succeeds) | in tree | ✅ **yes** | — |
+| Popup renders from local session; network failure no longer signs out | in tree | ✅ **yes** | — |
+| Rate limiting: only 429/502/503/504 back off; aborts never reported | in tree | ❌ **no** | **TC-RATELIMIT-7** |
+| **502 + 504 added** to `RATE_LIMIT_STATUSES` → `[429, 502, 503, 504]` | in tree | ❌ **no** | **TC-RATELIMIT-7 step 7a** |
+| Payout selector widened (`wo-total_payout__match-deviation-attr`) | in tree | ❌ **no** | **TC-PARSE-2** |
+| Auto-refresh stop moved into the click handler (guard-3 regression) | in tree | ❌ **no** | **TC-PANEL-2B** |
+| Flag-gated response-body capture | in tree, **SHIPPED OFF** | ❌ **no** | **TC-CAPTURE-1** |
+| Sidebar paused/rate-limit message removed | in tree | ❌ **no** | **TC-RATELIMIT-6** |
+| Accordion leg-header colour `#CFDBFB` | in tree | ❌ **no** | **TC-PANEL-COLOUR-1** |
+| Inline panel `#F5F5F5` on `.ext-seg-body` | in tree | ❌ **WRONG ELEMENT** | **UNRESOLVED — see BACKLOG.md** |
+
+**On the 502/504 question specifically, since it was asked directly: YES, they were added.**
+`background.js` now reads `const RATE_LIMIT_STATUSES = [429, 502, 503, 504];`. This was a
+deliberate safety-side default taken **without captured evidence** that Amazon throttles via a
+gateway status — the reasoning (asymmetric cost: an un-backed-off throttle risks a real IP block,
+an ordinary gateway error costs a few seconds) is recorded in the comment at the constant.
+**500 is deliberately excluded.**
+
+**`CAPTURE_RESPONSES` lives in TWO files and both must be flipped together** — `utils/constants.js`
+and the MAIN-world mirror in `content/networkObserver.js`. **Both must be `false` before any
+build.** See STATE.md.
+
+**Reconnaissance results are recorded in STATE.md's HANDOVER block, not only here** — they cost a
+full day and must not be buried in a changelog. Headline: the join key is proven, both endpoints
+paginate at page size 50, price-per-mile is derived, and the decision is a **narrow hybrid** (DOM
+remains the source of truth for what is on screen; JSON is looked up by id for the clicked load
+only). Full JSON rendering is a **NO-GO**.
+
+**Three items are open and blocked**, each on a single missing capture — filters-panel
+auto-collapse, the inline panel colour target, and R-type (own-trailer) PAT posting. All three are
+written up in BACKLOG.md with exactly what unblocks them.
+
+### 2026-07-31 — Flag-gated response-body capture (capture & discard, shipped OFF)
+
+The agreed proving step: read the body on a live board and throw it away, so the read is
+proven harmless before anything depends on it. **Renders nothing, stores nothing.**
+
+**Three files.** `utils/constants.js` (+`CAPTURE_RESPONSES = false`),
+`content/networkObserver.js` (the capture), `content/content.js` (+one **separate** message
+listener — deliberately not a branch inside the existing REPORT_RESULT relay, so that relay's
+diff stays at zero lines).
+
+**⚠️ Two constraints the task spec did not account for, both resolved:**
+
+1. **The flag is a TWO-FILE edit.** `networkObserver.js` is the one content script running in
+   the page's **MAIN world**, so it cannot see `constants.js` — isolated-world globals do not
+   exist there. It carries a mirrored `CAPTURE_RESPONSES`, exactly as `background.js` already
+   mirrors `RATE_LIMITER_KEY` for the same reason. **The mirror is the copy that gates the body
+   read.** Both constants cross-reference each other; flip both.
+2. **`logger` does not exist in the MAIN world either.** So the summary is `postMessage`d to the
+   isolated world as five counters and logged there with `logger.log` — which is what makes it
+   level-gated. Requirement 4 (silent at `DEBUG_LEVEL = 1`) is met, and there is a useful
+   belt-and-braces effect: the isolated side also checks `CAPTURE_RESPONSES`, so leaving the
+   MAIN mirror on by accident still produces no output in a stock build.
+
+**Capture scope is separate from `WATCH_PATH`, on purpose.** `WATCH_PATH` is
+`/api/loadboard/search` only and drives rate-limit reporting; widening it to `/similar` would
+start feeding similar-endpoint failures into `background.js`'s backoff — a behaviour change,
+explicitly out of scope. A distinct `CAPTURE_PATHS` list covers the two capture endpoints and
+nothing else. Verified: with the flag on, `/similar` produces a capture summary and **no**
+rate-limit report.
+
+**fetch:** clones as the *first* statement of the handler, before `resp.ok`/`resp.status` are
+read, so no later edit above it can disturb the body first; reads the clone via `.text()`
+(consumes fully, so neither branch stays buffered); never touches the original; still returns the
+original promise. **XHR:** no clone needed (reads are non-destructive); branches on
+`responseType` — `responseText` for `''`/`'text'`, `.response` for `'json'`, everything else
+skipped. Every observation path is wrapped so nothing reaches Amazon's promise or handler.
+
+**Untouched, as required:** `reportResult`, the rate-limit path, abort handling, and how
+`ok`/`status` are reported. Proven by an A/B against the committed file (below).
+
+**Log line** is one `logger.log`, counters only: endpoint, `workOpportunities.length`,
+`totalResultsSize`, `nextItemToken`, body length. No ids, cities, addresses or payouts — asserted
+by the harness against the real 307 kB capture.
+
+**Verified — 38 checks, no browser.** Drives the **real** `networkObserver.js` in a vm with
+Node's WHATWG `Response` and the real `samples/paired-search.json`:
+(b) the **double-read failure is reproduced first** — `Response` body read twice throws — so
+nothing below passes vacuously; (a) clone-before-read works and the **original still parses to
+all 50 work opportunities** afterwards; (c) a handler registered inside the wrapper runs before
+one attached after it; (d) **flag OFF emits a byte-identical postMessage stream to
+`git show HEAD:content/networkObserver.js`**; (e) all three of `''`/`'text'`/`'json'` capture
+without throwing, plus a positive check that `responseText` **does** throw for `'json'` (proving
+the branch is load-bearing) and that `'blob'` is skipped silently. Also: aborts still report
+nothing with capture on, non-loadboard URLs are untouched, and the file contains no `loadStore`,
+no `chrome.storage`, and no module-level cache.
+
+### 2026-07-31 — RECON part 3 (no code changed): paired DOM+JSON capture
+
+`samples/paired-card.html` + `samples/paired-search.json`, captured together. Settles three
+open items from the earlier recon.
+
+**1. JOIN KEY — PROVEN.** The card's inner `<div id="72e5184e-7728-4c51-9562-5160c91d4132">`
+is `paired-search.json` → `workOpportunities[3].id`. **Thirteen values cross-checked, zero
+mismatches**, all agreeing at display precision:
+
+| Field | Card | JSON |
+|---|---|---|
+| payout | `$736.93` | `payout.value` 736.9291422064108 → **736.93** |
+| price/mile | `$2.35/mi` | payout ÷ totalDistance = 2.3472… → **2.35** (confirms the derived-field claim) |
+| distance | `314.0 mi` | `totalDistance.value` 313.9602154751699 → **314.0** |
+| deadhead | `33.89 mi` | `deadhead.value` 33.88899020762622 → **33.89** |
+| stop count | 2 | `stopCount` 2 |
+| origin | `XMD2 JOLIET, IL 60436-8548` | `startLocation` stopCode/city/state/postalCode — exact |
+| destination | `CMH3 MONROE, OH 45050-1848` | `endLocation` — exact |
+| duration | `7h 6m` | `totalDuration` 25,560,000 ms = 7.10 h |
+| STARTING_SOON | badge present | `tags` = `["STARTING_SOON","PUSH_NOTIFICATION_ENABLED"]` |
+
+Three agree only after transformation, and that transformation cost is real: **times** are
+local-formatted on the card (`Mon Aug 3 18:24 CDT`) vs UTC in JSON (`2026-08-03T23:24:00Z` —
+correct, CDT = UTC−5); **equipment** is `53' Trailer` vs enum `FIFTY_THREE_FOOT_TRUCK`; and
+**loading type** is a single `Drop` on the card vs per-stop `loadingType:"PRELOADED"` +
+`unloadingType:"DROP"`. That last one is **not 1:1** — the board's four documented labels
+(Drop / Live / Live/Drop / Drop/Live) must be derived from the stop sequence, and one card
+cannot establish that rule. Observed sequences in this file: 43× `PRELOADED→DROP`,
+6× doubled, 1× `PRELOADED→LIVE→LIVE`.
+
+**2. TRAILER "P" — NARROWED, NOT SETTLED.** This card **has** the badge and its record carries
+`loads[0].stops[0].trailerDetails[0].assetOwner = "AZNG"` (pickup stop only; the dropoff stop's
+`trailerDetails` is `[]`). Consistent with `AZNG → P`, but it is a **positive-only** observation:
+no card without the badge has been captured. Distribution in this file: 42/50 `["AZNG"]`,
+5 `["NCSL"]`, 2 mixed, 1 `["HUBG"]`. The decisive capture is a card **without** the P badge —
+candidates already identifiable in this same file, e.g. `31e38152-e11b-4a04-8cc7-5ae71784aff7`
+(NCSL, WIL4→IND1, $654.64) or `5aa112da-cbbd-43f4-9b39-6d09e509a9f5` (HUBG, XIN5→MIA1,
+$2,758.13).
+
+**3. /search PAGINATION — GAP CLOSED. It paginates.** `workOpportunities.length` **50**,
+`totalResultsSize` **338**, `nextItemToken` **50** (307,003 bytes). Page size 50, same as
+`/similar`; 338 results ≈ 6.8 pages. The Q5 conclusion from the earlier recon — one response is
+one page, so a JSON store would diverge from the rendered board — is now **proven for the main
+board feed**, not merely assumed from the similar endpoint.
+
+**Go/no-go unchanged: NO-GO on full JSON rendering, conditional GO on narrow detail
+enrichment.** The join key being proven strengthens the enrichment path (it is the mechanism
+that path depends on); the pagination confirmation strengthens the case against JSON as the
+board's source of truth.
+
+### 2026-07-31 — RECON (no code changed): can the inline panel render from Amazon's JSON?
+
+Analysis only against `samples/search-1.json`, `search-2.json`, `similar-1.json`. **Verdict:
+NO-GO on full JSON rendering; conditional GO on a narrow detail-enrichment path.** Decided not by
+the three unknown fields (which mostly resolved) but by pagination and memory — see below.
+
+**Sample-file corrections (the brief's descriptions did not match the files):** `samples/README.md`
+and `samples/similar-empty.json` are **absent**. `search-1.json` is the **empty** case
+(`totalResultsSize: 0`, 0 work opportunities), not "small result set". `search-2.json` has
+`nextItemToken: null` / `totalResultsSize: 4` / 4 WOs — it is **not** the pagination case.
+`similar-1.json` is (`totalResultsSize: 232`, `nextItemToken: 50`, 50 WOs).
+
+**The three unknowns — 2 of 3 found:**
+
+| Board feature | JSON | Status |
+|---|---|---|
+| STARTING_SOON tag | `$.workOpportunities[].tags[]` contains literal `"STARTING_SOON"` | ✅ **exact match** (also found `TRAILER_READY`) |
+| Trailer "P" marker | `$.workOpportunities[].loads[].stops[].trailerDetails[].assetOwner` ∈ `AZNG`(50) / `NCSL`(26) / `HUBG`(1) / null | 🟡 **candidate**, per-STOP not per-card; `AZNG → "P"` unproven |
+| Price-increase highlight | zero occurrences of `INCREASE` in either file | ❌ **ABSENT** |
+
+`matchDeviationDetails.deviatedFieldList` (values `[]`, `["PAYOUT"]`, `["PRICE_PER_MILE"]`,
+`["PAYOUT","PRICE_PER_MILE"]`, **similar-endpoint only** — null in all of search-2) is a *different*
+thing: it corresponds to the `wo-total_payout__match-deviation-attr` class from the 2026-07-31
+payout fix, **not** the `__modified-load-increase-attr` price-increase class. Useful independent
+confirmation of that class's meaning.
+
+**Claim verification:** (a) ✅ identical 7 top-level keys in all three files. (b) 🟡 the cited id
+`9d3ff2b0-…` **does** exist in `similar-1.json` with `LIMA_DIS…` → `LUK2` confirmed, and all 54
+ids are unique UUIDs — but the DOM↔JSON join itself cannot be verified without a paired DOM
+capture. (c) ✅ formula correct, ❌ **numbers wrong**: that record's `payout.value` is
+`321.0882605817431`, not 303.39 — `/73.04715378267576` = **4.3956** ($4.40/mi), not 4.15.
+(d) ✅ confirmed — `equipmentType`/`specialServices` absent from the WO, present on `loads[]`.
+(e) 🟡 **partly** — a double-encoded string in search-1/search-2, but **`null` in similar-1**.
+
+**Multi-load:** across 54 WOs / 88 loads, **0 have mixed `equipmentType`**; 29 have mixed
+`loadType` (EMPTY/LOADED repositioning legs). `loads[].payout` sums exactly to WO `payout` and
+`loads[].distance` exactly to `totalDistance`. So the board's single equipment label is
+unambiguous in this data.
+
+**Pagination:** `similar-1` returns 50 of 232 with `nextItemToken: 50` (== array length ⇒ offset
+cursor). **One response is one page, not the board.** The JSON also contains far more than the
+board renders, so an accumulated store would alert on loads the dispatcher cannot see.
+
+**Cost:** ~7,665 B/load raw JSON vs ~241 B/load for today's flat Phase-1 strings — **~32×**. A
+full 232-result similar query ≈ **1.8 MB per tab**, on a board that already ships a memory
+watchdog.
+
+**Also absent:** per-segment duration (only WO-level `totalDuration` ms and `layoverDuration`).
+Stop times exist only as `actions[].plannedTime` in UTC, needing per-stop `location.timeZone`
+formatting — the DOM supplies these pre-formatted.
+
 ### 2026-07-31 — Payout now parses in the "Similar matches" section
 
 **Diagnosis confirmed** (`content/loadParser.js:16`, was

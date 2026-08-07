@@ -4,3 +4,5 @@ node_modules/
 
 # Real Supabase project credentials — never commit. See utils/supabaseConfig.example.js.
 utils/supabaseConfig.js
+
+samples/

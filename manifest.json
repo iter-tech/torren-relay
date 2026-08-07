@@ -66,6 +66,7 @@
         "content/inlinePanel.js",
         "content/tabAlert.js",
         "content/sidebar.js",
+        "content/originCities.js",
         "content/panelCloser.js",
         "content/loadObserver.js",
         "content/content.js"

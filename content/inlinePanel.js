@@ -200,14 +200,15 @@ function injectPanelStyle() {
       'color:#4A6570;' +
     '}' +
     '.ext-seg-header.ext-open .ext-seg-arrow{transform:rotate(180deg);}' +
-    // LOAD ROW BACKGROUND (2026-07-31, CSS-only): #FFFFFF -> #F5F5F5 per spec. This is the
-    // per-leg body — the surface behind each load's stop rows, and the bottom half of the
-    // header+body card pair whose header is var(--ext-leg-header-bg). Light mode only:
-    // content/nightMode.js already overrides this exact selector's background-color with
+    // 2026-07-31: RESTORED to #FFFFFF. #F5F5F5 was briefly applied here, but this is the
+    // per-leg BODY (the surface behind each load's stop rows) and the dispatcher confirmed
+    // the intended surface was the HEADER. The colour moved to var(--ext-leg-header-bg) in
+    // utils/designTokens.js; this rule went back to what it was. Light mode only either way:
+    // content/nightMode.js overrides this exact selector's background-color with
     // DK_HIGH !important (see its .ext-seg-body rule), so this hex is never exercised in
     // dark mode and nightMode.js needed no change.
     '.ext-seg-body{' +
-      'display:none;background:#F5F5F5;padding:0 16px 12px;' +
+      'display:none;background:#FFFFFF;padding:0 16px 12px;' +
       'width:100%;box-sizing:border-box;overflow:hidden;' +
     '}' +
     // Visible (expanded): this is the card's bottom half — bottom-only radius, the card's

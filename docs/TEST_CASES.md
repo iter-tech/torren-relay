@@ -1,5 +1,30 @@
 # Test Cases
 
+> ## 🔴 OUTSTANDING AS OF 2026-07-31 — run these first
+>
+> Every change in the 2026-07-31 session was verified by **Node harness only**. No agent has run
+> a browser at any point. The six-point smoke checklist in `docs/CLAUDE.md` is **NOT RUN** for
+> all of them. These are the live-board passes still owed:
+>
+> | Test case | Covers | Priority note |
+> |---|---|---|
+> | **TC-RATELIMIT-7** | Only 429/502/503/504 back off; aborts never reported. **Step 7a covers 502/504**, and step 7 covers 500 which must NOT pause | The 500-vs-502/504 split is deliberate and will look like a bug to anyone who doesn't know |
+> | **TC-PARSE-2** | Payout parses in the Similar-matches section. **Step 2** compares the prefilled value against the card's own figure ×1.10 — catches grabbing the *wrong* element, which a non-null check would not. **Step 5** is a known-still-failing gap needing a capture | |
+> | **TC-PANEL-2B** | Card click stops auto-refresh even when the refresh detaches the card. **Run at a fast interval (0.5–1s)** — the bug was timing-dependent. **Step 7** re-checks the wrong-panel-data hazard that guard 3 protects | |
+> | **TC-CAPTURE-1** | Flag-gated body capture is harmless on a live board. **Step 3 is the whole point** — watch for `TypeError: body stream already read`. Turn **both** `CAPTURE_RESPONSES` flags off afterwards | Nothing may depend on the capture until this passes |
+> | **TC-RATELIMIT-6** | The paused/rate-limit sidebar message is gone and pause behaviour survived. **Step 4** (memory tooltip un-clipped) is the specific regression risk | |
+> | ~~TC-PANEL-COLOUR-1~~ | **SUPERSEDED** — described the header as `#CFDBFB`, which is no longer true (now `#F5F5F5`), and a 4.48:1 contrast regression that the move has since fixed. Use TC-PANEL-COLOUR-2 | |
+> | **TC-PANEL-COLOUR-2** | **Rewritten.** `#F5F5F5` now on `.ext-seg-header`, `.ext-seg-body` back to `#FFFFFF`. **Step 3** is the new risk — the header/body seam is only 1.090:1 and may no longer read as a distinct band | |
+> | **TC-FILTERS-1** | Filters panel auto-collapse — **rewritten** 2026-08-05 to a presence test on `div.filters__column`. **Step 2 is the point of the rewrite**: already collapsed must produce *no visual change at all*, no click. **Step 5** verifies the selector assumption itself | Newest feature; clicks Amazon's DOM |
+>
+> Older outstanding items that predate this session: **TC-RATELIMIT-1** (cross-tab rate limiting
+> in a real multi-tab session — a standing pre-launch blocker), **TC-AUTH-8** (activation
+> lockout), **TC-AUTH-9** (popup local-first render), and the CSS/UI passes TC-PANEL-WIDTH-1/2
+> and TC-PANEL-POLISH-1/2/3.
+>
+> **TC-RATELIMIT-5 is ⛔ OBSOLETE** — kept verbatim only so it can return if the removed sidebar
+> message is ever reinstated.
+
 ## Stage 1
 - [ ] Loads in chrome://extensions without errors
 - [ ] Background logs on install
@@ -1295,25 +1320,214 @@ with a detached card — see CHANGELOG.md. **Browser half NOT run.**
    network). **Expected:** the loop stops immediately on the click, not only when the sheet
    finishes; the panel appears when the sheet is ready.
 
-### TC-PANEL-COLOUR-2 — Load row background is #F5F5F5 in light mode, unchanged in night mode
+### TC-ORIGIN-1 — Active origin cities panel (2026-08-05)
 
-Covers the 2026-07-31 `.ext-seg-body` change. CSS-level half verified automatically (12 checks —
-see CHANGELOG.md). **Visual half NOT run.**
+Covers `content/originCities.js`. Logic verified automatically (44 checks — see CHANGELOG.md),
+but **against a stub DOM: whether Amazon's real chips actually contain a `<span>` whose text
+starts with `"Origin city: "` has never been checked in a browser.** That is what step 1 is for.
 
-1. **Light mode.** Expand a leg in the inline panel with night mode OFF. **Expected:** the body
-   behind the stop rows is `#F5F5F5`. Sample with the DevTools colour picker — it is close to the
-   previous `#FFFFFF` and to the surrounding greys.
-2. **Zebra striping — the thing most likely to look wrong.** Even rows are tinted
-   `var(--ext-n100)` = `#f5f7fa`, now almost identical to the `#F5F5F5` body. **Expected:**
-   striping is effectively invisible. Decide whether that is acceptable; if not, the zebra tint
-   needs changing (see CHANGELOG.md).
-3. **Night mode unchanged.** Toggle night mode ON with a leg expanded, and separately open a
-   fresh panel while already dark (different code path). **Expected:** the body is the usual dark
-   elevation colour; `#F5F5F5` appears nowhere.
-4. **Card seam.** The header (#CFDBFB) sits directly on top of this body. **Expected:** no gap,
-   no stray line, rounded bottom corners intact on the expanded body.
-5. **Regression — layout untouched.** Column alignment, padding, borders and the card shadow are
-   all as before. This was a colour-only change.
+Set `DEBUG_LEVEL = 4` in `utils/constants.js` first, or none of the log lines appear.
+
+1. **Verify the extraction assumption FIRST.** With one or more origin cities in the Relay
+   filters, run in the console:
+   ```js
+   [...document.querySelectorAll('span')]
+     .map(s => s.textContent.trim())
+     .filter(t => t.startsWith('Origin city: '))
+   ```
+   **Expected:** one entry per active origin city, e.g. `["Origin city: LITTLE ROCK, AR"]`.
+   **If this returns `[]`, the whole feature is built on a wrong assumption — report the actual
+   chip text and stop.** Note the value may include a state suffix or trailing spaces; both are
+   handled, but report what you actually see.
+2. **Panel appears, positioned and laid out correctly.** *(Supersedes BOTH earlier versions of
+   this step — the bottom-left panel and the below-the-chips panel. Neither placement is current.)*
+   Log in, open the load board. **Expected:** the panel sits **to the RIGHT of Amazon's
+   "Showing N results" text, about 16px clear of it, vertically centred on that row** — above the
+   chip band, not below it. Cities run **horizontally in one row**, caption **inline at the left**
+   of that same row. No `Origin city:` prefix on the pills.
+3. **Add a city.** Add a second origin in Relay's filters. **Expected:** the panel gains that row
+   within ~½ second, no page reload. Console: `origin city list changed — re-rendering`.
+4. **Remove a city.** Remove one. **Expected:** the row disappears. Remove them all: the panel
+   stays visible and shows "No origin cities in filters".
+5. **No feedback loop.** Leave the board idle for a minute with the panel showing. **Expected:**
+   **no repeating** `re-rendering` lines in the console. A stream of them means the self-trigger
+   guard has failed and the observer is looping on our own render.
+6. **⚠️ Overlap — judgement calls, not pass/fail.** *(Supersedes the earlier "covers a load card"
+   step — the anchor moved above the chips, so that specific problem should be gone. Confirm it
+   is.)* Check each:
+   - **Load cards** — should now be clear. If the panel still covers the first card, report it.
+   - **Chip band** — in the narrow/BELOW branch (step 6b) the panel lands at `row.bottom + 6px`,
+     which is where the chips are. **Expected to overlap there.** Decide whether that is
+     acceptable.
+   - **Sort control** — **unverified.** If Amazon's sort dropdown sits in the same row to the
+     right of "Showing N results", the panel will cover it. **Report what you see** — its
+     position has never been captured.
+   - Sidebar (top-centre) and the bottom-right refresh control should both be clear. Check at
+     150% zoom too.
+6a. **⭐ Collapse/expand the left filter panel — the reason for the rewrite.** With the panel
+   visible, collapse Amazon's left filter panel, then expand it again. **Expected: the panel
+   TRAVELS with the reflowing content, smoothly.** It must **not** stay put and then jump into
+   position once the animation finishes. A visible snap means the rAF loop is not running —
+   report it. Do this several times, and watch the panel rather than the board.
+6b. **Narrow window forces the BELOW branch.** Shrink the window until under ~200px of free space
+   remains to the right of "Showing N results". **Expected:** the panel drops to just under that
+   row and left-aligns with it, instead of being pushed off-screen to the right. Console logs
+   `panel placement branch { mode: "below" }`. Widen again: it returns to `"beside"`. Confirm the
+   branch logs appear once per transition, **not** repeatedly.
+6c. **Anchor-not-found fallback.** In DevTools, edit or delete the "Showing N results" text.
+   **Expected:** the panel moves to the top-left corner (`top:8px / left:8px`), the console shows
+   `results-count text not found — using fallback position` with the pattern, and — importantly —
+   **that warning appears once, not on every frame.** A flood of warnings means the
+   log-on-transition guard failed.
+6e. **⭐ Refresh must NOT make the panel flash to the corner (fixed 2026-08-05).** Start the loop
+   and let it refresh several times — or press Amazon's own refresh control repeatedly. **Watch
+   the panel, not the board.** **Expected: it stays exactly where it is.** Amazon clears the load
+   list on each refresh, which briefly removes the "Showing N results" row the panel anchors to;
+   the panel now holds its last measured position through that gap instead of jumping to the
+   top-left corner and back. **Any flash to the corner is a regression — report it.** At
+   `DEBUG_LEVEL = 4` you should see `anchor missing — holding last measured position` **once per
+   gap**, and **no** `results-count text not found` warning.
+6f. **First-ever paint still uses the corner fallback.** Load the board somewhere the results-count
+   row genuinely never appears (e.g. a filter combination returning nothing, or delete the text in
+   DevTools before the panel first measures). **Expected:** the panel sits at the top-left corner
+   with the `results-count text not found — using fallback position` warning — that path is
+   intentionally preserved. Then make the row appear: **expected**, the panel leaves the corner and
+   anchors properly. It must not hold the corner position.
+6g. **Logout → login does not restore a stale position.** Note where the panel sits, log out, scroll
+   the board somewhere different, then log back in. **Expected:** the panel re-measures from
+   scratch — it must not reappear at its pre-logout coordinates.
+6d. **Teardown leaves no CPU running.** With the panel visible, open DevTools → Performance,
+   record ~5 seconds, and note the frame activity. Log out via the popup, then record again.
+   **Expected:** the per-frame callback is completely gone after logout — no residual ~60fps
+   work. This is the specific risk of a rAF loop, and the reason teardown cancels it.
+7. **Night mode.** Toggle night mode. **Expected:** the panel follows the dark palette (it uses
+   `--ext-*` tokens). `content/nightMode.js` was not modified, so this is the check that the
+   token approach actually worked.
+8. **Teardown on logout — the regression risk.** Log out via the popup. **Expected:** the panel
+   disappears **completely**, along with its `<style>`. Confirm in DevTools that
+   `document.getElementById('ext-origin-cities')` is `null` and no
+   `ext-origin-cities-style` remains. Log back in: the panel returns, once, correctly populated.
+9. **Existing functionality intact.** Sidebar appears and Play/Pause works; the loop refreshes;
+   clicking a card still stops the loop and opens the inline panel; the PAT modal still opens.
+   **Expected:** all unchanged.
+10. **Failure mode is graceful.** In DevTools delete every filter chip from the DOM, then press
+    START. **Expected:** the panel shows the empty message and the loop still starts normally —
+    the panel must never block activation.
+
+### TC-ORIGIN-2 — Driver-name renaming in the origin-cities panel (2026-08-05)
+
+Covers the rename feature. Logic verified automatically (60 checks — see CHANGELOG.md) but
+**against a stub DOM and stub storage: no real click, focus, blur or `chrome.storage` call has
+ever run.** Set `DEBUG_LEVEL = 4` first.
+
+1. **Name a city.** Click a city pill. **Expected:** it becomes a text input, focused, with the
+   text selected, placeholder = the city. Type `Mike`, press **Enter**. The pill now shows
+   **Mike** as the main label with **the city still visible beneath it**, smaller and grey.
+2. **The city text must never disappear.** Confirm on every named pill. If a name replaces the
+   city outright, that is a failure — the dispatcher has to know which city it belongs to.
+3. **Name persists across reload.** Press F5. **Expected:** the name is there on first paint —
+   **no flash of the raw city name that then swaps.** Watch the moment the panel appears.
+4. **Escape cancels without saving.** Click a named pill, change the text to something else,
+   press **Escape**. **Expected:** the previous name returns, unchanged. Reload: still the old
+   name. Nothing was written.
+5. **Blur commits.** Click a pill, type a name, then click elsewhere on the page. **Expected:**
+   the name is saved. Then repeat with **Escape** and click away — **Expected:** still cancelled,
+   the blur must not resurrect the abandoned value.
+6. **Empty clears.** Click a named pill, delete all the text, press Enter. **Expected:** the pill
+   reverts to plain city text. Reload: still plain.
+7. **⭐ Typing does not trigger Amazon's shortcuts.** With the input open, type a name containing
+   letters Amazon may bind — try `r`, `f`, `/`, `?`, and press space and arrow keys.
+   **Expected:** the characters land in the input and **nothing happens on the board** — no
+   refresh, no search box opening, no filter panel toggling, no scroll jump. This is the check
+   that the key-event containment works.
+8. **Mid-edit board refresh.** Open the input, type half a name, and wait for the loop to refresh
+   the board (or press Start and let a tick land). **Expected:** the input stays open with the
+   typed text intact — it must not be destroyed and re-rendered under your cursor.
+9. **Long name.** Enter a 24-character name, then try to type more. **Expected:** input stops at
+   24. The pill widens; if the row runs out of width the pills **wrap to a second line and the
+   panel grows** — it should not truncate or run off-screen.
+10. **Name follows the city, not the tab.** Name a city in one tab. Open a second Relay tab whose
+    filters include the same city. **Expected:** the second tab shows the name. **Known
+    behaviour:** a tab that was *already open* will not repaint until its own filter list changes
+    or it is reloaded — that is expected, not a bug.
+11. **City leaves the filters.** Remove a named city from Amazon's filters. **Expected:** the pill
+    disappears. Add the city back. **Expected:** the name is still there.
+12. **Reset to Defaults does not wipe names.** Popup → Reset to Defaults. **Expected:** driver
+    names survive. (They are stored outside `STORAGE_KEYS` precisely for this.)
+13. **Logout leaves nothing behind.** Log out. **Expected:** the panel and its `<style>` are gone
+    and no rAF work remains (TC-ORIGIN-1 step 6d). Log back in: names reappear.
+
+### TC-FILTERS-1 — Filters panel collapses on START; already-collapsed does nothing at all
+
+**Rewritten 2026-08-05 (later). Supersedes the earlier version entirely** — that one described a
+layout-measurement implementation that clicked twice and expected the panel to "flicker open and
+shut". That behaviour was the reason it was rejected and the code is gone. **If you see any
+flicker, this test has failed.**
+
+Decision logic verified automatically (38 checks — see CHANGELOG.md), but **only against a
+stubbed DOM. Whether `div.filters__column` is really the panel's container on the live board has
+never been checked in a browser** — that is the assumption this test exists to confirm.
+
+Set `DEBUG_LEVEL = 4` in `utils/constants.js` first, or none of the log lines below will appear
+(the shipped level is 1).
+
+1. **Panel OPEN → collapses.** Open the filters panel, press **START**. **Expected:** the panel
+   collapses. Console: `filters panel collapsed` with `intent: "CLOSE_FILTER_PANEL"`. Exactly one
+   click — the panel must not reopen a moment later.
+2. **Panel ALREADY COLLAPSED → nothing happens. This is the point of the rewrite.** Collapse the
+   panel by hand, press START. **Expected:** **absolutely no visual change — no flash, no
+   flicker, no momentary open.** Console: `filters panel already collapsed — nothing to do`, and
+   crucially **no click is issued at all**. Watch closely: the old implementation's failure was
+   exactly a brief open-then-shut here, and it is the single most important thing to confirm.
+3. **Stop / pause / resume → panel untouched.** With the panel collapsed from step 1: press STOP,
+   then pause and resume via the sidebar, then STOP again. **Expected:** the panel is never
+   reopened and never re-collapsed by us at any of those transitions — only START acts. Then
+   press START again: expect step 2's behaviour (already collapsed, no click).
+4. **Button missing → logged, START still works.** In DevTools delete the
+   `<span role="img" aria-label="Filter  ">` from the Filter button while the panel is **open**,
+   then press START. **Expected:** `panel is open but Filter button not found — skipping` with
+   `labelledIcons` count, no click, **and the loop starts and refreshes normally.** This must
+   never block START.
+5. **Verify the selector assumption — do this once, first.** With the panel open, run
+   `document.querySelectorAll('div.filters__column').length` in the console: expect **1**.
+   Collapse it by hand and run it again: expect **0**. **If it is not 0/1, the whole approach is
+   wrong and steps 1–4 will misbehave — report the actual value.**
+6. **Regression — the detail sheet still closes.** Open a load's detail sheet, press START.
+   **Expected:** the sheet closes as before. It shares `closePanelsForStart()` with this feature,
+   and a filters failure must not prevent it.
+
+### TC-PANEL-COLOUR-2 — #F5F5F5 on the segment HEADER; body back to #FFFFFF
+
+**Rewritten 2026-07-31 (later).** The earlier version of this test described `#F5F5F5` on
+`.ext-seg-body` — that was the wrong surface and has been moved. Steps below describe the
+current state. CSS-level half verified automatically (6 structural checks + a full contrast
+recompute — see CHANGELOG.md). **Visual half NOT run.**
+
+1. **Light mode — the header is the changed surface.** Open the inline panel on a multi-segment
+   load, night mode OFF. **Expected:** each segment header is `#F5F5F5`. Sample with the DevTools
+   colour picker — it is close to both the old `#CFDBFB` neighbours and to white, so judging by
+   eye is unreliable.
+2. **The body is white again.** Expand a leg. **Expected:** the surface behind the stop rows is
+   `#FFFFFF`, not the grey it briefly was.
+3. **⚠️ The header/body seam is the thing most likely to look wrong now.** `#F5F5F5` header
+   against `#FFFFFF` body measures only **1.090:1** — the blue header used to read as an obvious
+   band and no longer does. **Expected:** the `border-bottom:1px solid #C4D2D6` still makes the
+   header read as a header. **If it now looks like one flat undifferentiated block, say so** —
+   that is a design call, not a bug, and it was outside this change's scope.
+4. **Zebra striping — restored, but still subtle.** Even rows are `var(--ext-n100)` = `#f5f7fa`
+   on the white body: **1.073:1**, back to its original designed value (it was 1.016:1 while the
+   body was grey). **Expected:** faint banding, visible in a run of rows. Do not expect obvious
+   stripes — it has never been a high-contrast treatment.
+5. **Night mode unchanged — check both entry paths.** Toggle night mode ON with a leg expanded,
+   and separately open a fresh panel while already dark (different code path). **Expected:**
+   headers and body both show the usual dark elevation colours; **`#F5F5F5` appears nowhere**.
+   `content/nightMode.js` was not touched; it overrides both selectors with `!important`.
+6. **Contrast spot-check — two prior failures should now be gone.** On a header, the
+   distance/duration text and the chevron (`#4A6570`) now measure 5.69:1 (were 4.48:1, below the
+   4.5:1 bar). In the body, the stop address (`#6B7280`) is back to 4.83:1 (was 4.43:1).
+   **Expected:** both read comfortably.
+7. **Regression — layout untouched.** Column alignment between header and table, padding,
+   borders, corner radii and the card shadow all as before. This was a colour-only change.
 
 ### TC-PARSE-2 — Payout parses in the "Similar matches" section (2026-07-31)
 
@@ -1340,6 +1554,45 @@ Regression test for the two-class payout selector. Parser-level half verified au
 6. **Other fields in that section.** On a Similar-matches card, check equipment, loading type,
    deadhead, trailer letter and tag in the inline panel. **Expected:** populated as usual. These
    use non-`wo-*` selectors that no capture covers, so they are the next most likely silent gap.
+
+### TC-CAPTURE-1 — Flag-gated response-body capture is harmless on a live board (2026-07-31)
+
+**This is the whole point of the feature: prove the body read does not break Amazon's board.**
+Logic verified automatically (38 checks against the real `Response` implementation and the real
+307 kB capture — see CHANGELOG.md). **The live-board half is what follows, and it has NOT been
+run.** Nothing may depend on this capture until step 4 passes.
+
+**Part A — shipped state (flag OFF). Do this first.**
+1. Load the extension unmodified. Browse the load board normally for several minutes: search,
+   switch saved searches, scroll, open loads, start/stop auto-refresh. **Expected:** everything
+   behaves exactly as before. Zero `response captured` lines in the console at any
+   `DEBUG_LEVEL`. The rate-limit backoff still works (force a 429/503 per TC-RATELIMIT-7).
+
+**Part B — flag ON. Remember it is a TWO-FILE edit.**
+2. Set `CAPTURE_RESPONSES = true` in **both** `utils/constants.js` **and**
+   `content/networkObserver.js`, and set `DEBUG_LEVEL = 4`. Reload the extension and the board.
+3. **The board must still work.** This is the risk the whole exercise exists to retire.
+   **Expected:** loads render, filters apply, saved searches switch, infinite scroll loads more,
+   the detail sheet opens. **Watch the page console for
+   `TypeError: ... body stream already read` or `body used already` — if that appears, the
+   capture is unsafe and must go straight back off.**
+4. **Summary lines appear.** **Expected:** one `[EXT][…][networkObserver] response captured (dev
+   switch)` per search/similar response, carrying only `endpoint`, `workOpportunities`,
+   `totalResultsSize`, `nextItemToken`, `bodyLength`. Cross-check one against DevTools →
+   Network → that response's size and JSON. **Confirm there are no ids, cities, addresses or
+   payouts on the line.**
+5. **Both endpoints.** Trigger a Similar-matches section. **Expected:** a summary with
+   `endpoint: "similar"` — and confirm in the service-worker console that `/similar` did **not**
+   produce a rate-limit report (only `/search` should).
+6. **Aborts stay silent.** Switch saved searches rapidly. **Expected:** no summary for the
+   aborted requests, and no spurious rate-limit pause (TC-RATELIMIT-7 step 1 still holds).
+7. **Memory.** Watch the sidebar memory dot over ~15 minutes of active use with capture ON.
+   **Expected:** no faster growth than with it off. A cloned-but-unread body would show here;
+   `.text()` is meant to prevent that.
+8. **Turn it back OFF** in both files before any commit or build. Re-run step 1.
+
+**If step 3 shows a body-stream error, stop and report it** — that kills the JSON path entirely,
+which is exactly what this test exists to discover cheaply.
 
 ### TC-PANEL-POLISH-3 — Full-width action bar, light leg-header colour, fixed-column route alignment
 
