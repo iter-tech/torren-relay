@@ -39,7 +39,7 @@ const EXT_VERSION = '0.1.0';
 // only logger.debug consulted this constant, so with 183 logger.log calls against 5
 // logger.debug the knob silenced roughly 3% of output and was effectively non-functional —
 // the console stayed fully verbose at every setting.
-const DEBUG_LEVEL = 3;
+const DEBUG_LEVEL = 1;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEVELOPMENT SWITCH — response-body capture. Shipped OFF, deliberately no UI, no storage
@@ -59,7 +59,7 @@ const DEBUG_LEVEL = 3;
 //   1. this constant, and
 //   2. CAPTURE_RESPONSES in content/networkObserver.js
 // This constant alone gates only the isolated-world log line; the mirror gates the body read.
-const CAPTURE_RESPONSES = true;
+const CAPTURE_RESPONSES = false;
 
 // DEVELOPMENT SWITCH — per-city load assignment debug (2026-08-06). Shipped OFF. No UI, no
 // storage key, no popup control, exactly like CAPTURE_RESPONSES above.
@@ -81,4 +81,4 @@ const CAPTURE_RESPONSES = true;
 // decides whether ids and coordinates cross the postMessage boundary at all. Gating only on
 // the isolated side would send them and then discard them, which is precisely what
 // summariseAndDiscard()'s "no ids, no cities, no addresses" contract exists to prevent.
-const CITY_ASSIGN_DEBUG = true;
+const CITY_ASSIGN_DEBUG = false;

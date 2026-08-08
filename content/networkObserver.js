@@ -36,7 +36,7 @@
   // WHEN OFF, this file behaves exactly as it did before the flag existed: CAPTURE_PATHS is
   // never consulted, no clone is taken, no body is touched, and every `|| isCaptured` below
   // collapses to the original `isWatched` condition.
-  var CAPTURE_RESPONSES = true;
+  var CAPTURE_RESPONSES = false;
 
   // ⚠ MIRROR of CITY_ASSIGN_DEBUG in utils/constants.js (2026-08-06). Same duplication, same
   // reason as CAPTURE_RESPONSES above — this world cannot see isolated-world globals.
@@ -48,7 +48,7 @@
   //
   // Subordinate to CAPTURE_RESPONSES: with capture off there is no body to read, so this flag
   // alone does nothing.
-  var CITY_ASSIGN_DEBUG = true;
+  var CITY_ASSIGN_DEBUG = false;
 
   // Capture scope is DELIBERATELY SEPARATE from WATCH_PATH and must stay that way.
   // WATCH_PATH drives the rate-limit reporting path (search only) — widening it would start
