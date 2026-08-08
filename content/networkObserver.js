@@ -36,7 +36,19 @@
   // WHEN OFF, this file behaves exactly as it did before the flag existed: CAPTURE_PATHS is
   // never consulted, no clone is taken, no body is touched, and every `|| isCaptured` below
   // collapses to the original `isWatched` condition.
-  var CAPTURE_RESPONSES = false;
+  var CAPTURE_RESPONSES = true;
+
+  // ⚠ MIRROR of CITY_ASSIGN_DEBUG in utils/constants.js (2026-08-06). Same duplication, same
+  // reason as CAPTURE_RESPONSES above — this world cannot see isolated-world globals.
+  //
+  // This gate is deliberately HERE rather than only on the receiving side, because it controls
+  // whether work-opportunity ids and pickup coordinates cross the postMessage boundary at all.
+  // summariseAndDiscard() below is contractually counters-only; emitCityAssignCoords() is the
+  // one path allowed to emit identifiers, and only with BOTH this and CAPTURE_RESPONSES on.
+  //
+  // Subordinate to CAPTURE_RESPONSES: with capture off there is no body to read, so this flag
+  // alone does nothing.
+  var CITY_ASSIGN_DEBUG = true;
 
   // Capture scope is DELIBERATELY SEPARATE from WATCH_PATH and must stay that way.
   // WATCH_PATH drives the rate-limit reporting path (search only) — widening it would start
@@ -90,6 +102,98 @@
     }
   }
 
+  // CITY ASSIGNMENT FEED (2026-08-06) — the ONLY path in this file permitted to emit
+  // identifiers, and only while CITY_ASSIGN_DEBUG and CAPTURE_RESPONSES are both on.
+  //
+  // Deliberately a SEPARATE function from summariseAndDiscard() rather than extra fields on
+  // its message: that function's five-value, no-identifiers contract is load-bearing and
+  // documented, and widening it would quietly reintroduce exactly what it was written to keep
+  // out. Its body is unchanged to the byte.
+  //
+  // Emits the MINIMUM the assignment needs: the join id and the PICKUP stop's coordinates.
+  // No cities, no addresses, no payouts, no times, no counts of anything else. The extraction
+  // happens here, in the MAIN world, so the ~300KB body never crosses postMessage — only a
+  // few dozen small triples do.
+  //
+  // stops[0] is the PICKUP stop (verified in api-samples.md). Anything without a numeric
+  // lat/lng pair is skipped rather than sent as null, so the receiver never has to guess
+  // whether a missing coordinate means "absent" or "malformed".
+  function emitCityAssignCoords(url, bodyText) {
+    if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return;
+    try {
+      var parsed = JSON.parse(bodyText);
+      var wo = parsed && parsed.workOpportunities;
+      if (!Array.isArray(wo)) { parsed = null; return; }
+      var pairs = [];
+      var noCoordIds = [];
+      for (var i = 0; i < wo.length; i++) {
+        var item = wo[i];
+        if (!item || !item.id) continue;
+        var id    = String(item.id);
+        var loads = item.loads;
+        var stop  = (loads && loads[0] && loads[0].stops && loads[0].stops[0]) || null;
+        var loc   = (stop && stop.location) || null;
+        if (!loc || typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') {
+          // Sent explicitly rather than just omitted. Without this the receiver could not tell
+          // "this response had the load but no usable coordinates" from "this response never
+          // mentioned the load", and the unmatched reason would be a guess.
+          noCoordIds.push(id);
+          continue;
+        }
+        pairs.push({ id: id, lat: loc.latitude, lng: loc.longitude });
+      }
+      window.postMessage({
+        __extRelayCityCoords: true,
+        endpoint:   url.indexOf('/api/loadboard/similar') !== -1 ? 'similar' : 'search',
+        woCount:    wo.length,
+        pairs:      pairs,
+        noCoordIds: noCoordIds,
+        // Added 2026-08-08 for the unmatched-card diagnostic. Both are plain counters already
+        // emitted by summariseAndDiscard() — no new class of data crosses the boundary. They
+        // are carried on THIS message so they stay correlated with the ids from the SAME
+        // response; the summary message cannot be joined to a specific buffer after the fact.
+        // totalResultsSize > ids in this response, or a non-null nextItemToken, is the
+        // signature of pagination (hypothesis A).
+        totalResultsSize: parsed ? parsed.totalResultsSize : null,
+        nextItemToken:    parsed ? parsed.nextItemToken : null,
+
+        // ── ID-SHAPE PROBE (2026-08-08) ──────────────────────────────────────────────────
+        // Added after a live run showed ZERO overlap between DOM card ids and captured ids
+        // (0/50 across all four buffers). Zero — not a shortfall — means the two sides are
+        // not producing the same strings at all, so the only way forward is to look at the
+        // raw strings and to test containment against the WHOLE body, not just the id field.
+        //
+        // ⚠ THIS RETAINS AND TRANSPORTS THE RAW BODY, which every other path here is
+        // careful not to do. It happens ONLY while CITY_ASSIGN_DEBUG is on (this function
+        // has already returned otherwise), it is capped, and it must be off before ship.
+        // Truncation is reported so a "not found" on a cut body is never mistaken for
+        // proof of absence.
+        rawBody:          bodyText.length > 500000 ? bodyText.slice(0, 500000) : bodyText,
+        rawBodyTruncated: bodyText.length > 500000,
+        rawBodyLength:    bodyText.length,
+
+        // First few ids WITH the exact JSON path they were read from, so the receiver states
+        // the path as fact rather than inferring it. Taken before any coordinate filtering,
+        // so index i here is genuinely workOpportunities[i].
+        idSamples: (function () {
+          var out = [];
+          for (var s = 0; s < wo.length && s < 3; s++) {
+            out.push({
+              path: 'workOpportunities[' + s + '].id',
+              id:   (wo[s] && wo[s].id !== undefined && wo[s].id !== null)
+                      ? String(wo[s].id) : null,
+              idType: wo[s] ? typeof wo[s].id : 'missing'
+            });
+          }
+          return out;
+        })()
+      }, '*');
+      parsed = null; wo = null; pairs = null; noCoordIds = null; // nothing retained
+    } catch (e) {
+      // Same posture as summariseAndDiscard: a debug feed must never become a page failure.
+    }
+  }
+
   // XHR needs no clone: unlike a fetch Response body, xhr.responseText / xhr.response can be
   // read any number of times without consuming anything, so reading here cannot starve
   // Amazon's own handler, and listener ordering is irrelevant.
@@ -105,9 +209,15 @@
       var rt = xhr.responseType;
       if (rt === '' || rt === 'text') {
         summariseAndDiscard(xhr.__extUrl, xhr.responseText);
+        emitCityAssignCoords(xhr.__extUrl, xhr.responseText);
       } else if (rt === 'json') {
         var obj = xhr.response;
-        if (obj) summariseAndDiscard(xhr.__extUrl, JSON.stringify(obj));
+        if (obj) {
+          var jsonText = JSON.stringify(obj);
+          summariseAndDiscard(xhr.__extUrl, jsonText);
+          emitCityAssignCoords(xhr.__extUrl, jsonText);
+          jsonText = null;
+        }
         obj = null;
       }
       // every other responseType: deliberately ignored
@@ -165,7 +275,10 @@
           if (snapshot) {
             // .text() consumes the clone FULLY, so neither branch is left buffered.
             snapshot.text()
-              .then(function (bodyText) { summariseAndDiscard(url, bodyText); })
+              .then(function (bodyText) {
+                summariseAndDiscard(url, bodyText);
+                emitCityAssignCoords(url, bodyText);
+              })
               .catch(function () { /* clone read failed — never surface to the page */ });
           }
         }).catch(function (err) {

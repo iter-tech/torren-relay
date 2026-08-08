@@ -67,6 +67,7 @@
         "content/tabAlert.js",
         "content/sidebar.js",
         "content/originCities.js",
+        "content/cityAssign.js",
         "content/panelCloser.js",
         "content/loadObserver.js",
         "content/content.js"

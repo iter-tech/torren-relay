@@ -437,6 +437,12 @@ async function activateExtensionUI() {
     // sidebar and the monitoring loop.
     step = 'buildOriginCitiesPanel';
     buildOriginCitiesPanel();
+    // City-assignment debug feed (2026-08-06). Read-only, logs only, and a complete no-op
+    // unless CITY_ASSIGN_DEBUG is on — see content/cityAssign.js. Same reasoning as the panel
+    // above: it swallows its own errors, so a diagnostic can never cost the dispatcher his
+    // sidebar. Placed after the panel because it consumes getActiveOriginCities().
+    step = 'initCityAssign';
+    initCityAssign();
 
     _extActivated = true; // ONLY after every step completed without throwing
     logger.log('content', 'extension UI activated — waiting for manual Start');
@@ -488,6 +494,11 @@ function deactivateExtensionUI() {
   // and any pending debounce. Without this a logout would leave a floating panel and a live
   // observer on the page, breaking the "reverted to fully untouched" guarantee below.
   removeOriginCitiesPanel();
+
+  // City-assignment debug feed (2026-08-06) — drops its message listener, buffers and pending
+  // timer. Same reason as the panel above: a logged-out page must be left with no live
+  // listener of ours on it.
+  teardownCityAssign();
 
   var sidebarEl = document.getElementById('ext-sidebar');
   if (sidebarEl) {

@@ -288,3 +288,78 @@ building.**
 `/search` paginates at **page size 50** (`paired-search.json`: `workOpportunities.length` 50,
 `totalResultsSize` 338, `nextItemToken` 50). A 104-result multi-origin search therefore spans
 **more than one page**. The DOM remains the source of truth for what is on screen.
+
+---
+
+## 6.6 THE ID JOIN — CONFIRMED CORRECT ON A LIVE BOARD (2026-08-08) ✅
+
+**Do not re-derive or re-guess this. It is confirmed from two directions.** A live run reported
+0/50 matches and the join was assumed to be pointing at the wrong field; it was not, and no code
+was changed. A later live run with diagnostics showed **20/20 captured ids matching**.
+
+**The corresponding pair, exactly:**
+
+| Side | Exact read |
+|---|---|
+| **DOM** | `document.querySelector('div.load-list')` → `.querySelectorAll('div.load-card, div.load-card__selected, div.wo-card-header--highlighted')` → per card `.querySelector('div[id]')` → the **`.id` DOM property** of that **child** element |
+| **JSON** | **`workOpportunities[].id`** |
+
+Both are bare UUIDs, e.g. `72e5184e-7728-4c51-9562-5160c91d4132`. **No prefix, no suffix, no
+colon segment, no wrapping token, no `data-*` involvement.**
+
+**Evidence on disk, reproducible without a browser:**
+- `samples/paired-card.html` → its `div[id]` is `72e5184e-7728-4c51-9562-5160c91d4132`
+- `samples/paired-search.json` → that exact string is `workOpportunities[3].id`
+- All 50 ids in `paired-search.json`, and all 50 in `search-5cities-active.json`, are bare UUIDs
+  at `workOpportunities[].id`
+
+**`workOpportunities[].loads[0].workOpportunityId` carries the IDENTICAL value** in every record
+of both captures. It is a valid alternative path, **not** a different identifier — do not treat a
+match there as evidence of a second id space.
+
+### ⚠ Known fragility of the DOM side — `div[id]` is a weak selector
+
+It takes the **first descendant with any id**, not "the load's id". The paired card also contains
+`<div id="STARTING_SOON">` and `<div data-id="custom-tag-comp">`; the UUID div merely happens to
+come first in document order. **If Amazon ever reorders these, or renders a card whose UUID div is
+absent, every card would yield a tag name instead** — which would produce exactly the 0/50
+signature seen once already, *and* would still pass a containment check, because `STARTING_SOON`
+appears in the response body under `tags[]`. If that symptom returns, check this before
+suspecting the JSON path. Harden by selecting the UUID-shaped id rather than the first one.
+
+---
+
+## 7. Pickup-coordinate city assignment — IMPLEMENTED as a read-only debug step (2026-08-06)
+
+**Status: built, flag-gated OFF, and AWAITING LIVE CONFIRMATION.** The findings in §6 are now
+consumed by real code — `content/cityAssign.js` — but that code has **never been run against a
+live board**. Nothing acts on its output; it only logs. Treat the assignment as *unproven* until
+the per-city counts have been read from a real console and matched against what the dispatcher
+sees on screen.
+
+**What is consumed, and from where:**
+
+| §6 finding | How `cityAssign.js` uses it |
+|---|---|
+| §6.1 pickup lat/lng present on `loads[0].stops[0].location` | Extracted in the MAIN world into `{id, lat, lng}` triples by `emitCityAssignCoords()` in `networkObserver.js`, posted as `__extRelayCityCoords` |
+| §6.2 join key: card's inner `<div id>` = `workOpportunities[].id` | The lookup key for every card |
+| §6.3 state formatting inconsistent within one response | **Why the assignment is geometric.** No city or state string is compared anywhere in `cityAssign.js` — nearest city by haversine only |
+| §6.4 one refresh can deliver multiple `/search` responses | `pickBuffer()` keeps the last 4 and chooses the one with the **largest id intersection** with the cards rendered, logging every buffer's count so a wrong pick is visible. **§6.4 itself is still unverified** — this code is written to survive it either way |
+| §6.5 pagination at 50 | The DOM is the source of truth: only ids actually rendered are assigned. Ids in the response but not on screen are simply not counted |
+
+**No origin-attribution field exists in the response** (established 2026-08-05) — geometry is not
+a preference here, it is the only available method.
+
+**Loads with no usable coordinates are reported, not silently dropped.** The emitter sends a
+separate `noCoordIds` list, so the unmatched log can state the real reason (`no coord in JSON`
+vs `id not in any response`) instead of guessing. All 50/50 records in the on-disk capture had
+coordinates populated, so this path is **expected to stay empty** — if it does not, that is a
+finding worth chasing.
+
+**Distance threshold `150 mi` is a GUESS**, not a captured value — see CHANGELOG 2026-08-06.
+Beyond it a card is counted unmatched rather than forced onto a city. Tune against real logs.
+
+**Coordinates for the origin cities themselves** come from the same cities endpoint documented in
+§1/§2 (`name`, `stateCode`, `latitude`, `longitude`), via `resolvePATCity()`. Note that function
+is **not memoised** — `cityAssign.js` caches its results per page session precisely so this does
+not become a per-refresh network call.

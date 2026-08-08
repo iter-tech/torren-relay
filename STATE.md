@@ -174,7 +174,16 @@
 > (captured evidence).
 >
 > ### Next, in priority order
-> 0. **TC-ORIGIN-1 step 6e** — newest fix: the panel used to flash to the top-left corner on
+> 0. **TC-ORIGIN-2 steps 0a + 0b** — newest change: the city button's click is now a **no-op**
+>    (reserved for per-city filtering, a later task) and the buttons are **bigger**
+>    (`font-size:14px`, `padding:8px 14px`, ~35.5px tall). Confirm a click does nothing, that the
+>    buttons are easy to hit near their edges, and that each shows the **plain city string** even
+>    if a driver name is stored. **Renaming is disconnected, not deleted** — steps 1–9 of that
+>    test are marked pending re-wiring and should not be run.
+>    **Then TC-ORIGIN-1 step 6:** the taller buttons grew the panel 33px → 49.5px (91px wrapped),
+>    so it reaches further toward the chip band in BESIDE and covers more of it in BELOW. Judge
+>    whether that is acceptable — it was reported, not silently adjusted.
+> 0a. **TC-ORIGIN-1 step 6e** — the panel used to flash to the top-left corner on
 >    **every** board refresh (the anchor row vanishes while Amazon re-renders the list). It now
 >    holds its last measured position through the gap. **Start the loop, let it refresh several
 >    times, and watch the panel — any flash to the corner is a regression.** Steps 6f (first paint
@@ -250,7 +259,44 @@ data model, Night Mode, popup wiring (Step 3), PAT ("Post a Truck" / Create Post
 Action Bar, multi-domain support, and Supabase email-OTP login (now gating every feature) are
 all built. Working through backlog items and regional/equipment coverage expansion.
 
+**Join confirmed live (2026-08-08).** The id join between load cards and captured `/search`
+records is **verified working on a real board** — 20/20 captured ids matched, up from a 0/50 run
+that had been assumed to mean the join pointed at the wrong field. It did not, and **no code was
+changed**: the pair was already `div[id]`'s `.id` ↔ `workOpportunities[].id` (recorded
+permanently in api-samples.md §6.6). The per-city assignment now produces real matches. The
+remaining gap is **capture coverage, not correctness** — see "In progress".
+
+**Active thread (2026-08-06): per-city load splitting.** The single-tab multi-driver monitor
+(docs/PRODUCT.md) needs each load attributed to the origin city it came from, because the board
+merges all cities into one list. Step 1 — the origin-cities panel — is built. Step 2 — the
+**assignment itself** — is now built as a **read-only, flag-gated debug step** that only logs.
+It is deliberately *not* wired to any UI: the assignment must be proven correct against a live
+board before anything hides or filters a load on the strength of it.
+
 ## Що завершено / Done
+
+**Id join verified on a live board (2026-08-08).** `CITY DIAG 3/4` reported 20/20 captured ids
+matching rendered cards. **No code change** — the join was already correct; the earlier 0/50 was
+a session condition, never a wrong field. The corresponding pair is now recorded as fact in
+api-samples.md §6.6, together with the fragility of `div[id]` (it selects the FIRST descendant
+with any id, and the card also contains `<div id="STARTING_SOON">`) so the same false lead is not
+followed twice. Diagnostics `CITY DIAG 1/4`–`4/4` and `CITY RAW 1`–`4` remain in place, behind
+the flag, to confirm the intersection stays non-zero.
+
+**Per-city assignment foundation (2026-08-06) — read-only, SHIPPED OFF, UNVERIFIED LIVE.**
+New `content/cityAssign.js`: on each completed refresh it assigns every on-screen load card to
+the nearest active origin city by haversine distance from the PICKUP stop's lat/lng, and logs one
+compact count line plus a reasoned unmatched list. **Changes nothing the dispatcher sees** — no
+hiding, no filtering, no reordering, no restyling, no UI, no DOM mutation of any kind.
+Supporting changes: `emitCityAssignCoords()` in `networkObserver.js` (MAIN world) extracts
+`{id, lat, lng}` triples so the ~300 KB body never crosses `postMessage`, with
+`summariseAndDiscard()`'s no-identifiers contract left byte-identical; `getActiveOriginCities()`
+added to `originCities.js` as a read-only accessor returning a copy of the last *rendered* list;
+`initCityAssign()`/`teardownCityAssign()` wired into the existing activate/deactivate steps.
+Verified with 92 automated checks against the real source files (assignment counts, unmatched
+reasons, multi-response selection, distance threshold, haversine cross-checked against an
+independent formula, teardown, flag-off inertness, zero DOM mutation, zero layout reads).
+**Never run in a browser** — see Blockers.
 
 **Core system (Stages 0–13, complete):** MV3 manifest; `utils/constants.js`
 (`FORBIDDEN_SELECTORS`, `isForbiddenElement`, `ALLOWED_CLICK_INTENTS`); `utils/logger.js`;
@@ -429,6 +475,24 @@ hover/keyboard behavior, live cross-tab sync, OFF-mode independent timers, OFF-m
 backoff still pausing/showing the banner, Reset default, persistence across restart).
 
 ## Що в роботі / In progress
+
+**Capture coverage — the ONE thing now standing between us and a correct per-city split
+(2026-08-08).** The join is right; the data is incomplete. Amazon paginates the board at **5**
+per response, we buffer the last **4** pages, so ~20 ids are available against **50** cards on
+screen. Every cycle therefore matches a **subset by design** and the rest log as "id not in any
+response" — that reason string is now *expected*, not a fault. Until pages accumulate, the
+per-city counts are **directionally useful but not complete**, and nothing should act on them.
+Deliberately not fixed in the join step: accumulation changes capture behaviour and deserves its
+own step.
+
+**Per-city assignment — settle delay and threshold still unconfirmed (2026-08-06).** The code is written and
+passes 92 automated checks, but the checks run against stub DOM and synthetic responses. What
+they **cannot** prove: that the settle delay is long enough on a real board, that a real refresh
+really does buffer more than one `/search` response (§6.4 in api-samples.md is still unverified),
+that 150 mi is the right cutoff, and — the whole point — that the per-city counts match what the
+dispatcher actually sees. **Next action is a human console read, not more code.** Procedure and
+the four switches that must be flipped are in CHANGELOG 2026-08-06; all four must go back off
+afterwards.
 
 **RECON 2026-07-31 — JSON rendering: NO-GO on full replacement, conditional GO on detail
 enrichment.** No code changed. Analysed `samples/search-1/-2.json`, `similar-1.json`. Three
@@ -626,6 +690,22 @@ intent was broader.
 
 ## Що далі / Next
 
+- **PAGE ACCUMULATION — the next step in this thread.** Keep ids across `/search` pages instead
+  of only the last 4 buffers, so all 50 on-screen cards can be matched rather than ~20. This
+  **does** change capture behaviour, so it is its own step with its own review. Everything else
+  in the per-city thread waits on it — a per-city count computed from 40% of the board must not
+  drive any UI.
+- **Confirm the per-city split looks right for the cards that DID match** before building on it.
+  Partial data can still be checked for correctness: the cities assigned should be plausible for
+  those specific loads.
+- **Then:** tune `CITY_ASSIGN_MAX_MILES` (150 is a guess) and
+  `CITY_ASSIGN_SETTLE_MS` (700 is a guess) against what the logs actually show.
+- **Then:** decide whether the city-coordinate cache should persist across page reloads. It is
+  currently in-memory per page session — correct and cheap, but a reload re-resolves each city.
+- **Only after the assignment is confirmed:** wire the city buttons in `originCities.js` to
+  per-city filtering (their click is already deliberately a no-op, reserved for exactly this),
+  and add the TEST_CASES entry that was deliberately withheld while there is no user-visible
+  behaviour to test.
 - **PRE-LAUNCH BLOCKER — cross-tab rate limiting must be verified in a real multi-tab
   browser session before this extension is distributed to more than one dispatcher** — see
   docs/BACKLOG.md's "🚫 PRE-LAUNCH BLOCKER" section and docs/TEST_CASES.md TC-RATELIMIT-1.
@@ -683,6 +763,22 @@ intent was broader.
 
 ## Блокери / Blockers
 
+- **Per-city counts are computed from ~40% of the board (2026-08-08):** the join is confirmed
+  correct, but only ~20 of 50 cards can be matched per cycle because Amazon paginates at 5 and
+  we buffer 4 pages. **The counts are therefore incomplete by construction, not wrong.** Nothing
+  may consume them until page accumulation lands. This is the single blocker on the per-city
+  thread.
+- **Still unconfirmed from live logs (2026-08-06):** whether the 700 ms settle delay is right on
+  a slow board, whether 150 mi is a sensible cutoff, and whether a real refresh buffers more than
+  one `/search` response (api-samples.md §6.4). None of these blocked the join; all three need a
+  real log before anything depends on them. **Risk is contained** — the feature ships off,
+  mutates no DOM, and nothing consumes its output.
+- **DEBUG FLAGS ARE CURRENTLY ON and the build is not shippable as-is:** `DEBUG_LEVEL = 3`,
+  `CAPTURE_RESPONSES = true` (both copies), `CITY_ASSIGN_DEBUG = true` (both copies). While
+  `CITY_ASSIGN_DEBUG` is on the **raw response body is transported** across postMessage (capped
+  at 500 000 chars) for the id-shape probe — a deliberate, documented reversal of the "nothing is
+  retained" property, valid only for the debug session. All five must go back to `1` / `false`
+  before shipping.
 - **🚫 Cross-tab rate limiting unverified in a real browser (2026-07-20, PRE-LAUNCH
   BLOCKER):** code-complete and verified with real functional tests at the logic level
   (18/18 + 4/4 — see above), but genuinely untested against Amazon's real infrastructure

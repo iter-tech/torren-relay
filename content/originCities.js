@@ -57,6 +57,10 @@ var _originLastMode    = null;
 var _originHasMeasured = false;
 var _originHoldLogged  = false; // so the hold is logged once, not once per frame
 var _originLastRender  = null;  // last rendered list, joined — used to skip idempotent renders
+// Same list as _originLastRender but unjoined, kept so other modules can read the active
+// cities without re-scraping the chips (2026-08-06). Written ONLY where _originLastRender is
+// written, so the two can never disagree about what is on screen. See getActiveOriginCities().
+var _originLastCities  = [];
 
 // Extracts the active origin cities from Amazon's filter chips.
 //
@@ -96,6 +100,21 @@ function readActiveOriginCities() {
   }
   logger.log('originCities', 'origin cities read', { count: found.length });
   return found;
+}
+
+// READ-ONLY ACCESSOR for other modules (added 2026-08-06 for content/cityAssign.js).
+//
+// Returns the cities as of the LAST RENDER, not a fresh scrape. Deliberate: re-scraping would
+// walk every <span> on the page again, and — worse — could return a list the panel has not
+// drawn yet (during a mid-rename hold, or before driver names have loaded), so a consumer
+// could disagree with what the dispatcher can actually see.
+//
+// Returns a COPY. A caller that mutates the result must not be able to corrupt the panel's own
+// idempotent-render bookkeeping. Empty array before the first render and after teardown.
+// Changes NOTHING about this file's behaviour — nothing here writes.
+function getActiveOriginCities() {
+  logger.log('originCities', 'getActiveOriginCities called');
+  return _originLastCities.slice();
 }
 
 // Injects the panel's stylesheet once. Colours come entirely from the --ext-* design tokens,
@@ -138,11 +157,18 @@ function injectOriginPanelStyle() {
     '#ext-origin-cities [data-testid="ext-origin-city"]{' +
       // Subtle pill. Horizontal city names contain their own comma ("LITTLE ROCK, AR"), so
       // gap alone reads as one run-on string — the pill is what separates them.
-      'font-size:12px;font-weight:600;color:var(--ext-n700);white-space:nowrap;' +
+      'font-size:14px;font-weight:600;color:var(--ext-n700);white-space:nowrap;' +
       'background:var(--ext-n100);border:1px solid var(--ext-n200);' +
-      'border-radius:var(--ext-radius-sm);padding:1px 6px;' +
-      // Clickable: the whole pill opens the rename input.
+      // HIT TARGET (2026-08-05): was font-size:12px + padding:1px 6px, which gave a ~19px-tall
+      // button — fiddly to click. Now 14px text with 8px/14px padding: roughly 35px tall and
+      // 28px wider than its text, so the target is comfortably larger than the glyphs.
+      'border-radius:var(--ext-radius-sm);padding:8px 14px;' +
       'cursor:pointer;display:flex;flex-direction:column;align-items:flex-start;line-height:1.25;' +
+    '}' +
+    // Explicit rather than inherited, so the label's size cannot drift if the pill's own
+    // font-size is ever changed for another reason.
+    '#ext-origin-cities [data-testid="ext-origin-city-label"]{' +
+      'font-size:14px;font-weight:600;color:var(--ext-n700);' +
     '}' +
     '#ext-origin-cities [data-testid="ext-origin-city"]:focus-visible{' +
       'outline:2px solid var(--ext-accent);outline-offset:1px;' +
@@ -196,38 +222,40 @@ function renderOriginCities(cities) {
 // Builds one pill. Unnamed: the city text alone. Named: the driver name as the primary label
 // with the city beneath it, smaller and muted — the city is never dropped.
 // textContent only: both the city (page data) and the name (dispatcher input) are untrusted.
+// Builds one city button. Shows the CITY TEXT ONLY.
+//
+// RENAME IS DISCONNECTED, NOT DELETED (2026-08-05). The click on a city is being reserved for
+// per-city filtering in a later task, so it is a no-op for now. What was removed from THIS
+// function, and what re-wiring it needs:
+//   1. `item.addEventListener('click', … startRenameCity(city))`
+//   2. the matching Enter/Space `keydown` handler — otherwise the editor would still be
+//      reachable by keyboard and "unreachable" would be false
+//   3. the two-line named render (ext-origin-driver-name + ext-origin-city-sub), because with
+//      no way to set a name it could only ever display one restored from storage
+// Everything the rename NEEDS is still here and still callable: startRenameCity(),
+// commitDriverName(), loadDriverNames(), ORIGIN_DRIVER_NAMES_KEY, the _originNames cache (still
+// loaded on every build), the _originEditingCity guard in refreshOriginCities(), the input's
+// CSS, and the driver-name/city-sub CSS rules. Stored names are NOT wiped — a dispatcher who
+// named cities before this change still has them, and they reappear the moment (1)-(3) return.
 function buildCityItem(city) {
   logger.log('originCities', 'buildCityItem called');
-  var name = Object.prototype.hasOwnProperty.call(_originNames, city) ? _originNames[city] : '';
   var item = document.createElement('div');
   item.setAttribute('data-testid', 'ext-origin-city');
   item.setAttribute('data-city', city);
   item.setAttribute('role', 'button');
   item.setAttribute('tabindex', '0');
-  item.setAttribute('title', name ? (name + ' — ' + city + ' (click to rename)')
-                                  : (city + ' (click to name a driver)'));
-  if (name) {
-    var nameEl = document.createElement('div');
-    nameEl.setAttribute('data-testid', 'ext-origin-driver-name');
-    nameEl.textContent = name;
-    var subEl = document.createElement('div');
-    subEl.setAttribute('data-testid', 'ext-origin-city-sub');
-    subEl.textContent = city;
-    item.appendChild(nameEl);
-    item.appendChild(subEl);
-  } else {
-    var labelEl = document.createElement('div');
-    labelEl.setAttribute('data-testid', 'ext-origin-city-label');
-    labelEl.textContent = city;
-    item.appendChild(labelEl);
-  }
-  item.addEventListener('click', function () { startRenameCity(city); });
-  item.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
-      ev.preventDefault();
-      startRenameCity(city);
-    }
-  });
+  // No "click to rename" hint — the click does nothing, and promising an action we do not
+  // perform is worse than saying nothing.
+  item.setAttribute('title', city);
+
+  var labelEl = document.createElement('div');
+  labelEl.setAttribute('data-testid', 'ext-origin-city-label');
+  labelEl.textContent = city;
+  item.appendChild(labelEl);
+
+  // Deliberately NO click or keydown listener. The element keeps role="button"/tabindex="0" and
+  // its pointer cursor because it stays a button — it is simply awaiting the filtering action a
+  // later task will attach here.
   return item;
 }
 
@@ -507,6 +535,7 @@ function refreshOriginCities() {
   if (_originEditingCity !== null) return;
   if (signature === _originLastRender) return;
   _originLastRender = signature;
+  _originLastCities = cities.slice();  // read-only mirror for getActiveOriginCities()
   logger.log('originCities', 'origin city list changed — re-rendering', { count: cities.length });
   renderOriginCities(cities);
   // NOTE: positioning is deliberately NOT done here any more (2026-08-05). It lives entirely in
@@ -628,6 +657,9 @@ function removeOriginCitiesPanel() {
     _originHasMeasured = false;
     _originHoldLogged  = false;
     _originLastRender = null;
+    // Nothing is on screen after teardown, so the accessor must report nothing rather than a
+    // stale list from the previous session.
+    _originLastCities = [];
     // Driver-name state. The panel and its input go with the panel element; this just makes a
     // later rebuild re-read from storage rather than trusting an in-memory copy from the
     // previous session. Stored names themselves are NEVER cleared here — they persist.

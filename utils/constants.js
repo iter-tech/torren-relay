@@ -39,7 +39,7 @@ const EXT_VERSION = '0.1.0';
 // only logger.debug consulted this constant, so with 183 logger.log calls against 5
 // logger.debug the knob silenced roughly 3% of output and was effectively non-functional —
 // the console stayed fully verbose at every setting.
-const DEBUG_LEVEL = 1;
+const DEBUG_LEVEL = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEVELOPMENT SWITCH — response-body capture. Shipped OFF, deliberately no UI, no storage
@@ -59,4 +59,26 @@ const DEBUG_LEVEL = 1;
 //   1. this constant, and
 //   2. CAPTURE_RESPONSES in content/networkObserver.js
 // This constant alone gates only the isolated-world log line; the mirror gates the body read.
-const CAPTURE_RESPONSES = false;
+const CAPTURE_RESPONSES = true;
+
+// DEVELOPMENT SWITCH — per-city load assignment debug (2026-08-06). Shipped OFF. No UI, no
+// storage key, no popup control, exactly like CAPTURE_RESPONSES above.
+//
+// OFF (false): content/cityAssign.js installs nothing and does nothing, and
+// content/networkObserver.js emits no ids and no coordinates.
+// ON  (true):  each captured /search body additionally yields { id, lat, lng } triples for the
+// PICKUP stop, which the isolated world uses to assign each on-screen load card to its nearest
+// active origin city and log ONE compact count summary per refresh. Read-only: no DOM is added,
+// removed, hidden, reordered or restyled. Nothing is stored or rendered.
+//
+// ⚠ THIS FLAG ALONE DOES NOTHING — it needs THREE switches on, in two files:
+//   1. this constant, and
+//   2. CITY_ASSIGN_DEBUG in content/networkObserver.js (the MAIN-world mirror), and
+//   3. BOTH copies of CAPTURE_RESPONSES — the coordinates ride on the existing capture path,
+//      so with capture off there is no body to read and this stays silent.
+//
+// WHY THIS ONE IS MIRRORED. Unlike a log line, the gate has to sit in the MAIN world: it
+// decides whether ids and coordinates cross the postMessage boundary at all. Gating only on
+// the isolated side would send them and then discard them, which is precisely what
+// summariseAndDiscard()'s "no ids, no cities, no addresses" contract exists to prevent.
+const CITY_ASSIGN_DEBUG = true;

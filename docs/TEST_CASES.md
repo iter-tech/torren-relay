@@ -1416,9 +1416,30 @@ Set `DEBUG_LEVEL = 4` in `utils/constants.js` first, or none of the log lines ap
 
 ### TC-ORIGIN-2 — Driver-name renaming in the origin-cities panel (2026-08-05)
 
-Covers the rename feature. Logic verified automatically (60 checks — see CHANGELOG.md) but
-**against a stub DOM and stub storage: no real click, focus, blur or `chrome.storage` call has
-ever run.** Set `DEBUG_LEVEL = 4` first.
+> ## ⏸️ STEPS 1–9 ARE PENDING RE-WIRING (2026-08-05) — do not run them yet
+>
+> The click that opened the rename input was **disconnected**, not deleted: that click is
+> reserved for per-city filtering in a later task. Renaming is currently unreachable, so
+> steps 1–9 below cannot pass and are **not failures**. They are kept verbatim because the
+> rename code, its storage and the stored names are all still present and callable — restoring
+> the click listener, the Enter/Space keydown listener and the two-line render makes these
+> steps live again exactly as written.
+>
+> **Run steps 0a, 0b, 10–13 now.** Steps 10–13 still apply: the storage layer is untouched.
+
+**0a. ⭐ A single click does NOTHING.** Click a city button. **Expected: no rename input appears,
+nothing expands, the button does not change.** Press Enter and Space with it focused —
+**expected: also nothing.** (When filtering is added later, this is the click it will use.)
+
+**0b. ⭐ Buttons are comfortable to hit.** **Expected:** each city button is noticeably larger
+than before — 14px text with generous padding, roughly 35px tall and about 28px wider than its
+text. Click each one several times **near its edges**, not just the centre; you should not have
+to aim. Also confirm each shows the **plain city string** — if you had named a driver earlier,
+the name does **not** show now (it is still stored and will return when renaming is re-wired).
+
+Covers the rename feature. Logic verified automatically (60 checks originally, plus 41 for the
+disconnect/sizing change — see CHANGELOG.md) but **against a stub DOM and stub storage: no real
+click, focus, blur or `chrome.storage` call has ever run.** Set `DEBUG_LEVEL = 4` first.
 
 1. **Name a city.** Click a city pill. **Expected:** it becomes a text input, focused, with the
    text selected, placeholder = the city. Type `Mike`, press **Enter**. The pill now shows

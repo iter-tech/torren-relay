@@ -2,6 +2,192 @@
 
 ## [Unreleased]
 
+### 2026-08-08 — id join CONFIRMED CORRECT against live logs (no code change)
+
+**Files: none changed.** This entry records a verification result, not an edit.
+
+**What.** The join was expected to need repointing to a different identifier after a live run
+showed **0/50** DOM ids matching any captured response. It did not. A later live run with the
+`CITY RAW` / `CITY DIAG` diagnostics in place showed **20/20 captured ids matching**, and the two
+id reads were left exactly as they were:
+
+| Side | Exact read |
+|---|---|
+| DOM | `document.querySelector('div.load-list')` → `.querySelectorAll('div.load-card, div.load-card__selected, div.wo-card-header--highlighted')` → per card `.querySelector('div[id]')` → the **`.id` DOM property** of that child |
+| JSON | **`workOpportunities[].id`** |
+
+**Why no change was made.** The repoint was not applied because the premise did not survive
+checking. The on-disk paired capture disproved it directly: `samples/paired-card.html`'s
+`div[id]` is `72e5184e-7728-4c51-9562-5160c91d4132`, which is exactly
+`workOpportunities[3].id` in `samples/paired-search.json`; all 50 ids there and all 50 in
+`samples/search-5cities-active.json` are bare UUIDs at that same path. With no evidence of a
+different matching field, any repoint would have been a guess — and the live log then confirmed
+the existing pair was right all along.
+
+**What actually fixed the 0/50.** Not established. Nothing in the join changed between the two
+runs, so the earlier zero was a condition of that session (buffers not matching the rendered
+board), **not** a wrong field. Recorded as unexplained rather than credited to this work.
+
+**Known remaining gap, out of scope here:** only ~20 ids are captured (Amazon paginates at 5;
+4 buffered pages) against 50 cards on screen, so matches are a subset by design. Page
+accumulation is the next step — see STATE.md.
+
+### 2026-08-08 — cityAssign: raw id-shape samples (debug logging only, no behaviour change)
+
+`content/cityAssign.js` (+ raw body, `idSamples` and JSON paths on `networkObserver.js`'s
+already-flagged coords message): four `CITY RAW` lines printing both id sets pipe-wrapped, every
+id-bearing element and `data-*` attribute per card, two-way containment checks against the raw
+body and `document.body.innerHTML`, and a character-by-character diff against the nearest JSON id
+— after a live run showed 0/50 overlap across all four buffers. **⚠ Transports the raw response
+body while `CITY_ASSIGN_DEBUG` is on** (capped at 500 000 chars, truncation reported), reversing
+the "nothing is retained" property for the duration of the debug session only.
+
+### 2026-08-08 — cityAssign: unmatched-card diagnostic (debug logging only, no behaviour change)
+
+`content/cityAssign.js` (+ two counters added to `networkObserver.js`'s already-gated coords
+message): four `CITY DIAG` lines and a `CITY DIAG VERDICT` per cycle, distinguishing pagination
+(A) from wrong-response selection (B) from missing coordinates (C) as the cause of "id not in any
+response" — after a live run showed 6 of 11 cards unmatched, all from one city.
+
+### 2026-08-06 — Per-city load assignment: read-only foundation (SHIPPED OFF)
+
+**New file:** `content/cityAssign.js`. **Touched:** `utils/constants.js`,
+`content/networkObserver.js`, `content/originCities.js`, `content/content.js`, `manifest.json`.
+
+**What.** On each completed refresh, assign every on-screen load card to one of the active
+origin cities and log the per-city counts:
+
+```
+CITY ASSIGN  CHICAGO, IL: 18 | TULSA, OK: 14 | HEBRON, KY: 11 | unmatched: 3
+CITY ASSIGN unmatched  a1b2… (no coord in JSON) | c3d4… (id not in any response) | e5f6… (nearest city 877 mi > 150 mi max)
+```
+
+**Why.** The board merges all origin cities into one list, and per-city splitting is the goal.
+This step proves the assignment is *correct* before anything acts on it. It changes **nothing
+the dispatcher sees** — no hiding, no filtering, no reordering, no restyling, no badge, no UI.
+Console output only. If the counts are wrong we find out here, at zero risk, instead of after
+loads have been hidden from him.
+
+**Flag-gated OFF.** Turning it on is a **four-switch, three-file** operation, because the data
+rides on the existing capture path and the output rides on the existing log-level gate:
+
+| # | Switch | File | Ships as |
+|---|---|---|---|
+| 1 | `DEBUG_LEVEL` → `3` | `utils/constants.js` | `1` — `logger.log` needs ≥ 3 |
+| 2 | `CAPTURE_RESPONSES` → `true` | `utils/constants.js` | `false` |
+| 3 | `CAPTURE_RESPONSES` → `true` | `content/networkObserver.js` (MAIN mirror) | `false` |
+| 4 | `CITY_ASSIGN_DEBUG` → `true` | **both** files above | `false` |
+
+Any one left off makes the feature silent. Deliberate: these log lines contain city names and
+work-opportunity ids, and the level gate is the backstop that keeps them out of a stock build
+even if a flag is left on by mistake.
+
+**How the assignment works — geometric, never textual.** State formatting in the captured
+response is inconsistent *within a single response* (`IL` next to `Ohio` next to `Indiana`), so
+string matching would silently mis-assign. Each card's join id is looked up in the captured
+`/search` body, and its PICKUP stop's lat/lng is matched to the **nearest active city by
+haversine distance**. No city or state string is compared anywhere in the file.
+
+**Plumbing added** (this was **not** free — the coordinates were previously thrown away):
+- `networkObserver.js` gained `emitCityAssignCoords()`, which extracts `{id, lat, lng}` triples
+  plus `noCoordIds` in the MAIN world and posts them as `__extRelayCityCoords`. The ~300 KB body
+  never crosses `postMessage`; only a few KB of triples do.
+- `summariseAndDiscard()` is **unchanged to the byte**. Its five-value, no-identifiers contract
+  is load-bearing and documented; widening it would have quietly reintroduced exactly what it
+  was written to keep out. The new emitter is a separate function on a separate message.
+- `originCities.js` gained `getActiveOriginCities()` — a read-only accessor returning a **copy**
+  of the last *rendered* city list (not a fresh scrape, so a consumer can never disagree with
+  what is on screen). Behaviour otherwise unchanged; nothing in the accessor writes.
+
+**Two values are guesses, recorded as such — tune against real logs:**
+- `CITY_ASSIGN_MAX_MILES = 150`. Dispatcher radius has been seen at 25–100 mi. Beyond the
+  threshold a card is counted **unmatched rather than forced** onto a city — an unmatched card is
+  an honest answer, a wrongly-attributed one is not.
+- `CITY_ASSIGN_SETTLE_MS = 700`. The response arrives *before* React renders the cards it
+  describes, so the cycle is debounced; this also coalesces the several responses one refresh can
+  deliver into a single cycle.
+
+**Cost.** Cards × cities per cycle — ~250 haversines on a 50-card, 5-city board. Pure arithmetic;
+the DOM is read once, up front, with `querySelector`/`.id` only — **no layout reads**, so it
+cannot make the board janky. City coordinates are resolved through `resolvePATCity()`, which is
+**not memoised in `patApi.js`** (every call there is a live fetch, up to 3 with its retries), so
+`cityAssign.js` carries its own in-memory cache: each distinct city is resolved **once per page
+session**, negative results included. 5 cities refreshing every 20 s = 5 requests total, not 5
+per refresh. *Whether that cache should persist across reloads is deliberately left open.*
+
+**Status: UNVERIFIED against a live board.** No TEST_CASES entry yet — there is no user-visible
+behaviour to test until the assignment is confirmed correct against real logs.
+
+### 2026-08-05 — Origin city buttons: click disconnected (reserved for filtering) + bigger hit target
+
+**File:** `content/originCities.js`. Two changes to the same element; nothing else in the file.
+
+**CHANGE 1 — renaming hidden, not deleted.** The click on a city is reserved for per-city
+filtering in a later task, so it is a **no-op** now.
+
+*Disconnected from `buildCityItem()` — exactly three things:*
+1. `item.addEventListener('click', function () { startRenameCity(city); })`
+2. the matching Enter/Space `keydown` handler — without removing it the editor would still be
+   reachable by keyboard, so "unreachable" would have been false
+3. the two-line named render (`ext-origin-driver-name` + `ext-origin-city-sub`), because with no
+   way to set a name it could only ever display one restored from storage
+
+The `title` also lost its "(click to rename)" hint — promising an action we no longer perform is
+worse than saying nothing. `role="button"`, `tabindex="0"` and the pointer cursor are **kept**:
+the element is still a button, awaiting the filtering action the next task attaches.
+
+*Retained, present and callable — verified by invoking it:* `startRenameCity()`,
+`commitDriverName()`, `loadDriverNames()`, `ORIGIN_DRIVER_NAMES_KEY`, the `_originNames` cache
+(still loaded on every build — the `_originNamesReady` gate depends on it), the
+`_originEditingCity` guard in `refreshOriginCities()`, the input CSS, and the
+driver-name/city-sub CSS rules. Those last two are currently unused; **kept deliberately** so
+re-wiring is the three items above and nothing else. **Stored names are NOT wiped** — a
+dispatcher who named cities still has them, and they reappear when the wiring returns.
+
+The harness proves this rather than asserting it: calling `startRenameCity('TULSA, OK')`
+directly still opens the editor pre-filled from storage, and committing through it still writes.
+
+**Each button now renders the plain city string**, even when a name is stored — confirmed with
+two named cities in storage: single `ext-origin-city-label` child, no driver-name or city-sub
+element, `textContent` exactly the city.
+
+**CHANGE 2 — hit target. Final values: `font-size: 14px`, `padding: 8px 14px`.** Was
+`font-size: 12px` / `padding: 1px 6px`. The label also gets an explicit `font-size:14px` rule so
+its size cannot drift if the pill's own font-size is later changed for another reason. Horizontal
+row + wrap layout unchanged; colours still `var(--ext-*)`; `nightMode.js` untouched.
+
+Computed geometry: item **19.0px → 35.5px** tall (14 × 1.25 line-height + 16 padding + 2 border),
+about 28px wider than its text.
+
+**⚠️ OVERLAP — the panel got taller and this makes existing overlap worse. Reported, not
+silently adjusted.**
+
+| | Before | After |
+|---|---|---|
+| panel height, 1 row | 33.0px | **49.5px** |
+| panel height, 2 rows (wrapped) | ~61px | **91.0px** |
+
+- **BESIDE branch** (centred on the results row via `translateY(-50%)`): the panel now extends
+  **±24.8px** from the row's centre on one row, **±45.5px** when wrapped. The results row itself
+  is ~32px, so a one-row panel already reaches ~9px below it, and a wrapped one ~29px below.
+  **If the gap between the results row and the chip band is under ~9px it will now overlap the
+  chips, and a wrapped panel almost certainly will.** I cannot measure that gap without a
+  browser, so this is arithmetic plus an unknown, not a conclusion.
+- **BELOW branch** (narrow windows, under 200px free to the right — `row.bottom + 6px`): this
+  already sat on the chip band. It now covers **~17px more** of it, and a wrapped panel at 91px
+  tall could reach past the chips to the first load card.
+
+Neither was adjusted — the task asked for a bigger target and for this to be reported.
+TC-ORIGIN-1 step 6 is where the dispatcher judges it.
+
+**Verified — 41 checks, no browser.** Click/Enter/Space produce no input and no listeners are
+attached at all; plain city text renders with names in storage; the rename machinery is still
+callable and still persists; padding/font-size read from the real stylesheet; row+wrap layout,
+tokens-only colours and `nightMode.js` all unchanged; panel still builds, positions and tears
+down. One failure during the run was a harness bug — the padding regex matched the rule's own
+comment recording the OLD values (`was … padding:1px 6px`) instead of the live declaration.
+**Six-point smoke checklist NOT RUN.**
+
 ### 2026-08-05 — FIX: origin panel no longer flashes to the corner on every board refresh
 
 **File:** `content/originCities.js`, the not-found branch of `positionOriginPanel()` plus the

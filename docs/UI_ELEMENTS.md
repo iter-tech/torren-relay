@@ -54,11 +54,24 @@ Amazon — no clicks, no writes, no requests.
 | ext-origin-cities | div[role=complementary] | Panel container, `aria-label="Active origin cities"`. `position:fixed` with **`top`/`left` written by JS at runtime, never in CSS** — see "Placement is measured" below. Wrapping flex **row**: `display:flex; flex-wrap:wrap; align-items:center; gap:8px`, `max-width:calc(100vw - 16px)`. `z-index:2147483646`, one below the sidebar so the sidebar wins any overlap. **Repositioned 2026-08-05** from a fixed bottom-left pin. |
 | ext-origin-cities-title | div | Caption "Active origin cities", 10px uppercase muted. **Inline at the left of the row**, not a block heading above it; `flex-shrink:0` keeps it whole when the cities wrap. |
 | ext-origin-cities-list | div | Flex **row**, `flex-wrap:wrap; gap:6px`. Cities run left to right and wrap to a second row only when they do not fit. |
-| ext-origin-city | div[role=button] | One pill per city. **Clickable** (`tabindex="0"`, Enter/Space also open it) — clicking swaps it for `ext-origin-name-input`. Carries `data-city` = the exact extracted city string, which is also the storage key. Subtle token-coloured pill (`--ext-n100` bg, `--ext-n200` border): city values contain their own comma, so whitespace alone reads as one run-on string. `white-space:nowrap`; `title` shows the full label plus a rename hint. |
-| ext-origin-city-label | div | The city text when **no** driver name is set — the pill's only child in that state. `textContent` only (page data). |
-| ext-origin-driver-name | div | The driver name, primary label, shown when a name **is** set. 12px/600, `--ext-n700`. `textContent` only — dispatcher-entered string, never `innerHTML`. |
-| ext-origin-city-sub | div | The city text beneath a driver name — 10px, `--ext-n500`. **Never dropped**: the dispatcher must always be able to see which city a name belongs to. (`--ext-text-muted` does not exist in `designTokens.js`; `--ext-n500` is the nearest existing muted token and matches this panel's own caption.) |
-| ext-origin-name-input | input[type=text] | The rename field. Pre-filled with the current name, empty if unnamed; `placeholder` is the city; `maxlength="24"`. **Enter or blur commits, Escape cancels, empty clears.** Accent border, `--ext-surface` background. |
+| ext-origin-city | div[role=button] | One pill per city. **The click is currently a NO-OP** (2026-08-05) — it is reserved for per-city filtering in a later task. Keeps `role="button"`, `tabindex="0"` and `cursor:pointer` because it remains a button awaiting its action, but **no `click` or `keydown` listener is attached**. `title` is the plain city — no action hint, since none is performed. Carries `data-city` = the exact extracted city string (also the storage key). **Sizing (2026-08-05): `font-size:14px`, `padding:8px 14px`** — was 12px / `1px 6px`, which gave a ~19px-tall target that was fiddly to hit; now ~35.5px tall and ~28px wider than its text. Token-coloured pill (`--ext-n100` bg, `--ext-n200` border), `white-space:nowrap`. |
+| ext-origin-city-label | div | The city text — **currently the pill's only child in every state.** Explicit `font-size:14px` so it cannot drift if the pill's own size changes. `textContent` only (page data). |
+| ext-origin-driver-name | div | **Not currently rendered.** The driver name as primary label, shown when renaming was reachable. 12px/600, `--ext-n700`. CSS retained for re-wiring — see the rename note below. |
+| ext-origin-city-sub | div | **Not currently rendered.** The city text beneath a driver name — 10px, `--ext-n500`. CSS retained for re-wiring. (`--ext-text-muted` does not exist in `designTokens.js`; `--ext-n500` is the nearest existing muted token.) |
+| ext-origin-name-input | input[type=text] | **Not reachable by click.** The rename field: pre-filled with the current name, `placeholder` = the city, `maxlength="24"`, Enter/blur commits, Escape cancels, empty clears. Still built by `startRenameCity()`, which remains callable. |
+
+**⚠️ Renaming is DISCONNECTED, not deleted (2026-08-05).** Three things were removed from
+`buildCityItem()`: the `click` listener, the Enter/Space `keydown` listener, and the two-line
+named render. Everything else is intact and callable — `startRenameCity()`, `commitDriverName()`,
+`loadDriverNames()`, `ORIGIN_DRIVER_NAMES_KEY`, the `_originNames` cache (still loaded on every
+build), the `_originEditingCity` guard, and the CSS for the input, driver name and city sub.
+**Stored driver names are not wiped** and reappear when those three are restored. Buttons show
+the plain city string meanwhile, even for cities that have a name in storage.
+
+**⚠️ The taller buttons make the panel taller: 33.0px → 49.5px on one row, ~91px when wrapped.**
+In the BESIDE branch it now extends ±24.8px from the results-row centre (±45.5px wrapped), so it
+reaches further toward the chip band; in the BELOW branch it covers ~17px more of the chips and a
+wrapped panel could reach the first load card. Not adjusted — see TC-ORIGIN-1 step 6.
 
 **Driver names (2026-08-05).** Persisted in `chrome.storage.local` under
 `ORIGIN_DRIVER_NAMES_KEY` (`extOriginDriverNames`) as `{ "LITTLE ROCK, AR": "Mike" }` — key is the
