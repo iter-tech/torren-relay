@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "acceptEdits",
     "allow": [
       "Edit",
       "Write",
@@ -16,7 +17,30 @@
       "Bash(findstr:*)",
       "PowerShell(findstr:*)",
       "Bash(Select-String:*)",
-      "PowerShell(Select-String:*)"
+      "PowerShell(Select-String:*)",
+
+      "Bash(node --check:*)",
+      "Bash(git show:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git branch:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(wc:*)",
+      "Bash(find:*)",
+      "Bash(md5sum:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(echo:*)",
+      "Bash(mkdir:*)",
+      "PowerShell(git show:*)",
+      "PowerShell(Get-ChildItem:*)",
+      "PowerShell(Get-Content:*)",
+      "PowerShell(Test-Path:*)"
     ],
     "deny": [
       "Bash(git push:*)",
@@ -26,7 +50,34 @@
       "Bash(rm:*)",
       "PowerShell(rm:*)",
       "Bash(Remove-Item:*)",
-      "PowerShell(Remove-Item:*)"
+      "PowerShell(Remove-Item:*)",
+
+      "Bash(git reset --hard:*)",
+      "PowerShell(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "PowerShell(git clean:*)",
+      "Bash(git checkout --:*)",
+      "PowerShell(git checkout --:*)",
+      "Bash(del:*)",
+      "PowerShell(del:*)",
+      "Bash(rmdir:*)",
+      "PowerShell(rmdir:*)",
+      "Bash(npm install:*)",
+      "PowerShell(npm install:*)",
+      "Bash(npm i:*)",
+      "PowerShell(npm i:*)",
+      "Bash(npm ci:*)",
+      "PowerShell(npm ci:*)",
+      "Bash(npx:*)",
+      "PowerShell(npx:*)",
+      "Bash(pip install:*)",
+      "PowerShell(pip install:*)",
+      "Bash(curl:*)",
+      "PowerShell(curl:*)",
+      "Bash(wget:*)",
+      "PowerShell(wget:*)",
+      "PowerShell(Invoke-WebRequest:*)",
+      "PowerShell(Invoke-RestMethod:*)"
     ]
   }
 }

@@ -107,6 +107,29 @@ If no panel or no list is found: **read nothing** and warn. Never fall back to t
 **Do NOT anchor on text.** "Recently added" is not always rendered. "Similar matches" is localised
 across all 11 Relay domains. Both are unusable as anchors.
 
+### 📌 The 10-of-10 capture (2026-08-13) — the recently-added card's class
+
+On a board reading **"Showing 1 - 10 of 10 results"**, the main list held exactly **10 children**:
+
+| Count | Class |
+|---|---|
+| 9 | `div.load-card` |
+| **1** | **`div.wo-card-header--highlighted`** — the recently-added card, at **index 4** |
+
+**The highlighted card is a DIRECT CHILD here, not an inner wrapper.** That is the case
+`content/loadParser.js` must catch, and its selector list already does:
+
+```js
+'div.load-card, div.load-card__selected, div.wo-card-header--highlighted'
+```
+
+**There is no silent alert-miss.** A newly-added load rendered with this class IS parsed, so it
+reaches `detectNewLoads` → highlight + sound. Do not "simplify" that selector list to the first
+two — the third is what catches the new load, which is the one the dispatcher most needs.
+
+⚠ Note the same class can ALSO appear as an inner child of a `.load-card`. `parseLoads()` handles
+both shapes with its `contains()` dedupe, keeping only the outermost match.
+
 ### 🔑 Count cards by ID SHAPE, not by card class
 
 Measured on a live "9 of 9" board:

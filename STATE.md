@@ -575,9 +575,17 @@ are off. The thread's next step is a *decision*, not an investigation: `cityAssi
 this entire line of work the dispatcher will see. It needs its own review, its own TEST_CASES
 entries, and `SAFETY.md` re-read before anything hides a load.
 
-**The harness estate is the immediate blocker on further code changes (PLAN.md task 4).** Five
-suites are red or crashing; two are green and current. Until that is fixed, the next code change
-lands with an unreadable test signal.
+**loadParser hardened, UNVERIFIED LIVE (2026-08-13).** `parseLoads()` now finds the main list via
+the summary-panel anchor instead of document order. **No on-screen change is expected** — the old
+code was already selecting the right list; this removes the unasserted order dependence that
+would have fed Similar-matches loads into the highlight and the alert sound. **It touches the
+alert path**, so Ihor must confirm a new load still highlights AND still sounds before this is
+considered done.
+
+**✅ The harness estate is rebuilt (2026-08-13) — the blocker is cleared.** 204 green, 0 red,
+across two suites on a shared `fixtures.mjs` that models the live-captured DOM. The next code
+change now lands with a readable signal. Nothing else is blocking; the thread's next step
+(PLAN.md task 6, log-only → filtering) is a scoping decision, not an investigation.
 
 **`citydrop-harness` joined the rebuild list (2026-08-13).** Five of its eight sections drive the
 retired clone path and its stubs are plain objects rather than `Response` instances, so it now
@@ -899,13 +907,19 @@ intent was broader.
   unknown.
 - **RESOLVED 2026-08-13 — debug flags.** All five back to shipped state (`DEBUG_LEVEL = 1`, both
   `CAPTURE_RESPONSES` and both `CITY_ASSIGN_DEBUG` `false`). Diagnostic code retained and dormant.
-- **⚠ THE ACTIVE BLOCKER — five harness suites red or crashing.** `cityaccum`, `cityscope`,
-  `citydiag`, `cityassign` stub the summary panel as an ancestor, provide no `getElementById`, and
-  use non-UUID fixture ids; `citydrop` drives the retired clone path and crashes. Green and
-  current: `citysibling` (56), `citypiggy` (53). **Blocks every subsequent code change** — the
-  next run's signal is unreadable until this is fixed. PLAN.md task 4.
-- **`content/loadParser.js:124` unaudited** — same "first `div.load-list`" assumption that caused
-  the 0/N bug, and it feeds highlighting and alerts, which the dispatcher DOES see. PLAN.md task 5.
+- **RESOLVED 2026-08-13 — the harness estate.** Seven suites retired, two built on a shared
+  `fixtures.mjs` modelling the live DOM: `cityassign-suite` (91) + `capture-suite` (64) =
+  **155 green, 0 red**. Zero production changes in that task.
+- **Known, deliberately unfixed (cosmetic):** `logIdShapeSamples`'s trailing-index hint
+  (`/[-_]\d+$/`) mislabels a valid UUID whose final group is all digits (~0.3% of ids). Wrong word
+  in a debug-only log line; cannot affect the join, the assignment, or anything on screen.
+  Recorded as a passing assertion in `cityassign-suite` §13b so a future fix has a test to flip.
+- **RESOLVED 2026-08-13 — `content/loadParser.js:124`.** Audited, then hardened. It was **not**
+  reading Similar-matches cards: document order put main first and card collection was already
+  scoped to it, so nothing on screen was wrong. The lookup now anchors structurally on the summary
+  panel (following siblings) instead of relying on that order, and — unlike cityAssign — falls
+  back to the old behaviour with a warn rather than returning null, so the highlight and alert can
+  never go silent. The suspected silent alert-miss was **disproved** by a live 10-of-10 capture.
 - **Still unconfirmed from live logs (2026-08-06):** whether the 700 ms settle delay is right on
   a slow board, whether 150 mi is a sensible cutoff, and whether a real refresh buffers more than
   one `/search` response (api-samples.md §6.4). None of these blocked the join; all three need a

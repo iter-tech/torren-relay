@@ -2,6 +2,100 @@
 
 ## [Unreleased]
 
+### 2026-08-13 — loadParser main-list lookup hardened (no on-screen change)
+
+**File:** `content/loadParser.js`. One change: `parseLoads()` now calls a new local
+`findMainLoadList()` instead of `document.querySelector('div.load-list')`.
+
+**This is hardening, not a bug fix — nothing on screen changes today.** The Phase 1 audit found
+the old code was **not** reading Similar-matches cards: `querySelector` returns the first match in
+document order, main precedes similar in the captured DOM, and card collection was already scoped
+to that element. The problem was that the correctness rested entirely on **document order**, with
+nothing asserting it. Had Amazon reordered those blocks, `loadParser` would have started feeding
+Similar-matches loads into `detectNewLoads` — which fires the **highlight and the alert sound**.
+That is the failure mode removed.
+
+**The lookup:** `getElementById('search-results-summary-panel')`, falling back to an element whose
+`className` contains `search-results-summary__panel`, then walk its **following siblings** to the
+first `div.load-list`. No `css-<hash>` selectors; no "Recently added" text anchor.
+
+**⚠ Deliberately different from `cityAssign.findMainResultsList()`:** that one returns `null` when
+the panel is missing. **This one never does.** Every failure path falls back to the previous
+`document.querySelector('div.load-list')` and logs a warn with
+`{ panelFound, loadListsInDocument, fallbackFound }`. Reading nothing here would silently stop the
+highlight and the alert — strictly worse than the fragility being fixed.
+
+**Not shared with cityAssign, on purpose** (per the Phase 1 recommendation): that module is
+log-only, flag-gated, and loads *after* this one in manifest order. The shipped alert path must
+not depend on a debug module. The ~20 lines are duplicated knowingly.
+
+**Unchanged:** the card selector list (all three, including
+`div.wo-card-header--highlighted`), the `contains()` dedupe, `detectNewLoads`, `knownLoadIds`,
+highlighting, the alert, auto-open and `checkPriceSurge`.
+
+**Live capture recorded** in AMAZON_SELECTORS.md: a "Showing 1 - 10 of 10 results" board held 9
+`div.load-card` plus **one `div.wo-card-header--highlighted` at index 4** — the recently-added
+card, as a direct child. The existing selector list catches it, so **the suspected silent
+alert-miss does not exist**; that question is closed.
+
+**Verification:** new `loadparser-suite` — **49 checks**, including the 10-of-10 board with the
+highlighted card counted, panel-present-not-ancestor, panel-missing → falls back + warns + still
+returns cards, and **similar list rendered FIRST in document order → main still chosen** (the case
+the old code would have got wrong). Full run **204 green, 0 red**. **Not exercised in a browser.**
+
+### 2026-08-13 — Test suites rebuilt on the real captured DOM (TESTS ONLY, zero production changes)
+
+**No production file was touched.** Verified: all five debug flags still shipped-off, and
+`content/cityAssign.js`, `content/networkObserver.js`, `utils/constants.js`, `content/content.js`
+and `content/originCities.js` are byte-unchanged.
+
+**New: `fixtures.mjs`** — one shared module modelling the live-captured board, so the structure is
+defined once and cannot drift between suites again. That drift is exactly what cost a day: every
+old fixture stubbed the summary panel as an **ancestor** of the load list, which the live capture
+disproved. It provides the real tree (panel as a **sibling**, main list + `pagination-bar`,
+similar block last), real-shaped UUIDs, `STARTING_SOON` tags, a mutation/layout tracker that lets
+any suite assert zero, and a flag-forcing helper so a suite sets capture on regardless of what the
+repo ships.
+
+**Retired (7 files → `scratchpad/retired/`):**
+- `cityaccum-harness` — tested the id accumulator, `mergeIntoAccumulator`, `resetAccumulator` and
+  the RESET log lines. All deliberately deleted 2026-08-12; verified absent from production.
+- `citydrop-harness` — five of eight sections drove the clone-based capture retired with the
+  `Response.json` piggyback; verified `.clone()` no longer exists in code.
+- `cityscope`, `citydiag`, `cityassign-harness` — fixture faults: panel-as-ancestor, no
+  `getElementById`, non-UUID ids like `'p1'`/`'m1'` that the UUID filter correctly rejects.
+- `cityraw-harness` — **a sixth broken suite not in the brief.** It asserted the old `CITY RAW 1`
+  description text and used the ancestor stub; it broke at the sibling fix and was not re-run that
+  turn. Its decorated-id scenarios (prefixed / colon / trailing index) are now **unreachable** —
+  `readRenderedCardIds` filters to bare UUIDs, so a decorated id never reaches the diagnostic.
+- `citysibling` and `citypiggy` — green, but fully subsumed by the two new suites.
+
+**New: `cityassign-suite` (91 checks)** — main-list scoping on the real shape, the measured
+class-8-vs-UUID-9 case, `STARTING_SOON` exclusion, panel-present-not-ancestor, panel-absent
+(read nothing, never fall back), two-saved-search-tabs selection, mismatch-skips-cycle, "Showing"
+parse variants, the assignment itself (nearest city, 150 mi threshold, all three unmatched
+reasons), per-cycle self-containment, teardown/flag-off, and the ported `CITY RAW` coverage.
+
+**New: `capture-suite` (64 checks)** — the abort case (Amazon's read succeeds while a competing
+read is cancelled), promise-identity passthrough, zero-cost paths, the drop reasons that still
+exist, `CAPTURE OK` tab identification, the XHR path, seq numbering, double-install, our-failure-
+cannot-break-Amazon, no Response mutation, and shipped-flag-state assertions.
+
+**Total: 155 green, 0 red** (was 109 green across two suites, with five red or crashing).
+
+**⚠ One cosmetic product defect found and NOT fixed** (this task is tests-only):
+`logIdShapeSamples`'s trailing-index hint uses `/[-_]\d+$/`, which fires on any **valid** UUID
+whose final 12-hex group happens to be all digits (~0.3% of ids), labelling it "ends with a
+TRAILING INDEX". It is a wrong word in a debug-only log line — it cannot affect the join, the
+assignment, or anything the dispatcher sees. Recorded by an explicit passing assertion
+(`cityassign-suite` §13b) so a future fix has a test to flip.
+
+**One earlier assertion of mine was wrong, not the product:** a test expected total amnesia
+between cycles. The accumulator is gone, but a **bounded 4-response buffer is retained by
+design** — one refresh fires several `/search` calls, so the cycle must be able to choose among
+them. The suite now asserts the real contract, including that the bound is real (four unrelated
+responses evict the board's own).
+
 ### 2026-08-13 — Per-cycle cityAssign VERIFIED live; all five debug flags returned to shipped state
 
 **Verified on a live board**, across several auto-refresh cycles: `CITY DIAG 0/5` **MATCH: YES**

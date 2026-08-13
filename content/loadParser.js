@@ -116,12 +116,75 @@ function parseOneCard(card) {
   };
 }
 
+// Locates the MAIN results list, structurally rather than by document order (2026-08-13).
+//
+// WHY THIS EXISTS. The board renders TWO div.load-list elements: main results and the
+// "Similar matches" block (AMAZON_SELECTORS.md). The old code took
+// `document.querySelector('div.load-list')` — the first in document order — and relied on main
+// happening to come first. On the captured DOM it does, so this is HARDENING, not a bug fix:
+// nothing on screen changes today. But the reliance is invisible and unasserted, and if Amazon
+// ever reorders those blocks, this function would start feeding Similar-matches loads into
+// detectNewLoads — which fires the sound alert and the highlight. That is the failure this
+// removes.
+//
+// The anchor is the summary panel ("Showing 1 - N of N results"), which is a SIBLING of the
+// results, not a container — walking UP for it finds nothing (that mistake cost cityAssign a
+// day). Panel id first, class second. Never a css-<hash> class: those rotate on every deploy.
+// Never the text "Recently added": that block is not always rendered.
+//
+// ⚠ DELIBERATELY DIFFERENT FROM cityAssign.findMainResultsList(). That one returns null when the
+// panel is missing, because reading nothing there costs only a log line. HERE, reading nothing
+// would silently stop the highlight and the alert sound — worse than the fragility being fixed.
+// So every failure path falls back to the previous behaviour and warns.
+//
+// NOT shared with cityAssign.js on purpose: that module is log-only, flag-gated and loads AFTER
+// this one in manifest order. The shipped alert path must not depend on it.
+function findMainLoadList() {
+  logger.log('loadParser', 'findMainLoadList called');
+  const fallback = document.querySelector('div.load-list');
+  let panel = null;
+  try {
+    panel = document.getElementById('search-results-summary-panel');
+    if (!panel) {
+      const divs = document.querySelectorAll('div');
+      for (let i = 0; i < divs.length; i++) {
+        if (String(divs[i].className || '').indexOf('search-results-summary__panel') !== -1) {
+          panel = divs[i];
+          break;
+        }
+      }
+    }
+    if (panel) {
+      let sib = panel.nextElementSibling;
+      while (sib) {
+        const found = (sib.matches && sib.matches('div.load-list'))
+          ? sib
+          : (sib.querySelector ? sib.querySelector('div.load-list') : null);
+        if (found) return found;
+        sib = sib.nextElementSibling;
+      }
+    }
+    // Fallback, never null-return: see the warning above.
+    logger.warn('loadParser', 'main results panel/list not found — falling back to the first ' +
+      'div.load-list in document order (highlight and alert must keep working)', {
+        panelFound: !!panel,
+        loadListsInDocument: document.querySelectorAll('div.load-list').length,
+        fallbackFound: !!fallback
+      });
+    return fallback;
+  } catch (e) {
+    logger.error('loadParser', 'findMainLoadList failed — falling back', {
+      error: e, panelFound: !!panel, fallbackFound: !!fallback
+    });
+    return fallback;
+  }
+}
+
 function parseLoads() {
   logger.log('loadParser', 'parseLoads called');
 
-  // Use only the FIRST div.load-list (main results).
-  // The second div.load-list is "Similar matches" — ignored entirely.
-  const mainList = document.querySelector('div.load-list');
+  // The MAIN results list only. The other div.load-list is "Similar matches" — never read.
+  const mainList = findMainLoadList();
   if (!mainList) {
     logger.warn('loadParser', 'no load-list found');
     return [];
