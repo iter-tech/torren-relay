@@ -58,6 +58,8 @@ var _cityAssignBuffers  = [];    // recent captured responses, oldest first
 var _cityAssignTimer    = null;  // settle-debounce handle
 var _cityAssignRunning  = false; // re-entry guard — the cycle awaits, refreshes do not wait
 var _cityAssignListener = null;  // kept so teardown can remove exactly what init added
+var _cityEndpointListener = null; // endpoint recon listener (2026-08-08), removed alongside it
+var _cityTraceListener  = null;  // capture drop/ok trace listener (2026-08-13)
 
 // city string ("TULSA, OK") -> { lat, lng } or null when unresolvable.
 //
@@ -65,6 +67,27 @@ var _cityAssignListener = null;  // kept so teardown can remove exactly what ini
 // would be re-requested on every single refresh forever. See resolveCityCoords for the cost
 // note — this cache is the only reason this feature is not a per-refresh network call.
 var _cityCoordCache = {};
+
+// ── NO CROSS-CYCLE STATE (2026-08-12) ─────────────────────────────────────────────────────
+//
+// There is deliberately NO id accumulator here any more. Each cycle matches the cards currently
+// in the main list against the CURRENT /search response and remembers nothing.
+//
+// WHAT WAS REMOVED AND WHY. An accumulator merged every /search page across a "search session",
+// on the belief that the board paginated at 5 and filled in as the dispatcher scrolled. That
+// belief was wrong: it came from misreading the "Similar matches" block. The MAIN results list
+// renders all N at once ("10 of 10"), so there was never anything to accumulate.
+//
+// Both reset rules it needed were also wrong, each disproven on a live board:
+//   - searchAuditId changed per REQUEST, not per search, so it wiped the store nearly every
+//     cycle.
+//   - originCities fired during the NORMAL staged loading of the SAME search — the chips arrive
+//     one, then all five — wiping 51 ids mid-fill.
+//
+// A stateless cycle has neither failure mode, and with all N present in one response it needs
+// no memory to be complete. `_cityCoordCache` above is NOT part of this: it caches city-name ->
+// coordinates from the cities endpoint, which is a genuine network saving and has nothing to do
+// with load ids.
 
 // ── GEOMETRY ──────────────────────────────────────────────────────────────────────────────
 
@@ -107,21 +130,131 @@ function parseCityState(cityString) {
 // PURE READS: querySelector / querySelectorAll / .id only. No getBoundingClientRect, no
 // offsetWidth/Height, no getComputedStyle — nothing that forces a layout pass. This function
 // cannot make the board janky.
+// Finds the MAIN results list, excluding "Similar matches" (2026-08-12).
+//
+// ROOT CAUSE THIS FIXES. The board renders TWO div.load-list elements: the main results and
+// the "Similar matches" block (structure documented in filterSimilar.js). The old reader took
+// `document.querySelector('div.load-list')` — the FIRST in document order — and assumed that
+// was the main one. Live it is not reliably so: a search showing "9 of 9 results" collected 13
+// cards, the extra 4 being similar-matches cards. Those never appear in the /search response,
+// so they could never join, and the intersection sat at 0/N permanently.
+//
+// THE STABLE ANCHOR. The main list lives inside the results panel whose class or id contains
+// the substring "search-results-summary". Matched as a SUBSTRING on className/id, deliberately
+// NOT as a css-<hash> class — those rotate on every Amazon deploy and this repo has already
+// been bitten three times by hashed selectors (AMAZON_SELECTORS.md).
+//
+// Returns null rather than falling back to the document. A fallback would silently re-include
+// the similar cards, which is exactly the bug being fixed — better to read nothing and say so.
+// ⚠ THE SUMMARY PANEL IS A SIBLING OF THE RESULTS, NOT AN ANCESTOR (captured live 2026-08-13).
+// An earlier version walked UP from each load-list looking for this token and found nothing, so
+// it read ZERO cards on every cycle. Real structure — see AMAZON_SELECTORS.md:
+//
+//   div.<hash>
+//   ├── div#search-results-summary-panel        <- "Showing 1 - N of N results"
+//   ├── div.<hash> > div.load-list              <- MAIN RESULTS
+//   └── div.<hash> > ... > div.load-list        <- SIMILAR MATCHES (ignore forever)
+//
+// Both anchors are stable text-free identifiers. NEVER select on the css-<hash> classes around
+// them — those rotate on every Amazon deploy.
+var MAIN_PANEL_ID    = 'search-results-summary-panel';
+var MAIN_PANEL_CLASS = 'search-results-summary__panel';
+
+// A card's join id is a bare UUID on a div[id] inside the card. Cards also carry non-UUID ids
+// such as div[id="STARTING_SOON"], so the shape is the filter — see readRenderedCardIds().
+var CARD_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function findMainResultsList() {
+  logger.log('cityAssign', 'findMainResultsList called');
+  var lists = null;
+  var panel = null;
+  try {
+    lists = document.querySelectorAll('div.load-list');
+
+    // The summary panel — the "Showing 1 - N of N results" block. Id first, since the live DOM
+    // carries a real one; the class is the fallback in case the id is dropped.
+    panel = document.getElementById(MAIN_PANEL_ID);
+    if (!panel) {
+      var all = document.querySelectorAll('div');
+      for (var a = 0; a < all.length; a++) {
+        if (String(all[a].className || '').indexOf(MAIN_PANEL_CLASS) !== -1) {
+          panel = all[a];
+          break;
+        }
+      }
+    }
+
+    // The panel is a SIBLING of the results, not an ancestor of them. Walk forward from it and
+    // take the first load-list found — the main results sit in the next sibling block, and the
+    // Similar-matches list is in a later one, so document order does the separating.
+    if (panel) {
+      var sib = panel.nextElementSibling;
+      while (sib) {
+        var found = sib.matches && sib.matches('div.load-list')
+          ? sib
+          : (sib.querySelector ? sib.querySelector('div.load-list') : null);
+        if (found) return found;
+        sib = sib.nextElementSibling;
+      }
+    }
+
+    logger.warn('cityAssign', 'main results list not found — reading NO cards rather than ' +
+      'falling back to the whole document (that fallback is what re-included similar matches)', {
+        panelFound: !!panel, loadListsInDocument: lists ? lists.length : null
+      });
+    return null;
+  } catch (e) {
+    logger.error('cityAssign', 'findMainResultsList failed', {
+      error: e, panelFound: !!panel, loadListsInDocument: lists ? lists.length : null
+    });
+    return null;
+  }
+}
+
+// Parses N from the board's "Showing 1 - N of N results" line. Text-anchored, same reasoning as
+// originCities.js: the visible copy is far more stable than the hashed classes around it.
+// Returns null when the line is absent or unparseable — never a guess.
+function readShowingTotal() {
+  logger.log('cityAssign', 'readShowingTotal called');
+  try {
+    var els = document.querySelectorAll('span, div, p');
+    var re = /Showing\b[^]*?\bof\s+([\d,]+)\s+results?/i;
+    for (var i = 0; i < els.length; i++) {
+      // Leaf-ish only: an ancestor's textContent would concatenate unrelated copy.
+      if (els[i].children && els[i].children.length > 0) continue;
+      var t = els[i].textContent;
+      if (!t) continue;
+      var m = re.exec(t.trim());
+      if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+    }
+    return null;
+  } catch (e) {
+    logger.error('cityAssign', 'readShowingTotal failed', { error: e });
+    return null;
+  }
+}
+
 function readRenderedCardIds() {
   logger.log('cityAssign', 'readRenderedCardIds called');
   var ids = [];
   try {
-    // FIRST div.load-list only. The second is "Similar matches" and is not part of the
-    // dispatcher's origin-city board — including it would inflate the counts.
-    var mainList = document.querySelector('div.load-list');
-    if (!mainList) return ids;
-    var cards = mainList.querySelectorAll(
-      'div.load-card, div.load-card__selected, div.wo-card-header--highlighted'
-    );
-    for (var i = 0; i < cards.length; i++) {
-      var idEl = cards[i].querySelector('div[id]');
-      if (!idEl || !idEl.id) continue;
-      if (ids.indexOf(idEl.id) === -1) ids.push(idEl.id);
+    // Scoped to the MAIN list only — see findMainResultsList().
+    var mainList = findMainResultsList();
+    if (!mainList) return ids;   // already warned; never fall back to the whole document
+
+    // COUNT BY ID SHAPE, NOT BY CARD CLASS (2026-08-13). Measured on a live "9 of 9" board:
+    // `div.load-card, div.load-card__selected` found 8, UUID-shaped div[id] found 9, the board
+    // said 9. The recently-added/highlighted card carries a different class, so any
+    // class-based count silently loses it. Every card's join id is a bare UUID, so matching the
+    // shape is both simpler and complete.
+    //
+    // The filter is load-bearing: cards also contain div[id="STARTING_SOON"], which is not an
+    // id we can join on and must never reach the assignment.
+    var idEls = mainList.querySelectorAll('div[id]');
+    for (var i = 0; i < idEls.length; i++) {
+      var id = idEls[i].id;
+      if (!id || !CARD_UUID_RE.test(id)) continue;
+      if (ids.indexOf(id) === -1) ids.push(id);
     }
   } catch (e) {
     logger.error('cityAssign', 'readRenderedCardIds failed', { error: e });
@@ -164,7 +297,9 @@ async function resolveCityCoords(cityString) {
   }
 }
 
-// Chooses which captured response describes the board on screen.
+// Chooses which captured response describes the board on screen. Since 2026-08-12 this is once
+// again the assignment's source, not just a diagnostic — with no accumulator, the cycle matches
+// against exactly this response.
 //
 // A refresh can deliver more than one /search response (other saved-search tabs), and the
 // newest is NOT reliably the right one. The right one is whichever shares the most ids with the
@@ -185,7 +320,12 @@ function pickBuffer(cardIds) {
     if (n > bestCount) { bestCount = n; best = buf; }
   }
   if (bestCount <= 0) {
-    logger.warn('cityAssign', 'no captured response intersects the cards on screen — cycle skipped', {
+    // Not "cycle skipped": the cycle still runs and reports every card unmatched, so there is
+    // exactly one CITY ASSIGN line per cycle whatever happens. On a healthy board this warn
+    // should never appear — the response describing the rendered cards is normally buffered.
+    // If it does appear, the per-response breakdown below says which responses were held.
+    logger.warn('cityAssign', 'no buffered response shares an id with the cards on screen — ' +
+      'this cycle will report every card unmatched', {
       buffers: _cityAssignBuffers.length, cardCount: cardIds.length, intersections: breakdown.join(' | ')
     });
     return null;
@@ -327,7 +467,9 @@ function readCardIdProvenance(limit) {
   logger.log('cityAssign', 'readCardIdProvenance called');
   var out = [];
   try {
-    var mainList = document.querySelector('div.load-list');
+    // Same scope as readRenderedCardIds (2026-08-12) — otherwise this diagnostic would print
+    // similar-matches cards the reader no longer collects, and the two would disagree.
+    var mainList = findMainResultsList();
     if (!mainList) return out;
     var cards = mainList.querySelectorAll(
       'div.load-card, div.load-card__selected, div.wo-card-header--highlighted'
@@ -396,10 +538,10 @@ function logIdShapeSamples(cardIds) {
 
     // ── 1. the DOM side, raw ──
     logger.log('cityAssign',
-      'CITY RAW 1  DOM ids read from: document.querySelector("div.load-list") ' +
-      '-> .querySelectorAll("div.load-card, div.load-card__selected, ' +
-      'div.wo-card-header--highlighted") -> per card .querySelector("div[id]") ' +
-      '-> the .id DOM PROPERTY of that CHILD element (not the card itself, not a data-* attr)');
+      'CITY RAW 1  DOM ids read from: getElementById("' + MAIN_PANEL_ID + '") ' +
+      '-> its FOLLOWING SIBLINGS -> first div.load-list found (main results ONLY, ' +
+      'similar-matches excluded) -> .querySelectorAll("div[id]") -> the .id DOM PROPERTY, ' +
+      'kept only when it is a bare UUID (this is what excludes div[id="STARTING_SOON"])');
     for (var i = 0; i < cardIds.length && i < 3; i++) {
       logger.log('cityAssign', 'CITY RAW 1  DOM ID [' + i + ']: ' + pipe(cardIds[i]) +
         '  length: ' + cardIds[i].length);
@@ -636,15 +778,49 @@ async function runCityAssignCycle() {
       logger.warn('cityAssign', 'no load cards rendered — cycle skipped');
       return;
     }
-    // Diagnostics parts 1-3 (2026-08-08). BEFORE pickBuffer, so the inventory is printed even
-    // on a cycle that bails out below — that cycle is the most worth diagnosing.
+    // MAIN-LIST SCOPE CHECK (2026-08-12). THE tell that similar-matches cards are excluded:
+    // the collected count must EQUAL the N the board prints in "Showing 1 - N of N results".
+    // Before the scope fix a 9-result board collected 13. Logged first so it is visible even
+    // if something below throws.
+    var showingN = readShowingTotal();
+    logger.log('cityAssign', 'CITY DIAG 0/5  main-list scope check — collected ' +
+      cardIds.length + ' card(s)  |  board says "of ' +
+      (showingN === null ? '?' : showingN) + ' results"  |  ' +
+      (showingN === null
+        ? 'MATCH: unknown (could not parse the Showing line)'
+        : (cardIds.length === showingN
+            ? 'MATCH: YES — similar-matches cards are excluded'
+            : 'MATCH: NO — collected ' + (cardIds.length > showingN ? 'MORE' : 'FEWER') +
+              ' than the board reports (diff ' + (cardIds.length - showingN) + ')')));
+
+    // Diagnostics parts 1-3 (2026-08-08). BEFORE the mismatch bail below, so a cycle that stops
+    // still leaves the full inventory in the console — that cycle is the most worth diagnosing.
     logBufferInventory(cardIds);
+
+    // A MISMATCHED SET IS NOT USABLE (2026-08-13). If the collected count and the board's N
+    // disagree we are holding the wrong cards — too many (similar-matches leaking back in) or
+    // too few (a card shape we do not match). Either way the per-city counts computed from it
+    // would be wrong, so the cycle stops here rather than publishing a number that looks
+    // authoritative. An unparsed "Showing" line is NOT a mismatch: N is simply unknown, and the
+    // cycle proceeds as it did before this check existed.
+    if (showingN !== null && cardIds.length !== showingN) {
+      logger.warn('cityAssign', 'card count does not match the board — cycle SKIPPED, nothing ' +
+        'may consume a mismatched set', { collected: cardIds.length, boardSays: showingN });
+      return;
+    }
     // Raw id samples (2026-08-08). Also before pickBuffer: when overlap is zero there IS no
     // selected response, and this block is precisely what explains why.
     logIdShapeSamples(cardIds);
 
+    // THE response this cycle matches against — whichever buffered response shares the most ids
+    // with the board right now. This is again the assignment's real source, as it was before
+    // the accumulator existed; pickBuffer's own selection logic is unchanged.
+    //
+    // Null means no buffered response shares a single id with the board. The cycle still runs
+    // and reports every card as unmatched, which is the honest result and keeps one CITY ASSIGN
+    // line per cycle. pickBuffer has already warned with the per-response breakdown.
     var buf = pickBuffer(cardIds);
-    if (!buf) return;  // pickBuffer already logged why
+    var pickupById = buf ? buf.byId : {};
 
     // Reused from originCities.js, NOT re-scraped — see getActiveOriginCities() there.
     var cities = getActiveOriginCities();
@@ -676,11 +852,14 @@ async function runCityAssignCycle() {
 
     for (var k = 0; k < cardIds.length; k++) {
       var id = cardIds[k];
-      var pickup = Object.prototype.hasOwnProperty.call(buf.byId, id) ? buf.byId[id] : null;
+      // Reads THIS cycle's response only — no memory of prior cycles. The join key itself is
+      // untouched: still the card's div[id] .id against workOpportunities[].id, as confirmed
+      // at 20/20.
+      var pickup = Object.prototype.hasOwnProperty.call(pickupById, id) ? pickupById[id] : null;
       if (!pickup) {
         unmatched.push({
           id: id,
-          why: buf.noCoord[id] ? 'no coord in JSON' : 'id not in any response'
+          why: (buf && buf.noCoord[id]) ? 'no coord in JSON' : 'id not in any response'
         });
         continue;
       }
@@ -749,6 +928,11 @@ function onCityCoordsMessage(ev) {
     for (var i = 0; i < pairs.length; i++) {
       byId[pairs[i].id] = { lat: pairs[i].lat, lng: pairs[i].lng };
     }
+
+    // NO reset checks and no merge here any more (2026-08-12). Each response is simply buffered
+    // and each cycle reads the buffer that matches the board — see the header note. The two
+    // reset signals that used to live here were both disproven live: searchAuditId changes per
+    // request, and the origin-city set changes during the normal staged load of the SAME search.
     var noCoord = {};
     var nc = data.noCoordIds || [];
     for (var j = 0; j < nc.length; j++) noCoord[nc[j]] = true;
@@ -768,9 +952,17 @@ function onCityCoordsMessage(ev) {
     // Bounded: a long session must not accumulate buffers forever.
     while (_cityAssignBuffers.length > CITY_ASSIGN_MAX_BUFFERS) _cityAssignBuffers.shift();
 
+    // Per-endpoint record count (2026-08-08 recon). The reported symptom is that "search"
+    // carries 1 record while the board shows 50, so the endpoint serving 50 is the one the
+    // cards actually come from. Printed per response, unaggregated, so it cannot mislead.
+    logger.log('cityAssign', 'CITY ENDPOINT SHAPE  [' + data.endpoint + ']  woCount: ' +
+      data.woCount + '  withCoords: ' + pairs.length + '  noCoord: ' + nc.length +
+      '  totalResultsSize: ' + data.totalResultsSize +
+      '  searchAuditId: ' + data.searchAuditId);
+
     logger.log('cityAssign', 'pickup coordinates buffered', {
       endpoint: data.endpoint, withCoords: pairs.length,
-      withoutCoords: nc.length, woCount: data.woCount, buffers: _cityAssignBuffers.length
+      withoutCoords: nc.length, woCount: data.woCount, buffers: _cityAssignBuffers.length,
     });
 
     // Debounce rather than run now: the cards this response describes are not rendered yet, and
@@ -785,6 +977,64 @@ function onCityCoordsMessage(ev) {
   }
 }
 
+// ENDPOINT RECONNAISSANCE receiver (2026-08-08). Read-only.
+//
+// networkObserver reports every '/api/loadboard/' path it sees, once each, with whether
+// CAPTURE_PATHS matched it. The line to read is any path showing captured:NO — that is an
+// endpoint feeding the board that we never read a body from.
+function onEndpointSeenMessage(ev) {
+  logger.log('cityAssign', 'onEndpointSeenMessage called');
+  try {
+    if (ev.source !== window) return;
+    var data = ev.data;
+    if (!data || data.__extRelayEndpointSeen !== true) return;
+    logger.log('cityAssign', 'CITY ENDPOINT  ' + data.path +
+      '  captured: ' + (data.captured ? 'YES' : 'NO') +
+      (data.captured ? '' : '   <-- body never read; if the board is served from here, this is the gap'));
+  } catch (e) {
+    logger.error('cityAssign', 'onEndpointSeenMessage failed', { error: e });
+  }
+}
+
+// DROP-TRACE receiver (2026-08-13). Read-only.
+//
+// networkObserver.js has no logger, so it postMessages a reason code for every point where a
+// captured response could previously be discarded silently, plus one line per response that
+// made it through. This side does the logging, which is what makes it level-gated.
+//
+// READ THESE AS A MATCHED SET: within one refresh, every `seq` that appears on a CAPTURE OK
+// line reached the store; every `seq` on a CAPTURE DROP line did not, and the reason says why.
+// A seq that appears on neither was never observed at all.
+function onCaptureTraceMessage(ev) {
+  logger.log('cityAssign', 'onCaptureTraceMessage called');
+  try {
+    if (ev.source !== window) return;
+    var data = ev.data;
+    if (!data) return;
+
+    if (data.__extRelayCaptureDrop === true) {
+      logger.warn('cityAssign', 'CAPTURE DROP  seq=' + data.seq + '  ' + data.reason +
+        '  path: ' + data.path +
+        (data.status !== undefined ? '  status: ' + data.status : '') +
+        (data.bodyLength !== undefined ? '  bodyLength: ' + data.bodyLength : '') +
+        (data.responseType !== undefined ? '  responseType: ' + data.responseType : '') +
+        (data.detail !== undefined ? '  (' + data.detail + ')' : ''));
+      return;
+    }
+
+    if (data.__extRelayCaptureOk === true) {
+      logger.log('cityAssign', 'CAPTURE OK    seq=' + data.seq +
+        '  path: ' + data.path +
+        '  totalResultsSize: ' + data.totalResultsSize +
+        '  woCount: ' + data.woCount +
+        '  bodyLength: ' + data.bodyLength);
+      return;
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'onCaptureTraceMessage failed', { error: e });
+  }
+}
+
 // Installed by content.js's activateExtensionUI(). Completely inert when the flag is off — it
 // does not even register a listener, so a stock build carries zero runtime cost from this file.
 function initCityAssign() {
@@ -794,6 +1044,12 @@ function initCityAssign() {
     if (_cityAssignListener) return;  // idempotent: activation can be re-entered
     _cityAssignListener = onCityCoordsMessage;
     window.addEventListener('message', _cityAssignListener);
+    // Separate listener for the endpoint recon, so the coords path keeps a zero-line diff.
+    _cityEndpointListener = onEndpointSeenMessage;
+    window.addEventListener('message', _cityEndpointListener);
+    // Separate again (2026-08-13), so the coords and endpoint paths keep a zero-line diff.
+    _cityTraceListener = onCaptureTraceMessage;
+    window.addEventListener('message', _cityTraceListener);
     logger.log('cityAssign', 'city-assign debug ACTIVE — read-only, logs only', {
       maxMiles: CITY_ASSIGN_MAX_MILES, settleMs: CITY_ASSIGN_SETTLE_MS
     });
@@ -813,10 +1069,22 @@ function teardownCityAssign() {
       window.removeEventListener('message', _cityAssignListener);
       _cityAssignListener = null;
     }
+    if (_cityEndpointListener) {
+      window.removeEventListener('message', _cityEndpointListener);
+      _cityEndpointListener = null;
+    }
+    if (_cityTraceListener) {
+      window.removeEventListener('message', _cityTraceListener);
+      _cityTraceListener = null;
+    }
     if (_cityAssignTimer !== null) {
       clearTimeout(_cityAssignTimer);
       _cityAssignTimer = null;
     }
+    // deactivateExtensionUI() runs on logout, so a different dispatcher signing in on the same
+    // browser profile can never inherit the previous one's load ids or coordinates. With the
+    // accumulator gone the only id-bearing state left is the response buffer, which is dropped
+    // here alongside the coordinate cache.
     _cityAssignBuffers = [];
     _cityCoordCache    = {};
     _cityAssignRunning = false;

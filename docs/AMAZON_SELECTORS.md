@@ -75,6 +75,96 @@ panel flash open and shut whenever it was already collapsed. It was deleted the 
 Pixel measurement is unreliable across monitors and zoom levels and is not needed: presence
 answers the question outright. See SAFETY.md → Click 4.
 
+## ⚠ TWO load-lists: main results vs Similar matches ✅
+Verified live: 2026-08-12 · **structure captured 2026-08-13**
+
+### The captured structure — copy this, do not re-derive
+
+```
+div.css-ftr0v1                                  <- hash class, NEVER select on it
+├── div#search-results-summary-panel            <- id + class 'search-results-summary__panel'
+│     └── ... <p>Showing 1 - 2 of 2 results</p>
+├── div.<hash>
+│     ├── div.load-list                         <- MAIN RESULTS
+│     └── div.pagination-bar
+└── div.<hash>
+      ├── p  "Similar matches (4)"
+      └── div.<hash> > div.load-list            <- SIMILAR MATCHES (ignore forever)
+```
+
+### 🔑 `search-results-summary` is a SIBLING anchor, NOT a container
+
+**The summary panel does not contain the results.** An implementation that walked *up* from each
+`div.load-list` looking for that token found nothing and read **zero cards** on every cycle
+(`"main results panel not found {loadListsInDocument: 2}"`).
+
+**Correct approach:** `document.getElementById('search-results-summary-panel')` (fallback: an
+element whose `className` contains `search-results-summary__panel`), then walk its **following
+siblings** in document order and take the first `div.load-list` found. The main results are in the
+next sibling block; the Similar-matches list is in a later one, so document order separates them.
+If no panel or no list is found: **read nothing** and warn. Never fall back to the whole document.
+
+**Do NOT anchor on text.** "Recently added" is not always rendered. "Similar matches" is localised
+across all 11 Relay domains. Both are unusable as anchors.
+
+### 🔑 Count cards by ID SHAPE, not by card class
+
+Measured on a live "9 of 9" board:
+
+| Selector | Found |
+|---|---|
+| `div.load-card, div.load-card__selected` | **8** ❌ |
+| `div[id]` filtered to bare UUIDs | **9** ✅ |
+| board's own "of N results" | **9** |
+
+The recently-added/highlighted card carries a **different class**, so any class-based count
+silently loses it. Every card's join id is a bare UUID:
+
+```js
+/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+```
+
+**The UUID filter is load-bearing:** cards also contain `div[id="STARTING_SOON"]`, which is not a
+joinable id and must never reach the assignment.
+
+Reference implementation: `findMainResultsList()` / `readRenderedCardIds()` in
+`content/cityAssign.js`.
+
+---
+
+### Earlier note (2026-08-12) — why this matters
+
+**The board contains TWO `div.load-list` elements.** One holds the main results, the other holds
+the "Similar matches" block (wrapper structure documented in `content/filterSimilar.js`).
+
+**`document.querySelector('div.load-list')` — first in document order — is NOT reliably the main
+list.** This caused a real, long-lived bug: on a board showing "9 of 9 results" a reader using
+that selector collected **13** cards, the extra 4 being similar-matches cards. Those never appear
+in the `/api/loadboard/search` response, so they could never join it — the id intersection sat at
+0/N and was misdiagnosed for several rounds as a pagination, join-key and endpoint problem in
+turn.
+
+| | Selector |
+|---|---|
+| **Main results list** | the `div.load-list` whose ancestry contains the token **`search-results-summary`** in its `class` or `id` |
+| **Similar-matches list** | the `div.load-list` OUTSIDE that panel |
+
+Match `search-results-summary` as a **substring of class or id**. Do **not** use the `css-<hash>`
+class beside it — those rotate on every Amazon deploy.
+
+**Walk UP from each `div.load-list` looking for the panel**, rather than down from a guessed
+container: it is indifferent to how many wrapper divs Amazon puts in between.
+
+**If the panel is not found, read nothing.** Falling back to the whole document silently
+re-includes the similar cards, which is the bug itself.
+
+**Cross-check available:** the main list's card count should equal N in the visible
+"Showing 1 - N of N results" line. Reference implementation:
+`findMainResultsList()` / `readShowingTotal()` in `content/cityAssign.js`.
+
+> **`content/loadParser.js:124` still makes the old assumption** (`document.querySelector('div.load-list')`).
+> It feeds highlighting and alerts and has not been audited against this finding.
+
 ## Load card (Layout A) ✅
 Verified: 2026-06-02
 Container:        div.load-card, div.load-card__selected  (both states)

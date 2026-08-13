@@ -329,6 +329,79 @@ suspecting the JSON path. Harden by selecting the UUID-shaped id rather than the
 
 ---
 
+## 6.8 HOW the board's `/search` body must be captured (2026-08-13) ✅ proven live
+
+**The board reads its own response via `Response.json()`, and that read completes. A cloned read
+of the same response CANNOT be made to work.**
+
+**Why cloning fails.** Amazon's SPA aborts its own in-flight search on every refresh
+(`onAutoRefresh → executeAvailableWorkFilterActions`). `resp.clone()` succeeds and tees the body,
+but `AbortController.abort()` **errors both branches of a tee regardless of what is already
+buffered**. The result: `AbortError` on exactly the response that renders the active board, every
+cycle. Reading earlier does not help — the abort lands milliseconds later, not microseconds.
+Salvaging buffered chunks does not help — queued chunks are discarded when the stream errors.
+
+**Proven by console experiment (2026-08-13), same response, same refresh:**
+
+```
+[PEEK] json() OK      /api/loadboard/search  wo: 1  total: 1     <- Amazon's read: SUCCEEDS
+[PEEK] text() FAILED  /api/loadboard/search  AbortError          <- our clone read: DIES
+```
+
+**The working approach:** wrap `Response.prototype.json` / `.text`, call the original, and
+**return its promise object unchanged**, observing on a separate branch. Abort-after-read is
+harmless to Amazon, so their read completes and we see the same parsed object.
+
+**Two consequences for anyone reading these captures:**
+- **`.json()` yields an already-parsed object — there is no raw body string.** Do not
+  re-stringify it to reuse a string code path; on a ~300 KB response that costs more than the
+  capture. Any diagnostic needing raw text (substring/containment checks) is unavailable on this
+  path and must report *unknown*, never a false negative.
+- **One refresh fires several `/search` calls.** Observed: 4 requests, of which one is canceled,
+  one is the active board, and the others belong to other saved-search tabs (`woCount 0`). The
+  request **path plus `totalResultsSize`** is what identifies which tab a response came from.
+
+Reference implementation: `installResponseReadHook()` in `content/networkObserver.js`.
+
+---
+
+## 6.7 The page ACCUMULATOR and its reset rule (2026-08-08)
+
+**Model.** `content/cityAssign.js` keeps `id -> { lat, lng, city }` for every `/search` page seen
+during one search session. Pages are **merged**, not replaced; a repeated id **overwrites** with
+the newest coordinates. **Never stores a response body.** 215 bytes/entry measured; capped at
+3000 entries (~629 KB), oldest-out.
+
+**Why it is needed:** `/search` serves **5 loads per page** on the live board and loads more on
+scroll. §6.5 records page size 50 from the July captures — **the live board now paginates at 5**,
+so a fixed handful of buffers covers only a fraction of the rendered list.
+
+**Reset rule — one search session = one accumulator.** Checked on each arriving response
+**before** the merge, so the page that announces a new search is kept:
+
+| Signal | Status |
+|---|---|
+| `$.searchAuditId` changes between responses | **Default**, per instruction. ⚠ **Reliability NOT established** — see below |
+| Active origin-city set changes (from `originCities.js`) | Unambiguous: the dispatcher edited the search |
+
+### ⚠ What is NOT known about `searchAuditId` — do not assume it
+
+- It is **one opaque UUID per RESPONSE** (§2). Whether it stays **stable across PAGES of the same
+  search** has **never been observed**. Every sample in `samples/` is page 1 of a *different*
+  search — there is no two-page capture of one search to compare. **If it is per-request, using
+  it as a reset key clears the accumulator on every page and coverage never climbs.**
+- **It is NOT shared between saved-search tabs.** Proven: `search-5cities-active.json`
+  (`d4086e61-…`) and `search-5cities-other.json` (`97b3f387-…`) came from the *same refresh* and
+  share **zero** work-opportunity ids. So with two saved-search tabs open, each response resets
+  the other's accumulator and coverage collapses.
+
+**If either symptom shows up live**, the fix direction is to bucket the accumulator *by*
+`searchAuditId` and assign from the union, rather than using it as a global clear — that survives
+both the per-page case and the two-tab case. Deliberately not built until the live log says which
+is happening.
+
+---
+
 ## 7. Pickup-coordinate city assignment — IMPLEMENTED as a read-only debug step (2026-08-06)
 
 **Status: built, flag-gated OFF, and AWAITING LIVE CONFIRMATION.** The findings in §6 are now

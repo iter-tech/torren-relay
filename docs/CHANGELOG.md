@@ -2,6 +2,331 @@
 
 ## [Unreleased]
 
+### 2026-08-13 — Per-cycle cityAssign VERIFIED live; all five debug flags returned to shipped state
+
+**Verified on a live board**, across several auto-refresh cycles: `CITY DIAG 0/5` **MATCH: YES**
+every cycle, `CITY DIAG 3/4` intersection **full — 30/30 and 28/28**, **zero unmatched**, zero
+RESET lines, and the board rendered normally with the `Response.prototype` wrapper in place. That
+last point matters most: the wrapper sits in front of every fetch on the page, and it does not
+disturb Amazon.
+
+This closes the chain that began with a 0/N mismatch: the reader was collecting Similar-matches
+cards (fixed by the sibling anchor + UUID-shape id collection), and the response that renders the
+board was being lost to the SPA's abort (fixed by piggybacking Amazon's own `Response.json()`
+read).
+
+**Flags returned to shipped state — all five, no logic changed:**
+
+| # | Constant | File | Was | Now |
+|---|---|---|---|---|
+| 1 | `DEBUG_LEVEL` | `utils/constants.js:42` | 3 | **1** |
+| 2 | `CAPTURE_RESPONSES` | `utils/constants.js:62` | true | **false** |
+| 3 | `CITY_ASSIGN_DEBUG` | `utils/constants.js:84` | true | **false** |
+| 4 | `CAPTURE_RESPONSES` | `content/networkObserver.js:39` (MAIN) | true | **false** |
+| 5 | `CITY_ASSIGN_DEBUG` | `content/networkObserver.js:51` (MAIN) | true | **false** |
+
+**No diagnostic code was deleted** — only the five values changed. Every `CITY DIAG`, `CITY RAW`,
+`CAPTURE OK` and `CAPTURE DROP` emitter remains in place, dormant behind the flags, ready for the
+next investigation.
+
+**Consequences of the flip:** no response body is read at all (`isCapturePath` short-circuits on
+the flag), no ids or coordinates cross `postMessage`, the raw-body transport is off, and
+`Response.prototype.json`/`.text` fall through on one boolean read. `cityAssign.js` installs its
+listeners but receives nothing. The rate-limit reporting path (`report()` / `WATCH_PATH`) is
+unaffected and still runs, as designed.
+
+### 2026-08-13 — Capture by piggybacking Amazon's own body read; clone capture retired
+
+**File:** `content/networkObserver.js`. Capture path only. No DOM mutation, no new requests, no
+change to `report()`, `WATCH_PATH`, abort handling, or the XHR capture path.
+
+**Root cause it fixes (proven live).** The SPA aborts its own in-flight search on every refresh
+(`onAutoRefresh → executeAvailableWorkFilterActions`). `resp.clone()` succeeded, but `abort()`
+errors **both** branches of a tee regardless of buffering, so `snapshot.text()` died with
+`AbortError` on the one response that renders the board — every cycle. Console experiment:
+`json() OK wo: 1 total: 1` and `text() FAILED AbortError` on the *same* response. Amazon's own
+read completes because abort-after-read is harmless to them.
+
+**What replaces it.** `Response.prototype.json` and `.text` are wrapped in the MAIN world. Each
+calls the original and **returns its promise object unchanged** — never a `.then()`-derived
+promise. Observation happens on a separate branch with its own rejection handler.
+
+**Keeping every other fetch on the page at zero cost** (`Response.prototype` is global):
+1. The **flag check is the first thing after the passthrough call** — with the switches off, the
+   added cost is one boolean read. No URL parsing, no try/catch entry.
+2. Non-matching URLs exit before anything is scheduled; nothing is attached to their promise.
+3. The whole wrapper body is inside `try/catch`, and the observation branch has its own rejection
+   handler — nothing can throw into Amazon's caller or create an unhandled rejection.
+4. Double-install guarded by a non-enumerable `__extRelayReadHooked` marker on the prototype, so
+   a re-injected content script cannot wrap the wrapper and double-emit.
+5. The `Response` object is **not mutated** — the sequence number lives in a `WeakMap` keyed by
+   the Response, so no property is added that Amazon's code could enumerate.
+
+**Removed:** `resp.clone()`, `snapshot.text()`, and the `clone-threw` / `clone-text-rejected`
+drop reasons. They can no longer succeed for the response we need. New drop reasons
+`amazon-json-rejected` / `amazon-text-rejected` trace a failure of Amazon's own read.
+
+**⚠ `rawBody` is now NULL on the json path.** `.json()` hands over an already-parsed object and
+re-stringifying a ~300 KB body purely to reuse the string code path would cost more than the
+capture itself. **Diagnostics that lose data:** `CITY RAW 2`'s `rawBodyLength` (prints `null`),
+and `CITY RAW 3`'s "does the DOM id appear in the response raw text" check — which already
+degrades to `UNKNOWN (no raw body retained)` rather than reporting a false negative. `CAPTURE OK`
+reports `bodyLength: null` there too. The XHR path keeps the raw string and loses nothing.
+
+**⚠ `summariseAndDiscard()` is no longer reachable from the fetch path** — it takes a body string
+and there is none. The "response captured (dev switch)" five-counter line will therefore stop
+appearing for fetch-based searches. `CAPTURE OK` supersedes it, carrying endpoint, path, seq,
+`woCount` and `totalResultsSize`. The function and its contract are untouched for XHR.
+
+**Verification:** 53/53 in a new harness, the load-bearing assertion being promise **identity** —
+`returned === handed`, i.e. Amazon receives the exact promise object the original method created.
+Also verified: passthrough on rejection, zero messages for non-matching URLs, zero messages with
+flags off, no own-property added to the Response, single observation across a double install, and
+that a `postMessage` that always throws still leaves Amazon's value intact. **Not exercised in a
+browser.**
+
+### 2026-08-13 — Instrumented every silent drop in the capture path (diagnostics only)
+
+**Files:** `content/networkObserver.js` (the emitters), `content/cityAssign.js` (the receiver).
+No behaviour change, no DOM mutation, no new capture logic. All output gated on
+`CITY_ASSIGN_DEBUG`.
+
+**Why.** On a live board every refresh logs *"board search result observed"* **twice** for
+`/api/loadboard/search` but *"response captured (dev switch)"* **once**. Exactly one of the two
+responses is discarded between `report()` and the capture path, and every place that could happen
+swallowed silently — three bare `catch`es, an early `return`, an unhandled `responseType`, and the
+`isCaptured` branch.
+
+**Six drop points now emit a reason code:**
+
+| # | Reason code | Where |
+|---|---|---|
+| 1 | `clone-threw` | `resp.clone()` catch — also reports `bodyUsed` |
+| 2 | `clone-text-rejected` | `snapshot.text()` `.catch` |
+| 3 | `emit-threw` | `emitCityAssignCoords` catch (JSON.parse / postMessage) |
+| 4 | `no-workOpportunities-array` | the `!Array.isArray(wo)` early return |
+| 5 | `xhr-unhandled-responseType` | non-`''`/`text`/`json` — reports the actual string |
+| 6 | `watched-but-not-captured` | a `/search` URL that failed `isCapturePath` (fetch + XHR) |
+
+Plus `xhr-json-response-null` and `xhr-read-threw`, two further silent paths found while wiring
+the others.
+
+**Per-request sequence numbers.** `nextSeq()` assigns an id in the fetch and XHR wrappers before
+the request goes out, carried on every drop and every success. This is what lets the two
+`/search` responses of one refresh be told apart and matched observed-to-captured.
+
+**Per-capture identification.** Each successful capture emits `CAPTURE OK` with the request
+**path** and `totalResultsSize`, so it is visible which saved-search tab a response belongs to.
+
+**Privacy:** path only — the query string is stripped (`pathOnly()`), because it carries the
+dispatcher's filter values. No ids, no addresses, no payouts, no bodies. Verified by assertion
+that a `CHICAGO`/`radius=250` query does not appear in any emitted message.
+
+**Reading it:** drops log via `logger.warn` (visible at `DEBUG_LEVEL >= 2`), successes via
+`logger.log` (needs 3). Within one refresh, every `seq` on a `CAPTURE OK` reached the store;
+every `seq` on a `CAPTURE DROP` did not, and the reason says why.
+
+**Verification:** 59/59 in a new harness driving the real file through each drop path, including
+a reproduction of the reported symptom — two `/search` calls, one `clone-threw` at `seq=1` and one
+`CAPTURE OK` at `seq=2`. **Not exercised in a browser.**
+
+### 2026-08-13 — cityAssign read ZERO cards: sibling anchor + UUID-shape id collection
+
+**File:** `content/cityAssign.js`. Still log-only — no DOM mutation, no hiding, no filtering.
+
+**The bug.** `findMainResultsList()` walked **up** from each `div.load-list` looking for an
+ancestor whose class contained `search-results-summary`. That token exists on the board but is a
+**SIBLING of the list, not an ancestor**, so the walk found nothing and the reader returned an
+empty set every cycle: `"main results panel not found — reading NO cards {loadListsInDocument: 2}"`.
+
+**Fix 1 — anchor and direction.** `document.getElementById('search-results-summary-panel')`,
+falling back to an element whose `className` contains `search-results-summary__panel`, then walk
+its **following siblings** and take the first `div.load-list`. Structure captured live
+2026-08-13 and recorded in `AMAZON_SELECTORS.md`. No `css-<hash>` selectors; no text anchors
+("Recently added" is not always rendered, "Similar matches" is localised across 11 domains).
+Panel or list missing → return null, read nothing, warn with `{ panelFound, loadListsInDocument }`.
+Never falls back to the document.
+
+**Fix 2 — count by id shape, not card class.** `readRenderedCardIds()` now collects
+`mainList.querySelectorAll('div[id]')` filtered to bare UUIDs. Measured on a live "9 of 9" board:
+class-based selectors found **8**, UUID-shaped ids found **9**, the board said **9** — the
+recently-added card carries a different class. The UUID filter also excludes
+`div[id="STARTING_SOON"]`, which cards carry and which is not joinable.
+
+**Fix 3 — a mismatched set is no longer used.** `CITY DIAG 0/5` is unchanged in format, but when
+the collected count and the board's N disagree the cycle now **stops** with a warn carrying both
+numbers, instead of assigning from a card set known to be wrong. An unparsed "Showing" line is
+**not** a mismatch — N is simply unknown and the cycle proceeds as before.
+
+**Also fixed:** the `CITY RAW 1` description referenced `MAIN_PANEL_TOKEN`, which this change
+removed — a live **ReferenceError** in the diagnostic path. Rewritten to describe the real chain.
+
+**Unchanged:** the id join, haversine, the 150 mi threshold, reading active origin cities, all
+`CITY_ASSIGN_DEBUG` gating, and per-cycle self-containment (no state across cycles).
+
+**Verification:** 56/56 in a new harness built on the captured structure, including the exact
+measured numbers (by class 8 / by UUID 9 / board 9), STARTING_SOON exclusion, panel-by-class
+fallback, panel-absent, similar-never-picked, and mismatch-skips-cycle. **Not exercised in a
+browser** — see STATE.md for what must be confirmed by hand.
+
+**⚠ Four older harness suites are now red** because their stubs model the **disproven ancestor
+structure**, none provide `getElementById`, and several use non-UUID fixture ids the new filter
+correctly rejects. These are fixture faults, not code faults, and need a dedicated pass
+(PLAN.md task 4).
+
+### 2026-08-12 — Accumulator removed: cycles are now self-contained (log-only)
+
+**File:** `content/cityAssign.js` — **1103 → 996 lines (net −107)**.
+`content/networkObserver.js` **unchanged** (see "kept" below).
+
+**Removed:**
+- The `id -> {lat,lng,city}` accumulator store (`_cityAccum`, `_cityAccumOrder`) and its
+  3000-entry oldest-out cap (`CITY_ACCUM_MAX`).
+- `mergeIntoAccumulator()` and `resetAccumulator()` (50 lines).
+- **Both reset paths** and all their state: `_cityAccumAuditId` (which the Phase-1 audit had
+  already identified as write-only), `_cityAccumCitiesKey`, `_cityAccumLastReset`,
+  `_cityAccumLastResetSize`.
+- Every reset log line — `CITY DIAG RESET`, the dropped-N count, the was→now detail.
+- `CITY DIAG 5/5`, the cross-cycle "covers X/N" bookkeeping, and the `accumAdded/accumSize`
+  fields on the buffered-coords log.
+- The per-entry `city` write-back, which only existed to annotate accumulator entries.
+
+**Why.** The accumulator was built to survive pagination **that does not exist**. The belief that
+the main list paginates at 5 and fills in on scroll came from misreading the "Similar matches"
+block; the MAIN list renders all N at once ("10 of 10"). Both reset rules it needed were then
+disproven on a live board: `searchAuditId` changes per **request**, and `originCities` fires
+during the **normal staged loading of the same search** (chips arrive one, then all five),
+wiping 51 ids mid-fill. There was nothing to accumulate and nothing to reset — only two ways to
+destroy good data.
+
+**New flow.** Each cycle: read the current main-list card ids → `pickBuffer()` selects the
+buffered response sharing the most ids with the board → look each card up in **that response
+only** → nearest active city by haversine → log `CITY ASSIGN` and `CITY DIAG` for this cycle.
+No state crosses cycles.
+
+**Kept, unchanged:** `readRenderedCardIds()` scoped to the `search-results-summary` panel, the
+`div[id].id ↔ workOpportunities[].id` join, haversine, the 150 mi threshold, reading active
+origin cities from `originCities.js` (the read stays; only reset-on-change went), all
+`CITY_ASSIGN_DEBUG` gating, and `_cityCoordCache` (city-name → coordinates; a real network
+saving, unrelated to load ids).
+
+**`searchAuditId` KEPT in `networkObserver.js` — it is not orphaned.** Grep showed it still read
+at `cityAssign.js` in the `CITY ENDPOINT SHAPE` diagnostic. Per instruction, removed only if
+orphaned; it is not.
+
+**Control-flow note:** `pickBuffer()` is the assignment's source again rather than a diagnostic.
+When no buffered response shares an id with the board, the cycle no longer aborts — it reports
+every card unmatched, which keeps exactly one `CITY ASSIGN` line per cycle. Its warn line was
+reworded accordingly (it previously claimed the assignment "continues from the accumulator").
+
+**Isolation verified by grep:** nothing outside `cityAssign.js` referenced the accumulator or its
+reset signals — zero hits. `cityAssign.js` calls out only to `resolvePATCity` and
+`getActiveOriginCities`, both pure reads. The auto-refresh loop, load detection/highlighting,
+START/STOP, `panelCloser`, the origin-cities panel and PAT are all untouched and cannot be
+affected.
+
+### 2026-08-12 — ROOT CAUSE of the 0/N mismatch: reader was collecting "Similar matches" cards
+
+**File:** `content/cityAssign.js`. Log-only; no DOM mutation, no assignment change.
+
+**What was wrong.** The board renders **two** `div.load-list` elements — main results and the
+"Similar matches" block. `readRenderedCardIds()` took `document.querySelector('div.load-list')`,
+the **first in document order**, and assumed that was the main list. It is not reliably so. On a
+board showing "9 of 9 results" the reader collected **13** cards; the extra 4 were
+similar-matches cards, which never appear in the `/search` response and therefore **could never
+join**. That is the whole 0/N mismatch — not pagination, not the join key, not the endpoint.
+
+**The fix.** `findMainResultsList()` walks up from each `div.load-list` and keeps the one whose
+ancestry contains the stable substring **`search-results-summary`** in a `class` or `id`. Matched
+as a substring, deliberately **not** a `css-<hash>` class. Walking *up* from the list is more
+robust than walking *down* from a guessed container — it does not care how many wrapper divs
+Amazon inserts.
+
+**If the panel is not found it reads NOTHING** and logs a warn with the load-list count and the
+token. No fallback to the whole document: that fallback is precisely what re-included the
+similar cards.
+
+**New verification line** (`CITY_ASSIGN_DEBUG`), the tell that similar is excluded:
+
+```
+CITY DIAG 0/5  main-list scope check — collected 9 card(s)  |  board says "of 9 results"  |  MATCH: YES — similar-matches cards are excluded
+```
+
+N is parsed from the visible "Showing 1 - N of N results" copy (text-anchored, same reasoning as
+`originCities.js`); unparseable reports `MATCH: unknown` rather than guessing.
+
+**Reset logic changed — `searchAuditId` no longer resets.** It was introduced as the default
+reset key with its reliability flagged as unverified; it is now **disproven** — it changes per
+**request**, so it was wiping the accumulator on essentially every cycle. The value is still
+tracked and logged, it just clears nothing. **`originCities` change is now the only reset
+signal.** Verified: 4 refreshes with 4 different audit ids produce **zero** resets and the
+accumulator survives intact. This also **removes the two-saved-search-tab thrash** recorded in
+api-samples.md §6.7 — the two responses now merge, and the other tab's ids are inert because
+only rendered card ids are ever looked up.
+
+**Unchanged and asserted:** the `div[id]` join read, the card selectors, haversine, the 150 mi
+threshold, and the accumulator itself. Only *which* cards are collected changed.
+
+**Also noted, NOT fixed (out of scope):** `content/loadParser.js:124` makes the identical
+"first `div.load-list` is main" assumption. It feeds highlighting and alerts, so it may be
+mis-reading similar-matches cards as results too. Needs its own task.
+
+### 2026-08-08 — Endpoint reconnaissance (log-only, CITY_ASSIGN_DEBUG)
+
+`content/networkObserver.js` + `content/cityAssign.js`: report every `/api/loadboard/` path the
+observer sees with whether `CAPTURE_PATHS` matched it (`CITY ENDPOINT`), plus per-response record
+counts (`CITY ENDPOINT SHAPE`) — because `/api/loadboard/similar` was **already** in
+`CAPTURE_PATHS`, so a board that still matches 0 must be served from a third path we have never
+seen. Nothing captured, joined, accumulated or assigned changed.
+
+### 2026-08-08 — Page accumulator: id coverage across a whole search session (log-only)
+
+**Files:** `content/cityAssign.js` (the accumulator), `content/networkObserver.js` (one field).
+
+**What.** `content/cityAssign.js` now holds a persistent `id -> { lat, lng, city }` store that
+**accumulates every `/search` page** of a search session instead of only the last 4 buffers.
+Repeated ids overwrite with the newest coordinates; they never duplicate. New diagnostic line:
+
+```
+CITY DIAG 5/5  accumulator: 50 unique id(s) held  |  covers 50/50 rendered cards  |  reset this cycle: none  |  cap 3000
+```
+
+**Why.** Amazon serves **5 loads per page** and loads more on scroll, so the previous
+last-few-buffers approach only ever saw ~20 ids against 50+ rendered cards. The join itself was
+correct (confirmed 20/20, api-samples.md §6.6) — the *data* was incomplete. Coverage now climbs
+toward the full card count as pages arrive.
+
+**Reset rule — one search session = one accumulator.** Cleared when the search changes, checked
+**before** the merge so the response announcing the new search is kept rather than discarded with
+the old ids. Two signals, each logged by name on a `CITY DIAG RESET` line:
+- **`searchAuditId`** change (the default, per instruction)
+- **origin-city set** change, reused from `originCities.js` — not re-scraped
+
+**⚠ Two unresolved risks, both recorded rather than papered over:**
+1. **`searchAuditId` stability across pages is NOT established.** Every sample on disk is page 1
+   of a different search; there is no two-page capture of one search anywhere in `samples/`. If
+   it turns out to be per-*request*, the accumulator resets on every page and coverage never
+   climbs — the `CITY DIAG RESET` line makes that visible on the first scroll.
+2. **Two saved-search tabs thrash the accumulator.** Proven from the captures: the two responses
+   of one refresh carry *different* `searchAuditId`s and share **zero** ids, so each resets the
+   other's work. Reproduced in the harness — coverage collapses to 0/5.
+
+**Control-flow change this required:** a cycle whose newest response does not intersect the board
+**no longer aborts** — the accumulator may still cover those cards. `pickBuffer()` is now
+diagnostic only; its selection logic is untouched. Its warn line no longer claims "cycle
+skipped", which the change made false.
+
+**Memory (measured, not estimated):** **215 bytes/entry**; 338 ids (largest search on disk) =
+**71 KB**, 2500 ids (5-city worst case) = **524 KB**, at the **3000-entry cap** = **629 KB**.
+Oldest-out eviction. Never stores a raw response body.
+
+**networkObserver.js change — exactly one field:** `searchAuditId` added to the already-flagged
+coords message. No change to what is captured, when, or from which endpoints.
+
+**Unchanged and asserted:** the join reads, the haversine, the 150 mi threshold, `pickBuffer`'s
+selection, and `CITY DIAG 1/4`–`4/4`. Accumulator cleared on teardown, so a logout cannot leak
+ids into the next dispatcher's session.
+
 ### 2026-08-08 — id join CONFIRMED CORRECT against live logs (no code change)
 
 **Files: none changed.** This entry records a verification result, not an edit.

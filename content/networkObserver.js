@@ -56,11 +56,113 @@
   // is explicitly out of scope. These two lists are independent on purpose.
   var CAPTURE_PATHS = ['/api/loadboard/search', '/api/loadboard/similar'];
 
+  // ── DROP TRACING (2026-08-13) ─────────────────────────────────────────────────────────────
+  //
+  // WHY. On a live board every refresh logs "board search result observed" TWICE for
+  // /api/loadboard/search but "response captured (dev switch)" ONCE. Exactly one of the two
+  // responses is discarded somewhere between report() and the capture path, and every place it
+  // could happen currently swallows silently — three bare catches, an early return, an
+  // unhandled responseType, and the isCaptured branch. This makes each of those audible.
+  //
+  // DIAGNOSTIC ONLY. Nothing here changes what is captured, when, or from which endpoints. Every
+  // emitter below is gated on CITY_ASSIGN_DEBUG and is a no-op when it is off.
+  //
+  // PRIVACY: the PATH ONLY — the query string is stripped because it carries the dispatcher's
+  // filter values (cities, radius, equipment). Never a body, never an id, never an address.
+
+  // Per-request sequence number, assigned in the fetch/XHR wrapper before the request goes out.
+  // This is what lets the two /search responses of one refresh be told apart and matched
+  // observed-to-captured; without it the log lines are indistinguishable.
+  var _reqSeq = 0;
+  function nextSeq() { return ++_reqSeq; }
+
+  // Strips the query string. Defensive against non-string input rather than assuming.
+  function pathOnly(url) {
+    try {
+      if (typeof url !== 'string') return '(non-string url)';
+      var q = url.indexOf('?');
+      return q === -1 ? url : url.slice(0, q);
+    } catch (e) {
+      return '(unparseable url)';
+    }
+  }
+
+  // The single exit for every drop reason. `extra` carries status/bodyLength/responseType when
+  // the call site knows them; absent fields are simply omitted rather than sent as null.
+  function reportDrop(reason, url, seq, extra) {
+    if (!CITY_ASSIGN_DEBUG) return;
+    try {
+      var msg = {
+        __extRelayCaptureDrop: true,
+        reason: reason,
+        path: pathOnly(url),
+        seq: (seq === undefined || seq === null) ? null : seq
+      };
+      if (extra) {
+        if (extra.status !== undefined)       msg.status = extra.status;
+        if (extra.bodyLength !== undefined)   msg.bodyLength = extra.bodyLength;
+        if (extra.responseType !== undefined) msg.responseType = extra.responseType;
+        if (extra.detail !== undefined)       msg.detail = extra.detail;
+      }
+      window.postMessage(msg, '*');
+    } catch (e) {
+      // A diagnostic must never become a failure mode for the page.
+    }
+  }
+
+  // The positive counterpart: a response that made it all the way through. Emitted next to the
+  // drops so the log reads as a matched set — observed N, captured M, dropped N-M with reasons.
+  function reportCaptureOk(url, seq, totalResultsSize, bodyLength, woCount) {
+    if (!CITY_ASSIGN_DEBUG) return;
+    try {
+      window.postMessage({
+        __extRelayCaptureOk: true,
+        path: pathOnly(url),
+        seq: (seq === undefined || seq === null) ? null : seq,
+        totalResultsSize: (totalResultsSize === undefined) ? null : totalResultsSize,
+        bodyLength: (bodyLength === undefined) ? null : bodyLength,
+        woCount: (woCount === undefined) ? null : woCount
+      }, '*');
+    } catch (e) {
+      // Same posture.
+    }
+  }
+
   function report(url, ok, status) {
     try {
       window.postMessage({ __extRelaySearchResult: true, url: url, ok: ok, status: status }, '*');
     } catch (e) {
       // Never let a postMessage failure surface to the page.
+    }
+  }
+
+  // ENDPOINT RECONNAISSANCE (2026-08-08) — read-only, CITY_ASSIGN_DEBUG only.
+  //
+  // WHY. The board's cards were reported as coming from an endpoint we do not capture. But
+  // CAPTURE_PATHS has matched '/api/loadboard/similar' since the flag was written, so if the
+  // cards really are unmatched, the live path must differ from BOTH strings we test for. The
+  // only way to know is to read the actual URLs — guessing a new pattern is exactly what the
+  // last two rounds of this investigation punished.
+  //
+  // So: report EVERY '/api/loadboard/' request this observer sees, with whether it was
+  // captured. An endpoint serving 50 loads while showing captured:false is the answer.
+  // Reports the URL only — no body, no ids. Deduped so a refresh loop cannot flood the log.
+  var _seenEndpoints = {};
+  function reportEndpointSeen(url, captured) {
+    if (!CITY_ASSIGN_DEBUG) return;
+    try {
+      if (typeof url !== 'string') return;
+      if (url.indexOf('/api/loadboard/') === -1) return;
+      // Key on the path, not the full URL: query strings differ per request and would defeat
+      // the dedupe. The path is what CAPTURE_PATHS actually tests against.
+      var path = url.split('?')[0];
+      if (Object.prototype.hasOwnProperty.call(_seenEndpoints, path)) return;
+      _seenEndpoints[path] = true;
+      window.postMessage({
+        __extRelayEndpointSeen: true, path: path, captured: !!captured
+      }, '*');
+    } catch (e) {
+      // A diagnostic must never become a failure mode for the page.
     }
   }
 
@@ -118,12 +220,43 @@
   // stops[0] is the PICKUP stop (verified in api-samples.md). Anything without a numeric
   // lat/lng pair is skipped rather than sent as null, so the receiver never has to guess
   // whether a missing coordinate means "absent" or "malformed".
-  function emitCityAssignCoords(url, bodyText) {
+  // String entry point — used by the XHR path, which genuinely has a body string.
+  // Parses, then hands off to the shared extractor below.
+  function emitCityAssignCoords(url, bodyText, seq) {
     if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return;
     try {
-      var parsed = JSON.parse(bodyText);
+      emitFromParsed(url, JSON.parse(bodyText), seq, bodyText);
+    } catch (e) {
+      // DROP — JSON.parse failed on a body we were handed as text.
+      reportDrop('emit-threw', url, seq, {
+        bodyLength: bodyText ? bodyText.length : null,
+        detail: (e && e.name ? e.name : 'Error') + ': ' + (e && e.message ? e.message : 'unknown')
+      });
+    }
+  }
+
+  // Shared extractor. `parsed` is an ALREADY-PARSED object; `bodyText` is the original string
+  // when one exists and null when it does not.
+  //
+  // ⚠ bodyText is null on the Response.json() path (2026-08-13), and that is deliberate:
+  // re-stringifying a ~300KB object purely to reuse the string code path would cost more than
+  // the whole capture. The consequence is that rawBody/rawBodyLength are null there — see the
+  // note in cityAssign.js's CITY RAW 3, which already reports "UNKNOWN (no raw body retained)"
+  // rather than mistaking absence for a negative result.
+  function emitFromParsed(url, parsed, seq, bodyText) {
+    if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return;
+    try {
       var wo = parsed && parsed.workOpportunities;
-      if (!Array.isArray(wo)) { parsed = null; return; }
+      if (!Array.isArray(wo)) {
+        // DROP POINT 4 — the body parsed as JSON but carries no workOpportunities array. Was a
+        // bare `return`, so a response of the wrong shape vanished without a trace.
+        reportDrop('no-workOpportunities-array', url, seq, {
+          bodyLength: bodyText ? bodyText.length : null,
+          detail: 'typeof workOpportunities = ' + (parsed ? typeof parsed.workOpportunities : 'no body')
+        });
+        parsed = null;
+        return;
+      }
       var pairs = [];
       var noCoordIds = [];
       for (var i = 0; i < wo.length; i++) {
@@ -157,6 +290,12 @@
         totalResultsSize: parsed ? parsed.totalResultsSize : null,
         nextItemToken:    parsed ? parsed.nextItemToken : null,
 
+        // Added 2026-08-08 for the accumulator's reset rule. One opaque UUID per RESPONSE
+        // (api-samples.md §2). Whether it is stable across PAGES of one search is NOT
+        // established — see the accumulator notes in cityAssign.js. Plain scalar, no new
+        // class of data.
+        searchAuditId: parsed ? parsed.searchAuditId : null,
+
         // ── ID-SHAPE PROBE (2026-08-08) ──────────────────────────────────────────────────
         // Added after a live run showed ZERO overlap between DOM card ids and captured ids
         // (0/50 across all four buffers). Zero — not a shortfall — means the two sides are
@@ -168,9 +307,12 @@
         // has already returned otherwise), it is capped, and it must be off before ship.
         // Truncation is reported so a "not found" on a cut body is never mistaken for
         // proof of absence.
-        rawBody:          bodyText.length > 500000 ? bodyText.slice(0, 500000) : bodyText,
-        rawBodyTruncated: bodyText.length > 500000,
-        rawBodyLength:    bodyText.length,
+        // NULL on the Response.json() path — there is no raw string there and we will not
+        // manufacture one. CITY RAW 3's containment check already degrades to
+        // "UNKNOWN (no raw body retained)" rather than reporting a false negative.
+        rawBody:          bodyText ? (bodyText.length > 500000 ? bodyText.slice(0, 500000) : bodyText) : null,
+        rawBodyTruncated: bodyText ? bodyText.length > 500000 : false,
+        rawBodyLength:    bodyText ? bodyText.length : null,
 
         // First few ids WITH the exact JSON path they were read from, so the receiver states
         // the path as fact rather than inferring it. Taken before any coordinate filtering,
@@ -188,9 +330,20 @@
           return out;
         })()
       }, '*');
+      // Made it through. Emitted so the log reads as a matched set against the drops above, and
+      // so the request PATH and totalResultsSize are visible together — that pair is what
+      // identifies WHICH saved-search tab a captured response belongs to.
+      reportCaptureOk(url, seq, parsed ? parsed.totalResultsSize : null,
+                      bodyText ? bodyText.length : null, wo.length);
       parsed = null; wo = null; pairs = null; noCoordIds = null; // nothing retained
     } catch (e) {
-      // Same posture as summariseAndDiscard: a debug feed must never become a page failure.
+      // DROP — postMessage refused the payload (a structured-clone failure on the message object
+      // lands here), or extraction threw. Never rethrown: a debug feed must not become a page
+      // failure, and this runs inside Amazon's own promise chain.
+      reportDrop('emit-threw', url, seq, {
+        bodyLength: bodyText ? bodyText.length : null,
+        detail: (e && e.name ? e.name : 'Error') + ': ' + (e && e.message ? e.message : 'unknown')
+      });
     }
   }
 
@@ -209,20 +362,36 @@
       var rt = xhr.responseType;
       if (rt === '' || rt === 'text') {
         summariseAndDiscard(xhr.__extUrl, xhr.responseText);
-        emitCityAssignCoords(xhr.__extUrl, xhr.responseText);
+        emitCityAssignCoords(xhr.__extUrl, xhr.responseText, xhr.__extSeq);
       } else if (rt === 'json') {
         var obj = xhr.response;
         if (obj) {
           var jsonText = JSON.stringify(obj);
           summariseAndDiscard(xhr.__extUrl, jsonText);
-          emitCityAssignCoords(xhr.__extUrl, jsonText);
+          emitCityAssignCoords(xhr.__extUrl, jsonText, xhr.__extSeq);
           jsonText = null;
+        } else {
+          // json responseType but a null .response — a parse failure inside XHR itself.
+          reportDrop('xhr-json-response-null', xhr.__extUrl, xhr.__extSeq, {
+            status: xhr.status, responseType: rt
+          });
         }
         obj = null;
+      } else {
+        // DROP POINT 5 — blob / arraybuffer / document. Previously an unlogged fall-through, so
+        // a response Amazon happened to request in a binary type looked exactly like one that
+        // was never made. The actual responseType string is reported, not just "other".
+        reportDrop('xhr-unhandled-responseType', xhr.__extUrl, xhr.__extSeq, {
+          status: xhr.status, responseType: (rt === undefined || rt === null) ? '(undefined)' : String(rt)
+        });
       }
-      // every other responseType: deliberately ignored
     } catch (e) {
-      // Never surface to the page.
+      // Reading responseText on a non-text responseType throws InvalidStateError; that and any
+      // other read failure used to vanish here.
+      reportDrop('xhr-read-threw', xhr.__extUrl, xhr.__extSeq, {
+        status: (function () { try { return xhr.status; } catch (e2) { return null; } })(),
+        detail: (e && e.name ? e.name : 'Error') + ': ' + (e && e.message ? e.message : 'unknown')
+      });
     }
   }
 
@@ -242,6 +411,101 @@
   // A genuine network failure (offline, DNS, connection refused) rejects with a TypeError and
   // no aborted signal, so it still reports — as status 0, exactly as before. Deciding what
   // status 0 MEANS is background.js's job, not this file's.
+  // ── PIGGYBACK ON AMAZON'S OWN BODY READ (2026-08-13) ──────────────────────────────────────
+  //
+  // WHY THE CLONE APPROACH IS GONE. The SPA aborts its own in-flight search on every refresh
+  // (`onAutoRefresh` -> `executeAvailableWorkFilterActions`). `resp.clone()` succeeds and tees
+  // the body, but `abort()` errors BOTH branches of a tee regardless of what is already
+  // buffered, so our read died with `AbortError` on exactly the response that renders the board
+  // — every single cycle. Proven live: `text() FAILED AbortError` while `json() OK wo: 1` on the
+  // same response. No amount of reading earlier or salvaging chunks can win that race.
+  //
+  // WHAT THIS DOES INSTEAD. Amazon reads that body itself, via Response.json(), and that read
+  // completes — abort-after-read is harmless to them. So we stop competing for the body and
+  // observe the read they are already performing.
+  //
+  // ⚠ Response.prototype IS GLOBAL — this sits in the path of EVERY fetch on the page, not just
+  // ours. Three things keep that safe:
+  //   1. The ORIGINAL promise object is returned, always. Never a .then()-derived promise, never
+  //      a re-wrapped value. Amazon's caller receives byte-for-byte what it would have.
+  //   2. A flag check is the FIRST thing after the passthrough call, so with the switches off
+  //      (the shipped state) the added cost is one boolean read. No URL parsing, no try/catch
+  //      entry, nothing.
+  //   3. Our observation is a SEPARATE promise branch with its own rejection handler, and the
+  //      whole wrapper body is inside try/catch. Nothing we do can throw into Amazon's caller or
+  //      create an unhandled rejection.
+  //
+  // The Response object is NOT mutated — the sequence number is held in a WeakMap keyed by the
+  // Response, so we add no property Amazon's code could ever enumerate.
+  var _respSeq = (typeof WeakMap === 'function') ? new WeakMap() : null;
+
+  var _responseHookInstalled = false;
+  function installResponseReadHook() {
+    if (_responseHookInstalled) return;
+    try {
+      if (typeof Response !== 'function' || !Response.prototype) return;
+      // Double-installation guard: a re-injected content script must never wrap the wrapper,
+      // which would stack observers and double-emit. Non-enumerable so it cannot show up in
+      // anything Amazon iterates.
+      if (Response.prototype.__extRelayReadHooked) { _responseHookInstalled = true; return; }
+      try {
+        Object.defineProperty(Response.prototype, '__extRelayReadHooked', {
+          value: true, enumerable: false, configurable: false, writable: false
+        });
+      } catch (e) { /* non-fatal: the flag below still prevents a second install this session */ }
+
+      var origJson = Response.prototype.json;
+      var origText = Response.prototype.text;
+
+      // `observe` never returns anything and never throws — the caller ignores it entirely.
+      function observe(res, promise, isJson) {
+        try {
+          var url = res.url;
+          if (!isCapturePath(url)) return;   // not ours: nothing attached, nothing scheduled
+          var seq = _respSeq ? _respSeq.get(res) : null;
+          promise.then(function (value) {
+            if (isJson) {
+              emitFromParsed(url, value, seq, null);      // already parsed — no stringify
+            } else {
+              emitCityAssignCoords(url, value, seq);      // a string — parse as before
+            }
+          }, function (err) {
+            reportDrop(isJson ? 'amazon-json-rejected' : 'amazon-text-rejected', url, seq, {
+              detail: (err && err.name ? err.name : 'Error') + ': ' +
+                      (err && err.message ? err.message : 'unknown')
+            });
+          });
+        } catch (e) {
+          // Deliberately swallowed: this runs inside Amazon's read path.
+        }
+      }
+
+      if (typeof origJson === 'function') {
+        Response.prototype.json = function () {
+          var p = origJson.apply(this, arguments);
+          // Flag check FIRST — this is the zero-cost path for every non-capture fetch and for
+          // the entire shipped build.
+          if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return p;
+          observe(this, p, true);
+          return p;   // the ORIGINAL promise, unchanged
+        };
+      }
+      if (typeof origText === 'function') {
+        Response.prototype.text = function () {
+          var p = origText.apply(this, arguments);
+          if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return p;
+          observe(this, p, false);
+          return p;   // the ORIGINAL promise, unchanged
+        };
+      }
+      _responseHookInstalled = true;
+    } catch (e) {
+      // If installation fails the extension simply captures nothing. The page is untouched.
+      _responseHookInstalled = true; // do not retry in a loop
+    }
+  }
+  installResponseReadHook();
+
   function isAbort(err, signal) {
     if (signal && signal.aborted) return true;
     return !!(err && err.name === 'AbortError');
@@ -259,28 +523,34 @@
       var signal = (init && init.signal) ||
                    ((input && typeof input === 'object' && input.signal) || null);
       var isCaptured = isCapturePath(url); // always false while CAPTURE_RESPONSES is off
+      reportEndpointSeen(url, isCaptured);  // read-only recon; no-op unless CITY_ASSIGN_DEBUG
+
+      // Sequence assigned BEFORE the request goes out, so the two /search responses of one
+      // refresh are distinguishable in the log and each capture can be matched to its observe.
+      var seq = (isWatched || isCaptured) ? nextSeq() : null;
+
+      // DROP POINT 6 — a URL the rate-limit path watches but the capture path does not. Since
+      // WATCH_PATH and CAPTURE_PATHS both contain '/api/loadboard/search' this should be
+      // impossible; if it ever fires, the two lists have drifted and that is the bug.
+      if (isWatched && !isCaptured) {
+        reportDrop('watched-but-not-captured', url, seq, {
+          detail: 'CAPTURE_RESPONSES=' + CAPTURE_RESPONSES + ' isCapturePath=false'
+        });
+      }
+
       var result = origFetch.apply(this, arguments);
       if (isWatched || isCaptured) {
         result.then(function (resp) {
-          // CLONE FIRST, before anything else in this handler can disturb the body. resp.ok
-          // and resp.status below do not disturb it, but ordering this first means no future
-          // edit above can. The ORIGINAL `resp` is never read — Amazon consumes that. Our
-          // handler was registered synchronously inside this wrapper, before Amazon could
-          // attach theirs, so this clone runs while the body is still untouched.
-          var snapshot = null;
-          if (isCaptured) {
-            try { snapshot = resp.clone(); } catch (e) { snapshot = null; }
+          // NO CLONE ANY MORE (2026-08-13). The body is captured by observing Amazon's own
+          // Response.json() read — see installResponseReadHook(). Cloning here was the bug: the
+          // SPA's abort errored our tee branch on the one response that renders the board.
+          //
+          // We touch NOTHING on `resp`. The sequence number is recorded in a WeakMap so the
+          // Response object itself gains no property.
+          if (isCaptured && _respSeq) {
+            try { _respSeq.set(resp, seq); } catch (e) { /* never surface to the page */ }
           }
           if (isWatched) report(url, resp.ok, resp.status); // UNCHANGED reporting path
-          if (snapshot) {
-            // .text() consumes the clone FULLY, so neither branch is left buffered.
-            snapshot.text()
-              .then(function (bodyText) {
-                summariseAndDiscard(url, bodyText);
-                emitCityAssignCoords(url, bodyText);
-              })
-              .catch(function () { /* clone read failed — never surface to the page */ });
-          }
         }).catch(function (err) {
           if (isAbort(err, signal)) return; // aborted — normal navigation, report NOTHING
           if (isWatched) report(url, false, 0); // genuine network failure — no HTTP status at all
@@ -295,7 +565,17 @@
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__extWatched = typeof url === 'string' && url.indexOf(WATCH_PATH) !== -1;
     this.__extCaptured = isCapturePath(url); // always false while CAPTURE_RESPONSES is off
+    reportEndpointSeen(url, this.__extCaptured); // read-only recon; see the function comment
     this.__extUrl = url;
+    // Same sequence space as the fetch wrapper, so a refresh that mixes fetch and XHR still
+    // produces one ordered, matchable series.
+    this.__extSeq = (this.__extWatched || this.__extCaptured) ? nextSeq() : null;
+    // DROP POINT 6, XHR half — watched by the rate-limit path but invisible to the capture path.
+    if (this.__extWatched && !this.__extCaptured) {
+      reportDrop('watched-but-not-captured', url, this.__extSeq, {
+        detail: 'XHR; CAPTURE_RESPONSES=' + CAPTURE_RESPONSES + ' isCapturePath=false'
+      });
+    }
     return origOpen.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function () {

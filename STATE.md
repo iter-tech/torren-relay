@@ -254,10 +254,44 @@ from this point on, matching every other file in `docs/`.
 
 ## Поточна фаза / Current phase
 
+> **New PM? Read `docs/HANDOFF.md` first** (created 2026-08-12) — a two-page snapshot of rules,
+> current position and what is blocked. This file is the detailed status board behind it.
+
 Post-MVP hardening + feature expansion. Core detect/highlight/sound/auto-open loop, LoadUnit
 data model, Night Mode, popup wiring (Step 3), PAT ("Post a Truck" / Create Post) Helper, Card
 Action Bar, multi-domain support, and Supabase email-OTP login (now gating every feature) are
 all built. Working through backlog items and regional/equipment coverage expansion.
+
+**Active thread: per-city load splitting** — the prerequisite for the Single-Tab Multi-Driver
+Monitor (`docs/PRODUCT.md`). Still **log-only**: `cityAssign.js` hides, filters, reorders and
+restyles nothing, and mutates no DOM. As of **2026-08-13** the id join is Ihor-verified (20/20),
+the live DOM is captured, the reader is fixed to the real structure (the summary panel is a
+**sibling** of the results, not a container — it was reading zero cards), and the accumulator
+built around a false pagination premise is gone. **Everything now waits on one live console
+read** — see In progress.
+
+**✅ Debug flags are back at shipped state (2026-08-13):** `DEBUG_LEVEL = 1`, and both
+`CAPTURE_RESPONSES` and `CITY_ASSIGN_DEBUG` `false` in both worlds. No body is read, no ids cross
+`postMessage`, no raw-body transport. All diagnostic code is retained, dormant behind the flags.
+
+**ROOT CAUSE FOUND (2026-08-12).** The 0/N id mismatch that drove the last several rounds of
+investigation was **the DOM reader collecting "Similar matches" cards alongside the main
+results** — two `div.load-list` elements, and the reader took the first one. A "9 of 9 results"
+board yielded 13 cards; the 4 extras can never appear in `/search`, so they could never join.
+Not pagination, not the join key, not the endpoint — all three of those were investigated and
+cleared first. Reader is now scoped to the `search-results-summary` panel.
+
+**Pagination/accumulation was built on a false premise.** The belief that the main list paginates
+at 5 and needs scrolling came from misreading similar-matches behaviour. **The main list renders
+all N at once.** The accumulator is retained (harmless, and still correct for genuine multi-page
+cases) but is no longer load-bearing.
+
+**Accumulator REMOVED — cycles are self-contained (2026-08-12).** The 0/N cause is fully
+resolved and the machinery built to work around it is gone. Each cycle now matches the current
+main-list cards against the current `/search` response and keeps no state. The accumulator had
+been built to survive pagination that does not exist, and both of its reset rules destroyed good
+data on a live board. `cityAssign.js` is **1103 → 996 lines**. Still log-only: no card is hidden,
+filtered, reordered or restyled.
 
 **Join confirmed live (2026-08-08).** The id join between load cards and captured `/search`
 records is **verified working on a real board** — 20/20 captured ids matched, up from a 0/50 run
@@ -274,6 +308,37 @@ It is deliberately *not* wired to any UI: the assignment must be proven correct 
 board before anything hides or filters a load on the strength of it.
 
 ## Що завершено / Done
+
+**Reader fixed to the captured DOM (2026-08-13) — 56 automated checks, UNVERIFIED LIVE.** The
+2026-08-12 scoping fix was **wrong in direction**: it walked UP for an ancestor carrying
+`search-results-summary`, but that token sits on a **SIBLING** of the results, so it read ZERO
+cards every cycle. Now anchors on `#search-results-summary-panel` (class fallback) and walks
+**following siblings** to the first `div.load-list`. Card ids are collected by **UUID shape**
+rather than card class — measured live, class-based found 8 of 9 because the recently-added card
+carries a different class; the UUID filter also excludes `div[id="STARTING_SOON"]`. A collected
+count that disagrees with the board's N now **skips the cycle** instead of assigning from a set
+known to be wrong. Structure recorded in `AMAZON_SELECTORS.md`. Also fixed a live
+**ReferenceError** (`MAIN_PANEL_TOKEN`) left in the diagnostic path.
+
+**Main-list scoping fix (2026-08-12) — superseded by the above.**
+`readRenderedCardIds()` now reads only the `div.load-list` inside the panel whose class/id
+contains `search-results-summary`; if that panel is absent it reads nothing and warns rather than
+falling back to the document. New `CITY DIAG 0/5` line cross-checks the collected count against
+the "Showing 1 - N of N results" number — the tell that similar-matches cards are excluded.
+Reproduced the exact live failure in the harness (9 main + 4 similar → 13 before, 9 after,
+intersection 0 → 9/9) including the case where the similar list comes FIRST in document order.
+`searchAuditId` reset removed (disproven: per-request); `originCities` is the only reset signal,
+which also eliminates the two-tab thrash. Recorded in AMAZON_SELECTORS.md.
+
+**Accumulator and both reset rules deleted (2026-08-12).** Store, 3000-entry cap,
+`mergeIntoAccumulator()`, `resetAccumulator()`, all reset state, `CITY DIAG RESET`,
+`CITY DIAG 5/5` and the cross-cycle coverage bookkeeping — all removed. Assignment reads the
+response `pickBuffer()` selects for **this cycle only**. Verified by grep that nothing outside
+`cityAssign.js` referenced any of it, and that `cityAssign.js` calls out only to
+`resolvePATCity` and `getActiveOriginCities`, so the refresh loop, detection/highlight,
+START/STOP, `panelCloser`, the origin panel and PAT could not be affected. `searchAuditId` KEPT
+in `networkObserver.js` — still read by the `CITY ENDPOINT SHAPE` diagnostic, so not orphaned.
+Post-deletion scans: **no new orphans, no write-only state** (395 declarations).
 
 **Id join verified on a live board (2026-08-08).** `CITY DIAG 3/4` reported 20/20 captured ids
 matching rendered cards. **No code change** — the join was already correct; the earlier 0/50 was
@@ -476,14 +541,66 @@ backoff still pausing/showing the banner, Reset default, persistence across rest
 
 ## Що в роботі / In progress
 
-**Capture coverage — the ONE thing now standing between us and a correct per-city split
-(2026-08-08).** The join is right; the data is incomplete. Amazon paginates the board at **5**
-per response, we buffer the last **4** pages, so ~20 ids are available against **50** cards on
-screen. Every cycle therefore matches a **subset by design** and the rest log as "id not in any
-response" — that reason string is now *expected*, not a fault. Until pages accumulate, the
-per-city counts are **directionally useful but not complete**, and nothing should act on them.
-Deliberately not fixed in the join step: accumulation changes capture behaviour and deserves its
-own step.
+**✅ PER-CYCLE cityAssign VERIFIED LIVE (2026-08-13).** Across several auto-refresh cycles:
+`CITY DIAG 0/5` MATCH: YES every cycle, `CITY DIAG 3/4` intersection **full (30/30, 28/28)**,
+**zero unmatched**, zero RESET lines, **and the board rendered normally** with the
+`Response.prototype` wrapper in place. The per-city assignment is now known-correct on real data
+— the first time that has been true. PLAN.md tasks 1, 2 and 3 are done.
+
+**Capture rewritten to piggyback Amazon's own read (2026-08-13) — now verified by the above.** The trace
+found the fault and a console experiment confirmed the fix direction: the SPA aborts its own
+in-flight search, which errors both branches of our clone's tee, so the response that renders the
+board died with `AbortError` every cycle while Amazon's own `Response.json()` read of the *same*
+response succeeded. `resp.clone()`/`snapshot.text()` are retired; `Response.prototype.json`/`.text`
+are wrapped instead, returning the original promise object unchanged. **This is the first build
+that can see the active board's data at all.** Risk to watch: `Response.prototype` is global, so
+the wrapper is in the path of every fetch on the page — Ihor must confirm the **board itself still
+renders normally**, not just that our logs appear. `rawBody` is null on this path; see CHANGELOG
+for which diagnostics lose data.
+
+**Earlier: capture path instrumented; the trace is what found the fault (2026-08-13).** Live evidence:
+every refresh observes `/api/loadboard/search` **twice** but captures it **once**, and the one
+captured belongs to a *different* saved-search tab (woCount 2, bodyLength 27377) while the active
+board showed "of 1 results". The buffer is healthy — `buffers: 4`, `CITY DIAG 0/5 MATCH: YES`
+every cycle — so this is **not** the buffer cap. Eight previously-silent discard points now emit
+a reason code with a per-request `seq`, and each successful capture emits its path +
+`totalResultsSize`. **Next action is a console read, not a code change:** the reason code on the
+dropped `seq` names the fault. Leading suspect from the code is `clone-threw` — `resp.clone()`
+fails when the body has already been consumed, which would explain exactly one of two responses
+surviving.
+
+**Nothing is gated on a live read any more.** The per-city assignment is verified and the flags
+are off. The thread's next step is a *decision*, not an investigation: `cityAssign` is still
+**log-only**, and moving it to actually filtering cards (PLAN.md task 6) is the first change in
+this entire line of work the dispatcher will see. It needs its own review, its own TEST_CASES
+entries, and `SAFETY.md` re-read before anything hides a load.
+
+**The harness estate is the immediate blocker on further code changes (PLAN.md task 4).** Five
+suites are red or crashing; two are green and current. Until that is fixed, the next code change
+lands with an unreadable test signal.
+
+**`citydrop-harness` joined the rebuild list (2026-08-13).** Five of its eight sections drive the
+retired clone path and its stubs are plain objects rather than `Response` instances, so it now
+crashes early. Its still-valid coverage (XHR drop reasons, the isolated-side receiver) is real but
+unreachable until it is rebuilt. Green and current: `citypiggy-harness` (53) and
+`citysibling-harness` (56).
+
+**The harness estate needs rebuilding, not patching (2026-08-13).** `citysibling-harness` is
+**56/56 green** and is the only suite modelling the DOM the dispatcher actually captured. The
+other four are red for a diagnosable, non-code reason: **four of five stub the summary panel as
+an ANCESTOR** of the load-list (the structure just disproven), **none provide
+`getElementById`**, and several use fixture ids like `'p1'`/`'m1'` that the new UUID filter
+correctly rejects. Two crash outright on a null log line rather than asserting. Plus the 43
+assertions still naming accumulator functionality deleted on 2026-08-12. **These are fixture
+faults, not code faults** — PLAN.md task 4.
+
+**Five harness suites need retiring or rewriting — NOT yet touched (2026-08-12).** 43 assertions
+went red on deletion. **Every one names the accumulator, a reset, or a deleted log line**; the
+core behaviour suites are green (the confirmed live shape — 9 main + 4 similar → 9 collected,
+9/9 intersection, 0 unmatched — still passes). `cityaccum-harness` (31 red) tests deleted code
+end to end and should be retired outright. The other 12 are individual assertions inside
+otherwise-green suites. **Deliberately left red rather than edited**, per the "do not fix a red
+suite by changing tests" rule — awaiting a decision.
 
 **Per-city assignment — settle delay and threshold still unconfirmed (2026-08-06).** The code is written and
 passes 92 automated checks, but the checks run against stub DOM and synthetic responses. What
@@ -690,14 +807,23 @@ intent was broader.
 
 ## Що далі / Next
 
-- **PAGE ACCUMULATION — the next step in this thread.** Keep ids across `/search` pages instead
-  of only the last 4 buffers, so all 50 on-screen cards can be matched rather than ~20. This
-  **does** change capture behaviour, so it is its own step with its own review. Everything else
-  in the per-city thread waits on it — a per-city count computed from 40% of the board must not
-  drive any UI.
-- **Confirm the per-city split looks right for the cards that DID match** before building on it.
-  Partial data can still be checked for correctness: the cities assigned should be plausible for
-  those specific loads.
+- **✅ DONE 2026-08-13 — live verification of the per-cycle assignment** (PLAN.md tasks 1-3).
+  Full intersection, zero unmatched, board unaffected. Flags returned to shipped state.
+- **1. Rebuild the harness suites** (PLAN.md task 4). Five red or crashing, two green. This is the
+  blocker on every subsequent code change — without it the next run's signal is unreadable.
+- **3. Only once `MATCH: YES` is confirmed:** design the move from log-only to **actually
+  filtering cards**. First dispatcher-visible change in this whole line of work — needs its own
+  review, its own TEST_CASES entries, and `SAFETY.md` re-read before anything hides a load.
+- **4. Finish the pending cleanup** (`docs/HANDOFF.md` §5): correct the falsified pagination
+  claims in `api-samples.md` §6.5/§6.7; optionally split the ~400 lines of flag-gated diagnostics
+  out of `cityAssign.js`. Note Phase 1 found **zero orphans** — do not commission a blind sweep.
+- **AUDIT `content/loadParser.js:124`** — it makes the same "first `div.load-list` is main"
+  assumption and feeds highlighting/alerts, so it may be treating similar-matches cards as
+  results. Not touched in this task; needs its own.
+- **If coverage reaches the full board**, per-city counts are complete and the feature is ready
+  to move from log-only to **actually filtering cards** — the next thread. That is the first
+  change in this whole line of work that the dispatcher will *see*, so it needs its own review,
+  its own TEST_CASES entries, and the safety rules re-read before anything hides a load.
 - **Then:** tune `CITY_ASSIGN_MAX_MILES` (150 is a guess) and
   `CITY_ASSIGN_SETTLE_MS` (700 is a guess) against what the logs actually show.
 - **Then:** decide whether the city-coordinate cache should persist across page reloads. It is
@@ -763,11 +889,23 @@ intent was broader.
 
 ## Блокери / Blockers
 
-- **Per-city counts are computed from ~40% of the board (2026-08-08):** the join is confirmed
-  correct, but only ~20 of 50 cards can be matched per cycle because Amazon paginates at 5 and
-  we buffer 4 pages. **The counts are therefore incomplete by construction, not wrong.** Nothing
-  may consume them until page accumulation lands. This is the single blocker on the per-city
-  thread.
+- **RESOLVED 2026-08-12 — the whole reset problem:** both signals are gone with the accumulator.
+  `searchAuditId` was disproven (changes per REQUEST); `originCities` fired during the normal
+  staged load of the SAME search, wiping 51 ids mid-fill. Nothing accumulates, so nothing needs
+  resetting. The two-saved-search-tab thrash is moot for the same reason.
+- **RESOLVED 2026-08-13 — per-city counts are confirmed correct on a live board.** Full
+  intersection (30/30, 28/28), zero unmatched, across several refresh cycles. The blocker on
+  moving from log-only to filtering is cleared; that move is now a scoping decision, not an
+  unknown.
+- **RESOLVED 2026-08-13 — debug flags.** All five back to shipped state (`DEBUG_LEVEL = 1`, both
+  `CAPTURE_RESPONSES` and both `CITY_ASSIGN_DEBUG` `false`). Diagnostic code retained and dormant.
+- **⚠ THE ACTIVE BLOCKER — five harness suites red or crashing.** `cityaccum`, `cityscope`,
+  `citydiag`, `cityassign` stub the summary panel as an ancestor, provide no `getElementById`, and
+  use non-UUID fixture ids; `citydrop` drives the retired clone path and crashes. Green and
+  current: `citysibling` (56), `citypiggy` (53). **Blocks every subsequent code change** — the
+  next run's signal is unreadable until this is fixed. PLAN.md task 4.
+- **`content/loadParser.js:124` unaudited** — same "first `div.load-list`" assumption that caused
+  the 0/N bug, and it feeds highlighting and alerts, which the dispatcher DOES see. PLAN.md task 5.
 - **Still unconfirmed from live logs (2026-08-06):** whether the 700 ms settle delay is right on
   a slow board, whether 150 mi is a sensible cutoff, and whether a real refresh buffers more than
   one `/search` response (api-samples.md §6.4). None of these blocked the join; all three need a

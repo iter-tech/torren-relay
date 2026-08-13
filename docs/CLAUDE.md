@@ -48,12 +48,13 @@
 
 1. **PROOF BEFORE REPORT.** Never report "done" for any UI-affecting change without actually exercising the changed flow (open the page/popup, perform the user scenario, observe the result). If a flow cannot be exercised from this environment, say so explicitly in the report and list exactly what the user must test manually — never imply it was verified.
 2. **SMOKE CHECKLIST** — after any UI-affecting change, run all six and report pass/fail per item:
-   - (a) popup opens without console errors
-   - (b) logged-out popup shows only the login block
-   - (c) full login flow works (email → code → features appear)
-   - (d) sidebar/panel activates on the load board
-   - (e) PAT modal opens and Confirm enables with valid data
-   - (f) no errors in the page console
+
+   * (a) popup opens without console errors
+   * (b) logged-out popup shows only the login block
+   * (c) full login flow works (email → code → features appear)
+   * (d) sidebar/panel activates on the load board
+   * (e) PAT modal opens and Confirm enables with valid data
+   * (f) no errors in the page console
 
 ## Communication
 
@@ -70,5 +71,11 @@
 1. Додай запис у CHANGELOG.md (що зроблено + дата).
 2. Онови BACKLOG.md (познач виконане, додай нове, що випливло).
 3. Перепиши STATE.md: поточна фаза / що завершено / що в роботі / що далі / блокери.
+4. Онови PLAN.md: познач статус виконаної задачі.
+
+
 Це про список стану проекту, а не про сам код.
+
+
+
 
