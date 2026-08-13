@@ -756,6 +756,185 @@ function logUnmatchedProvenance(unmatched, chosen, cardIds) {
   }
 }
 
+// ── CITY FILTER (2026-08-13) ──────────────────────────────────────────────────────────────
+//
+// ⚠ THE ONLY CODE IN THIS FILE THAT CHANGES WHAT THE DISPATCHER SEES. Everything else logs.
+// Gated behind CITY_FILTER_ENABLED, which ships OFF; with it off nothing below writes a style.
+//
+// DESIGN RULES, each chosen so the worst outcome is "too many loads shown", never "too few":
+//   1. HIDE, NEVER REMOVE. Only style.display is written, and the previous inline value is
+//      recorded so the restore is exact. No remove(), no detach, no reorder, no innerHTML, no
+//      change to card contents, no attributes added to Amazon's nodes.
+//   2. AN UNASSIGNED CARD IS NEVER HIDDEN. A load the dispatcher cannot see is a load he cannot
+//      book, so anything we could not confidently assign stays visible.
+//   3. THE SIMILAR-MATCHES LIST IS NEVER TOUCHED — not hidden, not shown, not even read. Only
+//      cards inside findMainResultsList() are eligible.
+//   4. EVERY APPLY RESTORES FIRST. Amazon re-renders the list on each refresh, so re-applying
+//      from a clean slate is what makes the filter reassert itself on new nodes AND makes a card
+//      that has become unassigned visible again.
+//
+// WHY display:none IS SAFE FOR THE REST OF THE PIPELINE: the card stays in the DOM, so
+// loadParser still parses it and it stays in knownLoadIds. Hiding can therefore never make a
+// card look "new" on the next cycle, and cannot affect the alert, the highlight, or auto-open.
+
+// True when the assignment pipeline should run at all. The filter feature needs it; the debug
+// diagnostics also need it. Either reason is sufficient.
+function cityAssignEnabled() {
+  var filterOn = (typeof CITY_FILTER_ENABLED !== 'undefined') && CITY_FILTER_ENABLED;
+  var debugOn  = (typeof CITY_ASSIGN_DEBUG  !== 'undefined') && CITY_ASSIGN_DEBUG;
+  return filterOn || debugOn;
+}
+
+// True only for the verbose CITY DIAG / CITY RAW blocks, which stay debug-gated so a shipped
+// build at DEBUG_LEVEL 1 prints nothing and does no diagnostic work.
+function cityVerboseDiagnostics() {
+  return (typeof CITY_ASSIGN_DEBUG !== 'undefined') && CITY_ASSIGN_DEBUG;
+}
+
+var _cityFilterActive = null;   // null = showing all; otherwise the city key being shown
+var _cityFilterHidden = [];     // [{ el, hadInline, prevDisplay }] — for an exact restore
+var _cityAssignByCard = {};     // id -> assigned city name, or null; rebuilt every cycle
+
+// Card container for an id-bearing div. Returns null when the container cannot be identified,
+// which the caller treats as "do not hide" — see rule 2.
+function cardContainerFor(idEl) {
+  try {
+    if (!idEl || typeof idEl.closest !== 'function') return null;
+    return idEl.closest('div.load-card, div.load-card__selected, div.wo-card-header--highlighted');
+  } catch (e) {
+    logger.error('cityAssign', 'cardContainerFor failed', { error: e });
+    return null;
+  }
+}
+
+// Every main-list card as { id, el }. MAIN LIST ONLY — the similar list is unreachable from
+// here by construction, because findMainResultsList() never returns it.
+function readMainCardElements() {
+  logger.log('cityAssign', 'readMainCardElements called');
+  var out = [];
+  try {
+    var mainList = findMainResultsList();
+    if (!mainList) return out;
+    var idEls = mainList.querySelectorAll('div[id]');
+    for (var i = 0; i < idEls.length; i++) {
+      var id = idEls[i].id;
+      if (!id || !CARD_UUID_RE.test(id)) continue;
+      var container = cardContainerFor(idEls[i]);
+      if (!container) continue;              // cannot identify the card -> never hide it
+      out.push({ id: id, el: container });
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'readMainCardElements failed', { error: e });
+    return [];
+  }
+  return out;
+}
+
+// Undoes every hide we performed, exactly. Also sweeps the main list for a stray display:none
+// we may have orphaned (an extension reload leaves the DOM styled but our tracker empty), which
+// is what makes applyCityFilter(null) a reliable one-step way back to a normal board.
+function restoreAllCards() {
+  logger.log('cityAssign', 'restoreAllCards called');
+  var restored = 0, swept = 0;
+  try {
+    for (var i = 0; i < _cityFilterHidden.length; i++) {
+      var rec = _cityFilterHidden[i];
+      if (!rec || !rec.el || !rec.el.style) continue;
+      if (rec.hadInline) rec.el.style.display = rec.prevDisplay;
+      else rec.el.style.removeProperty('display');   // exact: leave NO inline display behind
+      restored++;
+    }
+    _cityFilterHidden = [];
+
+    // Orphan sweep. Only display:'none' on a main-list card is cleared — nothing else is read
+    // or written, and the similar list is never in scope.
+    var cards = readMainCardElements();
+    for (var j = 0; j < cards.length; j++) {
+      var el = cards[j].el;
+      if (el && el.style && el.style.display === 'none') {
+        el.style.removeProperty('display');
+        swept++;
+      }
+    }
+    if (swept > 0) {
+      logger.warn('cityAssign', 'restore swept orphaned display:none cards — likely left by a ' +
+        'previous script instance', { swept: swept });
+    }
+    logger.log('cityAssign', 'CITY FILTER  restored', { restored: restored, swept: swept });
+  } catch (e) {
+    logger.error('cityAssign', 'restoreAllCards failed', {
+      error: e, tracked: _cityFilterHidden.length
+    });
+  }
+}
+
+// THE public entry point. `cityKey` null/undefined = show all (the default and the reset path).
+function applyCityFilter(cityKey) {
+  logger.log('cityAssign', 'applyCityFilter called');
+  try {
+    if (typeof CITY_FILTER_ENABLED === 'undefined' || !CITY_FILTER_ENABLED) {
+      logger.log('cityAssign', 'CITY FILTER  disabled by flag — no style written');
+      return { applied: false, reason: 'flag-off' };
+    }
+
+    // ALWAYS restore first: guarantees no residue, and re-applies cleanly onto re-rendered nodes.
+    restoreAllCards();
+    _cityFilterActive = (cityKey === undefined || cityKey === null) ? null : String(cityKey);
+
+    if (_cityFilterActive === null) {
+      logger.log('cityAssign', 'CITY FILTER  cleared — showing all');
+      return { applied: true, city: null, hidden: 0, shown: 0, unassignedShown: 0 };
+    }
+
+    var cards = readMainCardElements();
+    var hidden = 0, shown = 0, unassignedShown = 0;
+    for (var i = 0; i < cards.length; i++) {
+      var assigned = Object.prototype.hasOwnProperty.call(_cityAssignByCard, cards[i].id)
+        ? _cityAssignByCard[cards[i].id] : null;
+
+      if (assigned === null || assigned === undefined) {
+        unassignedShown++;                   // rule 2: never hide what we could not assign
+        continue;
+      }
+      if (assigned === _cityFilterActive) { shown++; continue; }
+
+      var el = cards[i].el;
+      if (!el || !el.style) continue;
+      var hadInline = !!(el.style.display && el.style.display.length);
+      _cityFilterHidden.push({ el: el, hadInline: hadInline, prevDisplay: el.style.display });
+      el.style.display = 'none';
+      hidden++;
+    }
+    logger.log('cityAssign', 'CITY FILTER  ' + _cityFilterActive +
+      '  shown: ' + shown + '  hidden: ' + hidden +
+      '  unassigned kept visible: ' + unassignedShown + '  of ' + cards.length + ' cards');
+    return { applied: true, city: _cityFilterActive, hidden: hidden, shown: shown,
+             unassignedShown: unassignedShown };
+  } catch (e) {
+    logger.error('cityAssign', 'applyCityFilter failed — restoring to a visible board', {
+      error: e, requested: cityKey
+    });
+    // Any failure ends with everything visible. Never leave the board partly hidden.
+    try { restoreAllCards(); _cityFilterActive = null; } catch (e2) {
+      logger.error('cityAssign', 'restore after applyCityFilter failure ALSO failed', { error: e2 });
+    }
+    return { applied: false, reason: 'error' };
+  }
+}
+
+// Called at the end of each cycle so the filter reasserts itself on Amazon's re-rendered nodes.
+// No-op when no filter is active, so a normal board costs nothing.
+function reapplyCityFilter() {
+  logger.log('cityAssign', 'reapplyCityFilter called');
+  try {
+    if (typeof CITY_FILTER_ENABLED === 'undefined' || !CITY_FILTER_ENABLED) return;
+    if (_cityFilterActive === null) return;
+    applyCityFilter(_cityFilterActive);
+  } catch (e) {
+    logger.error('cityAssign', 'reapplyCityFilter failed', { error: e, active: _cityFilterActive });
+  }
+}
+
 // ── THE CYCLE ─────────────────────────────────────────────────────────────────────────────
 
 // One assignment pass. Reads, computes, logs, and touches nothing.
@@ -795,7 +974,9 @@ async function runCityAssignCycle() {
 
     // Diagnostics parts 1-3 (2026-08-08). BEFORE the mismatch bail below, so a cycle that stops
     // still leaves the full inventory in the console — that cycle is the most worth diagnosing.
-    logBufferInventory(cardIds);
+    // Verbose blocks are DEBUG ONLY (2026-08-13): a shipped build must not walk every span on
+    // the page or enumerate id-bearing descendants just to print nothing.
+    if (cityVerboseDiagnostics()) logBufferInventory(cardIds);
 
     // A MISMATCHED SET IS NOT USABLE (2026-08-13). If the collected count and the board's N
     // disagree we are holding the wrong cards — too many (similar-matches leaking back in) or
@@ -810,7 +991,7 @@ async function runCityAssignCycle() {
     }
     // Raw id samples (2026-08-08). Also before pickBuffer: when overlap is zero there IS no
     // selected response, and this block is precisely what explains why.
-    logIdShapeSamples(cardIds);
+    if (cityVerboseDiagnostics()) logIdShapeSamples(cardIds);
 
     // THE response this cycle matches against — whichever buffered response shares the most ids
     // with the board right now. This is again the assignment's real source, as it was before
@@ -849,6 +1030,9 @@ async function runCityAssignCycle() {
     var counts = {};
     for (var ri = 0; ri < resolved.length; ri++) counts[resolved[ri].name] = 0;
     var unmatched = [];
+    // Per-card assignment for this cycle, rebuilt from scratch. This is the filter's ONLY input;
+    // an id absent from it, or present with null, is treated as unassigned and never hidden.
+    var assignByCard = {};
 
     for (var k = 0; k < cardIds.length; k++) {
       var id = cardIds[k];
@@ -878,6 +1062,9 @@ async function runCityAssignCycle() {
         continue;
       }
       counts[bestCity]++;
+      // Only a card that reached HERE is assigned. Everything that hit a `continue` above stays
+      // out of the map and is therefore never hidden by the filter.
+      assignByCard[id] = bestCity;
     }
 
     // THE line this whole file exists to print.
@@ -900,7 +1087,13 @@ async function runCityAssignCycle() {
 
     // Diagnostics part 4 + verdict (2026-08-08). Last, because it classifies the unmatched list
     // the loop above just produced.
-    logUnmatchedProvenance(unmatched, buf, cardIds);
+    if (cityVerboseDiagnostics()) logUnmatchedProvenance(unmatched, buf, cardIds);
+
+    // Publish this cycle's assignment, then let any active filter reassert itself on the nodes
+    // Amazon just re-rendered. Both are no-ops on a normal board: reapplyCityFilter returns
+    // immediately unless a filter is active AND the feature flag is on.
+    _cityAssignByCard = assignByCard;
+    reapplyCityFilter();
   } catch (e) {
     logger.error('cityAssign', 'runCityAssignCycle failed', { error: e });
   } finally {
@@ -1040,17 +1233,25 @@ function onCaptureTraceMessage(ev) {
 function initCityAssign() {
   logger.log('cityAssign', 'initCityAssign called');
   try {
-    if (typeof CITY_ASSIGN_DEBUG === 'undefined' || !CITY_ASSIGN_DEBUG) return;
+    // 2026-08-13: was gated on CITY_ASSIGN_DEBUG alone, which is why filtering did nothing in a
+    // shipped build. The assignment is now a PRODUCT path — it runs whenever the filter feature
+    // is on, at DEBUG_LEVEL 1 with both debug flags off.
+    if (!cityAssignEnabled()) return;
     if (_cityAssignListener) return;  // idempotent: activation can be re-entered
     _cityAssignListener = onCityCoordsMessage;
     window.addEventListener('message', _cityAssignListener);
-    // Separate listener for the endpoint recon, so the coords path keeps a zero-line diff.
-    _cityEndpointListener = onEndpointSeenMessage;
-    window.addEventListener('message', _cityEndpointListener);
-    // Separate again (2026-08-13), so the coords and endpoint paths keep a zero-line diff.
-    _cityTraceListener = onCaptureTraceMessage;
-    window.addEventListener('message', _cityTraceListener);
-    logger.log('cityAssign', 'city-assign debug ACTIVE — read-only, logs only', {
+
+    // The two DIAGNOSTIC receivers stay debug-only — they exist to log, and a shipped build has
+    // nothing to log. Not registering them also means their messages are never even inspected.
+    if (typeof CITY_ASSIGN_DEBUG !== 'undefined' && CITY_ASSIGN_DEBUG) {
+      _cityEndpointListener = onEndpointSeenMessage;
+      window.addEventListener('message', _cityEndpointListener);
+      _cityTraceListener = onCaptureTraceMessage;
+      window.addEventListener('message', _cityTraceListener);
+    }
+    logger.log('cityAssign', 'city assignment ACTIVE', {
+      filterEnabled: (typeof CITY_FILTER_ENABLED !== 'undefined' && CITY_FILTER_ENABLED),
+      verboseDiagnostics: (typeof CITY_ASSIGN_DEBUG !== 'undefined' && CITY_ASSIGN_DEBUG),
       maxMiles: CITY_ASSIGN_MAX_MILES, settleMs: CITY_ASSIGN_SETTLE_MS
     });
   } catch (e) {
@@ -1085,6 +1286,14 @@ function teardownCityAssign() {
     // browser profile can never inherit the previous one's load ids or coordinates. With the
     // accumulator gone the only id-bearing state left is the response buffer, which is dropped
     // here alongside the coordinate cache.
+    // EVERY CARD BECOMES VISIBLE AGAIN. teardownCityAssign() runs from deactivateExtensionUI(),
+    // i.e. on logout and on deactivate, so a dispatcher can never be left looking at a filtered
+    // board with no extension running to un-filter it. Deliberately FIRST — if anything below
+    // were to throw, the board is already restored.
+    restoreAllCards();
+    _cityFilterActive = null;
+    _cityAssignByCard = {};
+
     _cityAssignBuffers = [];
     _cityCoordCache    = {};
     _cityAssignRunning = false;
@@ -1092,3 +1301,23 @@ function teardownCityAssign() {
     logger.error('cityAssign', 'teardownCityAssign failed', { error: e });
   }
 }
+
+// Exposed for MANUAL console testing only — nothing calls these automatically, and the city
+// buttons are deliberately NOT wired to them yet.
+//
+// ⚠ These live in the ISOLATED world. In DevTools the console defaults to the page's own
+// context, where __EXT_DEBUG does not exist — switch the console's context dropdown to the
+// extension before calling, exactly as with the existing __EXT_DEBUG.detectNewLoads().
+//
+//   __EXT_DEBUG.filterCity('CHICAGO, IL')  -> show only that city's loads
+//   __EXT_DEBUG.filterCity()               -> show ALL again (also the panic button)
+//   __EXT_DEBUG.cityAssignments()          -> the current id -> city map, to pick a valid key
+window.__EXT_DEBUG = window.__EXT_DEBUG || {};
+window.__EXT_DEBUG.filterCity      = function (city) { return applyCityFilter(city); };
+window.__EXT_DEBUG.cityAssignments = function () {
+  var out = {};
+  for (var k in _cityAssignByCard) {
+    if (Object.prototype.hasOwnProperty.call(_cityAssignByCard, k)) out[k] = _cityAssignByCard[k];
+  }
+  return out;
+};

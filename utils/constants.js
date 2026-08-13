@@ -39,7 +39,7 @@ const EXT_VERSION = '0.1.0';
 // only logger.debug consulted this constant, so with 183 logger.log calls against 5
 // logger.debug the knob silenced roughly 3% of output and was effectively non-functional —
 // the console stayed fully verbose at every setting.
-const DEBUG_LEVEL = 1;
+const DEBUG_LEVEL = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEVELOPMENT SWITCH — response-body capture. Shipped OFF, deliberately no UI, no storage
@@ -82,3 +82,27 @@ const CAPTURE_RESPONSES = false;
 // the isolated side would send them and then discard them, which is precisely what
 // summariseAndDiscard()'s "no ids, no cities, no addresses" contract exists to prevent.
 const CITY_ASSIGN_DEBUG = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE SWITCH — per-city card filtering (2026-08-13). Shipped OFF.
+//
+// ⚠ THIS IS THE ONLY FLAG IN THIS FILE THAT CAN CHANGE WHAT THE DISPATCHER SEES. Everything
+// else here is logging. With this on, applyCityFilter() may set style.display on Amazon's load
+// cards to hide loads belonging to other cities.
+//
+// OFF (false): applyCityFilter() is a no-op. NO style is ever written, no card is ever hidden,
+// and content/cityAssign.js remains what it has always been — read-only.
+// ON  (true):  applyCityFilter(city) hides main-list cards assigned to a DIFFERENT city.
+//
+// Safety properties that hold even when it is on (see content/cityAssign.js):
+//   - Cards are HIDDEN, never removed, detached, reordered, or edited.
+//   - A card we could not assign is NEVER hidden — erring toward showing is always correct,
+//     because a load the dispatcher cannot see is a load he cannot book.
+//   - The "Similar matches" list is never touched at all.
+//   - display:none keeps the card in the DOM, so loadParser still sees it and knownLoadIds is
+//     unaffected — hiding a card cannot make it look "new" on the next cycle.
+//
+// ONE DECLARATION IS ENOUGH — unlike CAPTURE_RESPONSES / CITY_ASSIGN_DEBUG there is no MAIN-world
+// mirror, because the filter lives entirely in the isolated world where the DOM work happens.
+// content/networkObserver.js neither reads nor needs it.
+const CITY_FILTER_ENABLED = true;

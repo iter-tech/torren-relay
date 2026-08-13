@@ -2,6 +2,120 @@
 
 ## [Unreleased]
 
+### 2026-08-13 — Per-city filtering is a FEATURE: works in a shipped build, wired to the buttons
+
+**Files:** `utils/constants.js`, `content/networkObserver.js`, `content/cityAssign.js`,
+`content/originCities.js`.
+
+**The problem.** `filterCity()` reported "unassigned kept visible: 4 of 4" with the debug flags
+off — the entire capture-and-assign path was gated behind `CAPTURE_RESPONSES` /
+`CITY_ASSIGN_DEBUG`, so a shipped build had no assignment to filter on.
+
+**1. Capture promoted from debug to product.** `CITY_FILTER_ENABLED` is now a product flag, **ON
+by default, mirrored in both worlds**. A new `bodyCaptureNeeded()` gates the body read on "the
+feature OR the debug capture", so assignment runs at `DEBUG_LEVEL 1` with both debug flags off.
+
+**⚠ The raw body does NOT ship — verified end to end, not asserted by inspection.** Running the
+file exactly as it ships (`CAPTURE_RESPONSES=false`, `CITY_ASSIGN_DEBUG=false`,
+`CITY_FILTER_ENABLED=true`):
+
+```
+coords messages : 1        rawBody       : null
+pairs           : [{id, lat, lng}]       rawBodyLength : null
+idSamples       : []       total messages: 1  (coords only, zero debug traffic)
+body text leaked: NO       query leaked  : NO
+```
+
+`rawBody`, `rawBodyLength` and `idSamples` are now attached only when `CITY_ASSIGN_DEBUG` is on.
+The verbose `CITY DIAG` / `CITY RAW` blocks, the capture summary, the drop/OK trace and the
+endpoint recon all stay behind the debug flags and do no work in a shipped build.
+
+**A bug this caught.** The `Response.prototype.json`/`.text` wrapper gates still demanded both
+debug flags after the emitter gates had been promoted — so the product path emitted **nothing**
+and filtering had no input. Found by running the shipped flag state directly; now locked in by
+`capture-suite` §11b.
+
+**2. The buttons are wired.** The "ACTIVE ORIGIN CITIES" caption is now an **"All" button**
+(`data-testid="ext-origin-cities-all"`) that clears the filter. City buttons are single-select:
+click to filter, click the active one again to return to All, click another to switch. Keyboard
+(Enter/Space) works on every control. Active state is a `data-active` attribute styled from
+`--ext-accent-bg` / `--ext-accent-text`.
+
+**Contrast measured, not assumed.** My first pairing (`--ext-accent` fill with
+`--ext-accent-text`) computed **1.47:1** light and **1.36:1** night — effectively invisible. The
+shipped pairing measures **5.80:1** and **5.43:1**, both past the 4.5:1 WCAG floor for text under
+18px. The saturated accent is used for the border instead.
+
+**Selection is panel state**, so it survives re-render; if the selected city disappears from the
+filters it reverts to All rather than pointing at a city that is no longer on the board.
+
+**3. Safety rules unchanged and re-asserted:** hide via `style.display` only, never remove or
+reorder; an **unassigned card is never hidden**; the Similar-matches list is never touched;
+re-applied after every cycle; full restore on teardown/logout with zero residual inline styles;
+`display:none` keeps the card in the DOM so `knownLoadIds` is unaffected and hiding can never
+make a card look "new". Refresh loop, highlighting, alert, auto-open, START/STOP, panelCloser and
+PAT untouched. The rename code stays present and disconnected.
+
+**Verification:** new `citybuttons-suite` (60) covering click/toggle/switch/All, active state,
+unassigned-always-visible, **filter surviving 3 refresh cycles**, similar untouched and flag-off.
+Full run **338 green, 0 red**. **Not exercised in a browser.**
+
+### 2026-08-13 — City filter MECHANISM (shipped OFF, not wired to any button)
+
+**Files:** `content/cityAssign.js`, `utils/constants.js` (one new flag). **The first cityAssign
+code that can change what the dispatcher sees** — and it is off by default, unreachable from any
+UI, and callable only from the console.
+
+**New flag `CITY_FILTER_ENABLED`, default `false`.** One declaration, no MAIN-world mirror: the
+filter is entirely isolated-world DOM work and `networkObserver.js` neither reads nor needs it.
+With it off, `applyCityFilter()` returns `{applied:false, reason:'flag-off'}` and **no style is
+ever written** — asserted.
+
+**`applyCityFilter(cityKey)`** — `null`/no argument shows all (the default and the reset path);
+a city key shows only that city's cards.
+
+**Five safety properties, each asserted:**
+1. **Hide, never remove.** Only `style.display` is written, with the previous inline value
+   recorded so restore is exact — `removeProperty('display')` when there was none, so **zero
+   residue**. No `remove()`, no detach, no reorder, no `innerHTML`, no attributes added to
+   Amazon's nodes.
+2. **An unassigned card is NEVER hidden.** Ghost cards and over-distance cards stay visible; a
+   board where nothing could be assigned hides nothing at all. A load he cannot see is a load he
+   cannot book.
+3. **The Similar-matches list is never touched** — not hidden, shown, or read, in any code path.
+4. **Every apply restores first**, so re-applying lands cleanly on Amazon's re-rendered nodes and
+   a card that has become unassigned reappears.
+5. **Every failure ends visible.** The `catch` restores and clears the filter; teardown restores
+   **first**, before anything else that could throw.
+
+**Cannot affect the alert pipeline.** `display:none` keeps the card in the DOM, so `loadParser`
+still parses it and it stays in `knownLoadIds` — hiding can never make a card look "new", and
+cannot touch the highlight, the sound, or auto-open.
+
+**Orphan sweep:** the reset path also clears any stray `display:none` on main-list cards left by
+a previous script instance (e.g. an extension reload without a page reload), and warns when it
+finds one. This is what makes one call a reliable way back to a normal board.
+
+**NOT wired to the city buttons** — asserted that `originCities.js` contains no reference to it.
+Console only:
+
+```js
+__EXT_DEBUG.filterCity('CHICAGO, IL')   // filter
+__EXT_DEBUG.filterCity()                // show all — also the panic button
+__EXT_DEBUG.cityAssignments()           // id -> city map, to pick a valid key
+```
+
+⚠ These are isolated-world globals: DevTools must have its console **context switched to the
+extension**, same as the existing `__EXT_DEBUG.detectNewLoads()`.
+
+**No element gains a `data-testid`** — the filter creates no UI and adds no attributes to
+Amazon's DOM, so `UI_ELEMENTS.md` needs no entry.
+
+**Verification:** new `cityfilter-suite` — **65 checks** covering some-match, no-match,
+all-unassigned, exact restore (including a pre-existing `display:flex` preserved), re-render
+re-apply, flag-off zero-writes, similar-list untouched in every case, teardown, and the orphan
+sweep. Full run **270 green, 0 red**. **Not exercised in a browser.**
+
 ### 2026-08-13 — loadParser main-list lookup hardened (no on-screen change)
 
 **File:** `content/loadParser.js`. One change: `parseLoads()` now calls a new local

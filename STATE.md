@@ -575,6 +575,25 @@ are off. The thread's next step is a *decision*, not an investigation: `cityAssi
 this entire line of work the dispatcher will see. It needs its own review, its own TEST_CASES
 entries, and `SAFETY.md` re-read before anything hides a load.
 
+**PER-CITY FILTERING IS A SHIPPED FEATURE, wired to the buttons — UNVERIFIED LIVE (2026-08-13).**
+`CITY_FILTER_ENABLED` is now a **product flag, ON by default in both worlds**, and the capture +
+assignment path runs at `DEBUG_LEVEL 1` with both debug flags off — which is what was missing when
+`filterCity()` reported "4 of 4 unassigned". The panel's caption is now an **"All"** button and the
+city pills are single-select filters. **The raw body does not ship**: with the shipped flag state
+only `{id, lat, lng}` crosses postMessage — verified by running the file in that exact state, not
+by inspection. A wrapper-gate bug (the `Response.prototype` hooks still demanded the debug flags,
+so the product path emitted nothing) was caught the same way and is now locked in by a test.
+**PLAN.md tasks 6 and 7 stay open until Ihor confirms live.**
+
+**City filter mechanism (earlier the same day) — superseded by the above.** `applyCityFilter()`
+in `cityAssign.js` can now hide non-matching cards — **the first code in this thread that changes
+what the dispatcher sees**. Behind a new `CITY_FILTER_ENABLED` flag, default `false`, **not wired
+to the city buttons**, reachable only from the console. Every design choice errs toward showing:
+unassigned cards are never hidden, cards are hidden not removed, restore is exact, and every
+failure path ends with a fully visible board. Cannot affect the alert — `display:none` keeps the
+card in the DOM, so `knownLoadIds` is unchanged. **PLAN.md task 6 stays open until Ihor confirms
+live.**
+
 **loadParser hardened, UNVERIFIED LIVE (2026-08-13).** `parseLoads()` now finds the main list via
 the summary-panel anchor instead of document order. **No on-screen change is expected** — the old
 code was already selecting the right list; this removes the unasserted order dependence that
@@ -817,8 +836,12 @@ intent was broader.
 
 - **✅ DONE 2026-08-13 — live verification of the per-cycle assignment** (PLAN.md tasks 1-3).
   Full intersection, zero unmatched, board unaffected. Flags returned to shipped state.
-- **1. Rebuild the harness suites** (PLAN.md task 4). Five red or crashing, two green. This is the
-  blocker on every subsequent code change — without it the next run's signal is unreadable.
+- **1. Ihor: live-test the filter with ALL DEBUG FLAGS OFF** (PLAN.md tasks 6 + 7 together —
+  they are one feature now). No console commands needed: reload, reopen the tab, run a multi-city
+  search, then **click a city pill in the panel**. Confirm only that city's loads remain, the
+  clicked pill is visibly active, clicking it again (or "All") restores everything, unassigned
+  loads stay visible, the Similar block is untouched, and a new load still highlights and sounds
+  while a filter is active. **Set `DEBUG_LEVEL` back to 1** — it is currently 3.
 - **3. Only once `MATCH: YES` is confirmed:** design the move from log-only to **actually
   filtering cards**. First dispatcher-visible change in this whole line of work — needs its own
   review, its own TEST_CASES entries, and `SAFETY.md` re-read before anything hides a load.

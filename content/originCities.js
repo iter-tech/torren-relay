@@ -61,6 +61,9 @@ var _originLastRender  = null;  // last rendered list, joined — used to skip i
 // cities without re-scraping the chips (2026-08-06). Written ONLY where _originLastRender is
 // written, so the two can never disagree about what is on screen. See getActiveOriginCities().
 var _originLastCities  = [];
+// Which city the dispatcher has selected, or null for All. Panel-local UI state; the actual
+// hiding lives in cityAssign.js. Survives a re-render so the selection is not lost on refresh.
+var _originActiveFilter = null;
 
 // Extracts the active origin cities from Amazon's filter chips.
 //
@@ -143,12 +146,34 @@ function injectOriginPanelStyle() {
       'font-family:Arial,sans-serif;font-size:12px;' +
       'padding:6px 10px;user-select:none;' +
     '}' +
-    '#ext-origin-cities [data-testid="ext-origin-cities-title"]{' +
-      // Inline at the left of the row, not a block heading above it. flex-shrink:0 keeps the
-      // caption whole when the cities wrap.
+    // THE "ALL" BUTTON (2026-08-13). Was a static caption; it is now the filter's reset control,
+    // so it is styled as a pill like the cities rather than as a heading.
+    '#ext-origin-cities [data-testid="ext-origin-cities-all"]{' +
       'flex-shrink:0;' +
-      'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;' +
-      'color:var(--ext-n500);' +
+      'font-size:14px;font-weight:600;color:var(--ext-n700);white-space:nowrap;' +
+      'background:var(--ext-n100);border:1px solid var(--ext-n200);' +
+      'border-radius:var(--ext-radius-sm);padding:8px 14px;' +
+      'cursor:pointer;line-height:1.25;' +
+    '}' +
+    // ACTIVE STATE, shared by "All" and the city pills. --ext-accent* tokens only, which already
+    // carry html.ext-night overrides in utils/designTokens.js — so night mode needs no change
+    // and nothing here is a hardcoded colour.
+    //
+    // ⚠ THE PAIRING MATTERS. --ext-accent-bg (a light tint) with --ext-accent-text is the
+    // intended combination: measured 5.80:1 in light and 5.43:1 in night, both past the 4.5:1
+    // WCAG floor for text under 18px. Filling with --ext-accent itself and keeping
+    // --ext-accent-text gives 1.47:1 / 1.36:1 — effectively invisible. The saturated accent is
+    // used for the BORDER instead, which is what makes the active pill obvious at a glance.
+    '#ext-origin-cities [data-testid="ext-origin-cities-all"][data-active="true"],' +
+    '#ext-origin-cities [data-testid="ext-origin-city"][data-active="true"]{' +
+      'background:var(--ext-accent-bg);border-color:var(--ext-accent);' +
+      'color:var(--ext-accent-text);font-weight:700;' +
+    '}' +
+    // The label is a child element with its own colour rule, so it must follow the active state
+    // too — otherwise the pill turns accent-coloured with unreadable dark text on it.
+    '#ext-origin-cities [data-testid="ext-origin-city"][data-active="true"] ' +
+      '[data-testid="ext-origin-city-label"]{' +
+      'color:var(--ext-accent-text);' +
     '}' +
     '#ext-origin-cities [data-testid="ext-origin-cities-list"]{' +
       'display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px;' +
@@ -217,6 +242,15 @@ function renderOriginCities(cities) {
   for (var i = 0; i < cities.length; i++) {
     list.appendChild(buildCityItem(cities[i]));
   }
+
+  // If the selected city has disappeared from the filters, fall back to All rather than leaving
+  // a selection pointing at a city that is no longer on the board.
+  if (_originActiveFilter !== null && cities.indexOf(_originActiveFilter) === -1) {
+    logger.log("originCities", "active city no longer in filters — reverting to All");
+    selectCityFilter(null);
+    return;
+  }
+  paintActiveCityButton();
 }
 
 // Builds one pill. Unnamed: the city text alone. Named: the driver name as the primary label
@@ -253,10 +287,62 @@ function buildCityItem(city) {
   labelEl.textContent = city;
   item.appendChild(labelEl);
 
-  // Deliberately NO click or keydown listener. The element keeps role="button"/tabindex="0" and
-  // its pointer cursor because it stays a button — it is simply awaiting the filtering action a
-  // later task will attach here.
+  // WIRED 2026-08-13. Single-select: clicking a city shows only that city; clicking the ACTIVE
+  // city again returns to All. The rename editor stays disconnected, as decided — this click is
+  // the filtering action the element was reserved for.
+  item.addEventListener('click', function () {
+    selectCityFilter(_originActiveFilter === city ? null : city);
+  });
+  item.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+      ev.preventDefault();
+      selectCityFilter(_originActiveFilter === city ? null : city);
+    }
+  });
   return item;
+}
+
+// Applies a filter selection and repaints the active state. null = All.
+//
+// The filtering itself lives in cityAssign.js; this file only decides WHAT is selected and how
+// it looks. applyCityFilter() is a no-op when CITY_FILTER_ENABLED is off, so a build with the
+// feature disabled still gets working buttons that simply do not filter.
+function selectCityFilter(city) {
+  logger.log('originCities', 'selectCityFilter called', { toAll: city === null });
+  try {
+    _originActiveFilter = city;
+    if (typeof applyCityFilter === 'function') applyCityFilter(city);
+    else logger.warn('originCities', 'applyCityFilter unavailable — selection recorded only');
+    paintActiveCityButton();
+  } catch (e) {
+    logger.error('originCities', 'selectCityFilter failed', { error: e, hasCity: city !== null });
+  }
+}
+
+// Marks exactly one control active. Uses a data attribute rather than an inline style so the
+// colours stay in the stylesheet and therefore in --ext-* tokens, which night mode already
+// overrides — nothing here hardcodes a colour.
+function paintActiveCityButton() {
+  logger.log('originCities', 'paintActiveCityButton called');
+  try {
+    var panel = document.getElementById(ORIGIN_PANEL_ID);
+    if (!panel) return;
+    var allBtn = panel.querySelector('[data-testid="ext-origin-cities-all"]');
+    if (allBtn) {
+      if (_originActiveFilter === null) allBtn.setAttribute('data-active', 'true');
+      else allBtn.removeAttribute('data-active');
+    }
+    var items = panel.querySelectorAll('[data-testid="ext-origin-city"]');
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].getAttribute('data-city') === _originActiveFilter) {
+        items[i].setAttribute('data-active', 'true');
+      } else {
+        items[i].removeAttribute('data-active');
+      }
+    }
+  } catch (e) {
+    logger.error('originCities', 'paintActiveCityButton failed', { error: e });
+  }
 }
 
 // Swaps one pill for a text input. Enter or blur commits, Escape cancels, empty clears.
@@ -595,9 +681,22 @@ function buildOriginCitiesPanel() {
     panel.setAttribute('role', 'complementary');
     panel.setAttribute('aria-label', 'Active origin cities');
 
+    // THE "ALL" BUTTON (2026-08-13). What used to be a static label is now the filter's reset
+    // control: it clears the city filter and shows every load from every selected city. It is
+    // the default state, so it starts active.
     var title = document.createElement('div');
-    title.setAttribute('data-testid', 'ext-origin-cities-title');
-    title.textContent = 'Active origin cities';
+    title.setAttribute('data-testid', 'ext-origin-cities-all');
+    title.setAttribute('role', 'button');
+    title.setAttribute('tabindex', '0');
+    title.setAttribute('title', 'Show loads from all selected cities');
+    title.textContent = 'All';
+    title.addEventListener('click', function () { selectCityFilter(null); });
+    title.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+        ev.preventDefault();
+        selectCityFilter(null);
+      }
+    });
 
     var list = document.createElement('div');
     list.setAttribute('data-testid', 'ext-origin-cities-list');
@@ -660,6 +759,9 @@ function removeOriginCitiesPanel() {
     // Nothing is on screen after teardown, so the accessor must report nothing rather than a
     // stale list from the previous session.
     _originLastCities = [];
+    // Selection resets to All. cityAssign's teardown separately restores every hidden card, so
+    // the two halves cannot disagree about the filter state after a logout.
+    _originActiveFilter = null;
     // Driver-name state. The panel and its input go with the panel element; this just makes a
     // later rebuild re-read from storage rather than trusting an in-memory copy from the
     // previous session. Stored names themselves are NEVER cleared here — they persist.

@@ -50,6 +50,24 @@
   // alone does nothing.
   var CITY_ASSIGN_DEBUG = false;
 
+  // ⚠ MIRROR of CITY_FILTER_ENABLED in utils/constants.js (2026-08-13). PRODUCT FLAG, ON by
+  // default — unlike the two debug switches above.
+  //
+  // This is what makes per-city filtering work in a SHIPPED build. The assignment needs the
+  // pickup coordinates, so the id + lat/lng emit must run at DEBUG_LEVEL 1 with both debug flags
+  // off. Turning this off returns the file to pure rate-limit observation.
+  //
+  // ⚠ IT DOES NOT ENABLE THE DEBUG PAYLOAD. The raw response body, the id samples, the capture
+  // summary, the drop/OK trace and the endpoint recon all remain behind CITY_ASSIGN_DEBUG and
+  // CAPTURE_RESPONSES. On this path the ONLY things that cross postMessage are the work-
+  // opportunity id and its PICKUP latitude/longitude — see emitCityAssignCoords().
+  var CITY_FILTER_ENABLED = true;
+
+  // True when a body must be read at all — for the shipped feature, or for the debug capture.
+  function bodyCaptureNeeded() {
+    return CITY_FILTER_ENABLED || CAPTURE_RESPONSES;
+  }
+
   // Capture scope is DELIBERATELY SEPARATE from WATCH_PATH and must stay that way.
   // WATCH_PATH drives the rate-limit reporting path (search only) — widening it would start
   // feeding /similar failures into background.js's backoff, which is a behaviour change and
@@ -169,7 +187,9 @@
   // True only when the flag is ON and the URL is one of the two capture endpoints.
   // Short-circuits on the flag first, so with capture OFF this is a single boolean read.
   function isCapturePath(url) {
-    if (!CAPTURE_RESPONSES) return false;
+    // 2026-08-13: was `if (!CAPTURE_RESPONSES)`. The shipped city filter needs the body read too,
+    // so the gate is now "either reason". With both off this is still a single boolean read.
+    if (!bodyCaptureNeeded()) return false;
     if (typeof url !== 'string') return false;
     for (var i = 0; i < CAPTURE_PATHS.length; i++) {
       if (url.indexOf(CAPTURE_PATHS[i]) !== -1) return true;
@@ -223,7 +243,9 @@
   // String entry point — used by the XHR path, which genuinely has a body string.
   // Parses, then hands off to the shared extractor below.
   function emitCityAssignCoords(url, bodyText, seq) {
-    if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return;
+    // 2026-08-13: was gated on the two DEBUG flags. The shipped filter needs this path, so it
+    // now runs whenever a body was captured for any reason.
+    if (!bodyCaptureNeeded()) return;
     try {
       emitFromParsed(url, JSON.parse(bodyText), seq, bodyText);
     } catch (e) {
@@ -244,7 +266,7 @@
   // note in cityAssign.js's CITY RAW 3, which already reports "UNKNOWN (no raw body retained)"
   // rather than mistaking absence for a negative result.
   function emitFromParsed(url, parsed, seq, bodyText) {
-    if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return;
+    if (!bodyCaptureNeeded()) return;
     try {
       var wo = parsed && parsed.workOpportunities;
       if (!Array.isArray(wo)) {
@@ -310,14 +332,22 @@
         // NULL on the Response.json() path — there is no raw string there and we will not
         // manufacture one. CITY RAW 3's containment check already degrades to
         // "UNKNOWN (no raw body retained)" rather than reporting a false negative.
-        rawBody:          bodyText ? (bodyText.length > 500000 ? bodyText.slice(0, 500000) : bodyText) : null,
-        rawBodyTruncated: bodyText ? bodyText.length > 500000 : false,
-        rawBodyLength:    bodyText ? bodyText.length : null,
+        // ⚠ THE RAW BODY NEVER SHIPS (2026-08-13). It is attached ONLY when CITY_ASSIGN_DEBUG
+        // is on, i.e. never in a shipped build. On the product path these three are null/false
+        // and nothing but ids and coordinates crosses postMessage. CITY RAW 3's containment
+        // check already degrades to "UNKNOWN (no raw body retained)" rather than reporting a
+        // false negative.
+        rawBody:          (CITY_ASSIGN_DEBUG && bodyText)
+                            ? (bodyText.length > 500000 ? bodyText.slice(0, 500000) : bodyText)
+                            : null,
+        rawBodyTruncated: (CITY_ASSIGN_DEBUG && bodyText) ? bodyText.length > 500000 : false,
+        rawBodyLength:    (CITY_ASSIGN_DEBUG && bodyText) ? bodyText.length : null,
 
         // First few ids WITH the exact JSON path they were read from, so the receiver states
         // the path as fact rather than inferring it. Taken before any coordinate filtering,
         // so index i here is genuinely workOpportunities[i].
-        idSamples: (function () {
+        // DEBUG ONLY — an empty array on the product path.
+        idSamples: !CITY_ASSIGN_DEBUG ? [] : (function () {
           var out = [];
           for (var s = 0; s < wo.length && s < 3; s++) {
             out.push({
@@ -485,7 +515,7 @@
           var p = origJson.apply(this, arguments);
           // Flag check FIRST — this is the zero-cost path for every non-capture fetch and for
           // the entire shipped build.
-          if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return p;
+          if (!bodyCaptureNeeded()) return p;
           observe(this, p, true);
           return p;   // the ORIGINAL promise, unchanged
         };
@@ -493,7 +523,7 @@
       if (typeof origText === 'function') {
         Response.prototype.text = function () {
           var p = origText.apply(this, arguments);
-          if (!CAPTURE_RESPONSES || !CITY_ASSIGN_DEBUG) return p;
+          if (!bodyCaptureNeeded()) return p;
           observe(this, p, false);
           return p;   // the ORIGINAL promise, unchanged
         };
