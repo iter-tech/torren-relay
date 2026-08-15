@@ -70,9 +70,33 @@
 
   // Capture scope is DELIBERATELY SEPARATE from WATCH_PATH and must stay that way.
   // WATCH_PATH drives the rate-limit reporting path (search only) — widening it would start
-  // feeding /similar failures into background.js's backoff, which is a behaviour change and
-  // is explicitly out of scope. These two lists are independent on purpose.
-  var CAPTURE_PATHS = ['/api/loadboard/search', '/api/loadboard/similar'];
+  // feeding /similar and /recommendations failures into background.js's backoff, which is a
+  // behaviour change and is explicitly out of scope. These two lists are independent on purpose.
+  //
+  // /recommendations/get ADDED 2026-08-13. It was already being SEEN by this observer and
+  // discarded, because it was not on this list — and it is the source of the "Recently added"
+  // cards. That made the newest loads, the entire point of the extension, the ones reported as
+  // "id never seen in any captured response" and therefore left unassigned and unfilterable.
+  //
+  // Its body has the same shape as /search — confirmed against a real capture: searchAuditId,
+  // workOpportunities[].id, and workOpportunities[].loads[0].stops[0].location.latitude /
+  // .longitude, with stops[0].stopType === 'PICKUP', so the existing stops[0] rule holds and the
+  // extractor needs no special case.
+  var CAPTURE_PATHS = [
+    '/api/loadboard/search',
+    '/api/loadboard/similar',
+    '/api/loadboard/recommendations/get'
+  ];
+
+  // The label carried on every emitted message and printed in CITY ENDPOINT SHAPE, so the three
+  // sources stay distinguishable in the console. Order matters only in that 'search' is the
+  // fallback — it is the path every other branch is measured against.
+  function endpointLabel(url) {
+    if (typeof url !== 'string') return 'search';
+    if (url.indexOf('/api/loadboard/recommendations') !== -1) return 'recommendations';
+    if (url.indexOf('/api/loadboard/similar') !== -1) return 'similar';
+    return 'search';
+  }
 
   // ── DROP TRACING (2026-08-13) ─────────────────────────────────────────────────────────────
   //
@@ -211,7 +235,7 @@
       var wo = parsed && parsed.workOpportunities;
       window.postMessage({
         __extRelayCaptureSummary: true,
-        endpoint:   url.indexOf('/api/loadboard/similar') !== -1 ? 'similar' : 'search',
+        endpoint:   endpointLabel(url),
         woCount:    Array.isArray(wo) ? wo.length : null,
         totalSize:  parsed ? parsed.totalResultsSize : null,
         nextToken:  parsed ? parsed.nextItemToken : null,
@@ -299,7 +323,7 @@
       }
       window.postMessage({
         __extRelayCityCoords: true,
-        endpoint:   url.indexOf('/api/loadboard/similar') !== -1 ? 'similar' : 'search',
+        endpoint:   endpointLabel(url),
         woCount:    wo.length,
         pairs:      pairs,
         noCoordIds: noCoordIds,

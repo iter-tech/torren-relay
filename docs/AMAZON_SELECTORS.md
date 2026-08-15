@@ -181,9 +181,78 @@ container: it is indifferent to how many wrapper divs Amazon puts in between.
 **If the panel is not found, read nothing.** Falling back to the whole document silently
 re-includes the similar cards, which is the bug itself.
 
-**Cross-check available:** the main list's card count should equal N in the visible
-"Showing 1 - N of N results" line. Reference implementation:
-`findMainResultsList()` / `readShowingTotal()` in `content/cityAssign.js`.
+### Stop location — the card's own origin city ✅ (recorded 2026-08-13)
+
+**Source: `samples/paired-card.html`**, the captured live card. Not inferred.
+
+```
+span[tabindex="0"] span.wo-card-header__components     ← primary
+span[tabindex="0"]                                     ← fallback
+```
+
+Take the **first in document order** — that is stop 1, the origin. Structure as captured:
+
+```html
+<span tabindex="0"><p><span class="wo-card-header__components">XMD2 JOLIET, IL 60436-8548</span></p></span>
+...
+<span tabindex="0"><p><span class="wo-card-header__components">CMH3 MONROE, OH 45050-1848</span></p></span>
+```
+
+**⚠ `.wo-card-header__components` ALONE IS NOT A LOCATION SELECTOR.** It appears **7 times** in
+that one card and also wraps:
+
+| text | what it is |
+|---|---|
+| `XMD2 JOLIET, IL 60436-8548` | stop 1 location ✅ |
+| `CMH3 MONROE, OH 45050-1848` | stop 2 location ✅ |
+| `Tue Aug 4 01:30 CDT` | stop time ❌ |
+| `314.0 mi` | trip distance ❌ |
+| `7h 6m` | duration ❌ |
+| `$2.35/mi` | rate ❌ |
+
+`span[tabindex="0"]` is the discriminator: the two locations are focusable, none of the other
+values are. There are **exactly two** in the captured card.
+
+**Text format:** `<FACILITY CODE> <CITY>, <ST> <ZIP>`. The code is optional and, where present in
+the capture, always contains a digit (`XMD2`, `CMH3`, `TUL2`). Parse to `CITY, ST` and geocode;
+a code with no digit would be absorbed into the city name and fail to geocode, which leaves the
+card unassigned and visible — the safe direction. Reference implementation: `readCardOrigin()` /
+`parseStopCityState()` in `content/cityAssign.js`.
+
+**This replaced the network capture as the source of a card's city.** The response-based chain
+broke on pagination, aborted requests and saved-search tabs; the card always has this text.
+
+### ⚠ The "Showing" line carries TWO numbers, not one (recorded 2026-08-13)
+
+`Showing 1 - 50 of 230 results` is **a rendered range AND a grand total**:
+
+| part | meaning | example |
+|---|---|---|
+| `1 - 50` | how many cards are **on screen right now** | 50 rendered |
+| `of 230` | how many exist **across all pages** | 230 total |
+
+They are equal **only on a single-page board**, which is what made this expensive: every live test
+(9 of 9, 30 of 30) passed while every real paginated board failed. Real values measured from the
+captures in `samples/`:
+
+| capture | records in response | `nextItemToken` | `totalResultsSize` |
+|---|---|---|---|
+| `paired-search.json` | 50 | 50 | **338** |
+| `search-5cities-active.json` | 50 | 50 | **104** |
+| `search-5cities-other.json` | 5 | 5 | **11** |
+
+**One response carries one page.** Note the third row — this is not a "big board" problem: a board
+of 11 results paginated at 5 shows the same split.
+
+**Cross-check available, and its correct form:** the main list's card count must be **≤ the
+RENDERED count**, never compared against the grand total. More than rendered means cards from
+outside the main list leaked in. Fewer is normal. A range that cannot be parsed must not disable
+anything — warn and proceed. Reference implementation: `findMainResultsList()` /
+`readShowingCounts()` in `content/cityAssign.js`.
+
+Parse notes: the range dash may be any of U+002D or U+2010–U+2015, spaces around it are optional
+(`1-50` occurs), thousands separators appear (`1,250`), and the noun is singular at one result
+(`1 result`). Anchor on the word *Showing* and the digits, never on the surrounding markup.
 
 > **`content/loadParser.js:124` still makes the old assumption** (`document.querySelector('div.load-list')`).
 > It feeds highlighting and alerts and has not been audited against this finding.

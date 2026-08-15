@@ -202,6 +202,51 @@ No remaining blocked types at this time. For any new type seen on the board:
 
 ---
 
+## 5.9 `/api/loadboard/recommendations/get` — the "Recently added" source ✅ confirmed 2026-08-13
+
+**The endpoint we were missing.** Found in the Network tab and confirmed against its response body.
+
+| | |
+|---|---|
+| **URL** | `https://relay.amazon.com/api/loadboard/recommendations/get` |
+| **Method / type** | fetch |
+| **Status / size** | 200, ~19 kB |
+| **What renders from it** | the **"Recently added"** cards |
+
+**Confirmed field paths — identical to `/search`:**
+
+```
+searchAuditId
+workOpportunities[].id
+workOpportunities[].loads[0].stops[0].location.latitude
+workOpportunities[].loads[0].stops[0].location.longitude
+workOpportunities[].loads[0].stops[0].stopType === "PICKUP"
+```
+
+Because `stops[0]` is the PICKUP here exactly as it is on `/search`, **the existing extractor
+needs no special case** — the same `loads[0].stops[0].location` rule applies unchanged.
+
+### ⚠ Why this mattered more than it looks
+
+The observer was already **seeing** this request and discarding it, because `CAPTURE_PATHS` listed
+only `/search` and `/similar`. The consequence was precise and bad: the **newest loads** — the ones
+this extension exists to catch — were the ones whose ids reached assignment as strangers, logged as
+`id never seen in any captured response`, left unassigned and therefore unfilterable and visible
+under every city tab.
+
+Added to `CAPTURE_PATHS` on 2026-08-13. **NOT added to `WATCH_PATH`**: rate-limit reporting stays
+search-only, or recommendations failures would start driving `background.js`'s backoff.
+
+**Labelled `recommendations`** in `CITY ENDPOINT SHAPE` and `CITY MERGE`, so the three sources stay
+distinguishable in the console. Assignment itself is endpoint-blind — the ids and coordinates merge
+into the same `id -> {lat,lng}` map as everything else.
+
+**Still unknown, do not assume:** whether this endpoint paginates, whether it fires on every
+refresh or only on some, and whether its `searchAuditId` relates to the `/search` one. Nothing in
+the code depends on any of those.
+
+---
+
 ## 6. loadboard/search — MULTI-ORIGIN SEARCH findings (2026-08-05)
 
 Recorded for the planned **Single-Tab Multi-Driver Monitor** (BACKLOG.md). Amazon's Origin filter

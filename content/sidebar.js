@@ -196,6 +196,9 @@ function buildSidebar() {
   container.id = 'ext-sidebar';
   container.setAttribute('data-testid', 'ext-sidebar');
   container.setAttribute('data-running', 'false');
+  // DRAGGABLE (2026-08-14). The bar itself is the handle — see makeSidebarDraggable() below.
+  container.setAttribute('data-testid-drag', 'ext-sidebar-drag-handle');
+  container.setAttribute('title', 'Drag to move — double-click to snap back to the top');
 
   // Title
   const title = document.createElement('span');
@@ -660,5 +663,135 @@ function buildSidebar() {
   // 2026-07-31: the five ext-rate-limit-info tooltip listeners (mouseenter/mouseleave/
   // focus/blur/click) were removed with the element they were bound to. See BACKLOG.md.
 
+  makeSidebarDraggable(container);
+
   logger.log('sidebar', 'sidebar injected');
+}
+
+// ── DRAGGABLE BAR (2026-08-14) ──────────────────────────────────────────────────────────────
+//
+// The bar is its own handle: press anywhere on it that is not a control and drag. Position
+// persists across reloads; DOUBLE-CLICK snaps it back to the docked top position, so a
+// dispatcher who drags it somewhere awkward is never stuck with it there.
+//
+// WHY A DRAG MUST NOT CLICK. The bar's controls are click-driven (play/pause, the city buttons
+// in row 2). Without a movement threshold, the pointerup that ends a drag lands on whatever is
+// under the cursor and fires it — dragging the bar by its "All" button would clear the filter.
+// DRAG_SLOP_PX is the threshold: below it the gesture is a click and we never move anything;
+// above it we suppress the click that follows, once.
+var SIDEBAR_DRAG_SLOP_PX = 4;
+var SIDEBAR_POS_KEY = 'extSidebarPos';
+
+function makeSidebarDraggable(container) {
+  logger.log('sidebar', 'makeSidebarDraggable called');
+  try {
+    var dragging = false, moved = false;
+    var startX = 0, startY = 0, originLeft = 0, originTop = 0;
+
+    // Applies a position, CLAMPED so the bar can never be dragged fully off-screen. At least
+    // this much of it stays reachable on every edge.
+    var EDGE_KEEP_PX = 40;
+    function place(left, top) {
+      var w = container.offsetWidth || 200;
+      var h = container.offsetHeight || 40;
+      var maxLeft = Math.max(0, window.innerWidth  - EDGE_KEEP_PX);
+      var maxTop  = Math.max(0, window.innerHeight - EDGE_KEEP_PX);
+      var l = Math.min(Math.max(left, EDGE_KEEP_PX - w), maxLeft);
+      var t = Math.min(Math.max(top, 0), maxTop);   // never above the viewport top
+      // Dragging switches the bar off its centred default; transform must go or it fights the
+      // explicit left.
+      container.style.left = l + 'px';
+      container.style.top = t + 'px';
+      container.style.transform = 'none';
+      container.setAttribute('data-dragged', 'true');
+      return { left: l, top: t };
+    }
+
+    // Back to the docked position: whatever the stylesheet says, with our overrides removed.
+    function dock() {
+      container.style.removeProperty('left');
+      container.style.removeProperty('top');
+      container.style.removeProperty('transform');
+      container.removeAttribute('data-dragged');
+      try { storage.set(SIDEBAR_POS_KEY, null); } catch (e) {
+        logger.error('sidebar', 'clearing the stored bar position failed', { error: e });
+      }
+      logger.log('sidebar', 'bar re-docked to the top');
+    }
+    container._extDockSidebar = dock;
+
+    container.addEventListener('pointerdown', function (ev) {
+      // Left button only, and never when the press starts on something interactive — otherwise
+      // a slider drag or a button press would move the bar instead.
+      if (ev.button !== 0) return;
+      var t = ev.target;
+      if (t && t.closest && t.closest('input,button,select,textarea,[role="button"],[role="slider"]')) return;
+
+      dragging = true;
+      moved = false;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      var r = container.getBoundingClientRect();
+      originLeft = r.left;
+      originTop = r.top;
+    });
+
+    // On window, not on the container: the pointer routinely leaves the bar mid-drag, and a
+    // listener on the element alone would drop the gesture the moment it did.
+    var onMove = function (ev) {
+      if (!dragging) return;
+      var dx = ev.clientX - startX;
+      var dy = ev.clientY - startY;
+      if (!moved && Math.abs(dx) < SIDEBAR_DRAG_SLOP_PX && Math.abs(dy) < SIDEBAR_DRAG_SLOP_PX) return;
+      moved = true;
+      place(originLeft + dx, originTop + dy);
+    };
+
+    var onUp = function () {
+      if (!dragging) return;
+      dragging = false;
+      if (!moved) return;                 // a plain click: let it through untouched
+      var r = container.getBoundingClientRect();
+      try { storage.set(SIDEBAR_POS_KEY, { left: r.left, top: r.top }); } catch (e) {
+        logger.error('sidebar', 'storing the bar position failed', { error: e });
+      }
+      // Swallow exactly ONE click — the one this pointerup is about to produce — so ending a
+      // drag over a button does not press it.
+      var swallow = function (ce) {
+        ce.stopPropagation();
+        ce.preventDefault();
+        window.removeEventListener('click', swallow, true);
+      };
+      window.addEventListener('click', swallow, true);
+      // If no click follows (drag ended off any element), do not leave the trap armed.
+      setTimeout(function () { window.removeEventListener('click', swallow, true); }, 0);
+      logger.log('sidebar', 'bar moved', { left: Math.round(r.left), top: Math.round(r.top) });
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    container._extDragMove = onMove;
+    container._extDragUp = onUp;
+
+    container.addEventListener('dblclick', function (ev) {
+      var t = ev.target;
+      if (t && t.closest && t.closest('input,button,select,textarea,[role="button"],[role="slider"]')) return;
+      dock();
+    });
+
+    // Restore the stored position. Clamped on the way in as well as on the way out: the window
+    // may be smaller than it was when the position was saved, and a bar restored off-screen
+    // would be unreachable with no way to double-click it back.
+    try {
+      storage.get(SIDEBAR_POS_KEY, null).then(function (pos) {
+        if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') return;
+        place(pos.left, pos.top);
+        logger.log('sidebar', 'bar position restored', { left: Math.round(pos.left), top: Math.round(pos.top) });
+      });
+    } catch (e) {
+      logger.error('sidebar', 'restoring the bar position failed — leaving it docked', { error: e });
+    }
+  } catch (e) {
+    logger.error('sidebar', 'makeSidebarDraggable failed — the bar stays docked', { error: e });
+  }
 }

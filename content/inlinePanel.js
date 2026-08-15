@@ -1097,6 +1097,96 @@ function findLiveOutermostCard(loadId) {
   return outer;
 }
 
+// ── PANEL ANCHORING (2026-08-13) ──────────────────────────────────────────────────────────
+//
+// THE BUG THIS FIXES: the panel was inserted as a sibling of a REMEMBERED element reference
+// (`cardElement.parentNode.insertBefore(...)`) and nothing bound it to the load it described.
+// When Amazon swapped the saved-search tab — a client-side re-render, not a page load — React
+// reconciled its own children and left our unknown node sitting where it was, while the cards
+// around it were replaced. The same MDT4 -> LEWISTOWN -> TREMONT panel then appeared under an
+// unrelated load in all five tabs, and with no card above it at all where the list was shorter.
+//
+// The panel now carries the load id it was opened for, and the rule is absolute: if that id is
+// not present AND VISIBLE in the main results list, the panel does not exist.
+
+// The card container for a load id, but ONLY inside the MAIN results list and ONLY if visible.
+// Returns null for: no such id, a card in the Similar-matches list, or a card the city filter
+// has hidden. A hidden card counts as absent — a panel floating over a hidden row is exactly the
+// orphan this prevents.
+function visibleAnchorFor(loadId) {
+  try {
+    if (!loadId) return null;
+    var card = findLiveOutermostCard(loadId);
+    if (!card) return null;
+
+    // Main list only. Both helpers anchor on the summary panel; either one will do, and if
+    // neither has loaded we fall through rather than block the panel.
+    var mainList = null;
+    if (typeof findMainResultsList === 'function') mainList = findMainResultsList();
+    else if (typeof findMainLoadList === 'function') mainList = findMainLoadList();
+    if (mainList && !mainList.contains(card)) return null;
+
+    // Hidden by the city filter (or by anything else) -> treat as absent.
+    if (card.style && card.style.display === 'none') return null;
+    return card;
+  } catch (e) {
+    logger.error('inlinePanel', 'visibleAnchorFor failed', { error: e, loadId: loadId });
+    return null;
+  }
+}
+
+// Removes the panel unless its load is still on screen; re-seats it if it has drifted.
+//
+// Called from every place the board can change under it: the render observer (tab switch, a new
+// /search render), the city filter, the assignment cycle, and START/STOP. Cheap and idempotent —
+// a getElementById plus, at most, one containment check.
+//
+// RE-SEATS rather than always removing, deliberately: if the load IS still there, destroying the
+// panel would reintroduce the "accordion vanishes" bug fixed under PLAN 7b. It is removed only
+// when the load it belongs to is genuinely gone or hidden.
+function enforcePanelAnchor(reason) {
+  try {
+    var panel = document.getElementById(PANEL_ID);
+    if (!panel) return false;
+
+    var loadId = panel.getAttribute('data-load-id');
+    if (!loadId) {
+      // A panel with no id cannot be verified, so it cannot be trusted to belong here.
+      logger.warn('inlinePanel', 'panel has no data-load-id — removing', { reason: reason });
+      removeInlinePanel();
+      return true;
+    }
+
+    var anchor = visibleAnchorFor(loadId);
+    if (!anchor) {
+      logger.log('inlinePanel', 'panel removed — its load is not visible in the main list', {
+        reason: reason, loadId: loadId
+      });
+      removeInlinePanel();
+      return true;
+    }
+
+    // Still here, but Amazon may have moved the cards around it. Put it back directly under its
+    // own card so it can never read as belonging to a neighbour.
+    if (anchor.nextSibling !== panel) {
+      anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+      currentPanelCard = anchor;
+      logger.log('inlinePanel', 're-seated the panel under its own card', {
+        reason: reason, loadId: loadId
+      });
+    }
+    return false;
+  } catch (e) {
+    logger.error('inlinePanel', 'enforcePanelAnchor failed — removing the panel to be safe', {
+      error: e, reason: reason
+    });
+    try { removeInlinePanel(); } catch (e2) {
+      logger.error('inlinePanel', 'removal after enforcePanelAnchor failure ALSO failed', { error: e2 });
+    }
+    return true;
+  }
+}
+
 function showInlinePanel(cardElement) {
   logger.log('inlinePanel', 'showInlinePanel called');
 
@@ -1119,8 +1209,30 @@ function showInlinePanel(cardElement) {
     loadStore.mergeLoadUnit(sheetLoadId, { detail: data });
   }
 
+  // NO ID, NO PANEL (2026-08-13). An unidentified panel is exactly what leaked across the
+  // saved-search tabs: nothing could later decide whether it still belonged. Refusing to render
+  // costs one panel; rendering one that cannot be verified costs a panel under the wrong load.
+  if (!sheetLoadId) {
+    logger.warn('inlinePanel', 'no load id on the card — refusing to render an unbindable panel');
+    return false;
+  }
+
+  // NEVER INSERT WITHOUT A VISIBLE ANCHOR. Covers the detached-node case (the card element was
+  // captured before a re-render) and the hidden-card case (the city filter hid it between the
+  // click and the render). Re-resolve from the id rather than trusting the reference we were
+  // handed — that reference is precisely what went stale.
+  var anchor = visibleAnchorFor(sheetLoadId);
+  if (!anchor) {
+    logger.log('inlinePanel', 'anchor card is missing or hidden — not rendering a floating panel', {
+      loadId: sheetLoadId
+    });
+    return false;
+  }
+
   var panel = buildPanelElement(data);
   panel.id  = PANEL_ID;
+  // The binding the whole fix rests on.
+  panel.setAttribute('data-load-id', sheetLoadId);
 
   // Wire ext-action-camera: click → screenshot this card → copy PNG to clipboard.
   // Handler attached here because cardElement is only available in showInlinePanel().
@@ -1220,11 +1332,15 @@ function showInlinePanel(cardElement) {
     chrome.storage.onChanged.addListener(_fastBookStorageListener);
   }
 
-  cardElement.parentNode.insertBefore(panel, cardElement.nextSibling);
+  // Insert against the RE-RESOLVED anchor, not the reference we were handed. On the auto-open
+  // path there is an 800 ms settle between the click and this call, and Amazon can re-render
+  // inside it — `cardElement` may already be detached, which is how a panel ended up with no
+  // card above it.
+  anchor.parentNode.insertBefore(panel, anchor.nextSibling);
 
   // Update currentPanelCard here so both auto-open and manual paths stay in sync.
   // Ownership is here (set) and in removeInlinePanel (clear); initManualToggle no longer touches it.
-  currentPanelCard = cardElement;
+  currentPanelCard = anchor;
 
   logger.log('inlinePanel', 'panel rendered', { segments: data.segments.length });
   return true;

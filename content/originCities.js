@@ -22,19 +22,13 @@ var ORIGIN_CITY_PREFIX = 'Origin city: ';
 var ORIGIN_DEBOUNCE_MS = 200;
 
 // Anchor = Amazon's results-count line ("Showing N results"), matched by TEXT.
-var ORIGIN_ANCHOR_RE = /^Showing\b.*\bresults?$/;
 // Gap to the right of the results-count text when the panel sits beside it.
-var ORIGIN_ANCHOR_GAP_PX = 16;
 // Gap below the row when there is not enough width to sit beside it.
-var ORIGIN_BELOW_GAP_PX = 6;
 // Below this much free width to the right, the panel drops under the row instead.
-var ORIGIN_MIN_RIGHT_SPACE_PX = 200;
 // Sub-pixel jitter threshold. Writing style on every frame regardless would dirty layout
 // 60x/sec for nothing; 0.5px is below what any display can show.
-var ORIGIN_MOVE_EPSILON_PX = 0.5;
-// Used only when the results-count text cannot be found — see positionOriginPanel().
-var ORIGIN_FALLBACK_TOP_PX  = 8;
-var ORIGIN_FALLBACK_LEFT_PX = 8;
+// DEAD since 2026-08-14 (the panel no longer positions itself). Left in place only because
+// removing a constant is a separate, deliberate cleanup — nothing reads it.
 
 // Driver-name renaming (2026-08-05). Cap is enforced twice: `maxLength` on the input stops
 // typing, and a slice on commit stops a paste getting past it.
@@ -46,16 +40,9 @@ var _originEditingCity = null;  // city currently being renamed, or null
 
 var _originObserver    = null;
 var _originDebounce    = null;
-var _originAnchorEl    = null;  // CACHED results-count element — see getAnchorElement()
-var _originRafId       = null;  // requestAnimationFrame handle for the follow loop
-var _originLastTop     = null;  // last written top/left/mode, for the >0.5px change test
-var _originLastLeft    = null;
-var _originLastMode    = null;
 // True once the anchor has been successfully measured at least once. Distinguishes "the row has
 // not appeared yet" (first paint — corner fallback is correct) from "the row went away for a
 // moment" (Amazon re-rendering the list — hold position). See the not-found branch below.
-var _originHasMeasured = false;
-var _originHoldLogged  = false; // so the hold is logged once, not once per frame
 var _originLastRender  = null;  // last rendered list, joined — used to skip idempotent renders
 // Same list as _originLastRender but unjoined, kept so other modules can read the active
 // cities without re-scraping the chips (2026-08-06). Written ONLY where _originLastRender is
@@ -120,6 +107,29 @@ function getActiveOriginCities() {
   return _originLastCities.slice();
 }
 
+// True only on the LOAD BOARD (2026-08-14). The row used to render on every Relay page, Trips
+// included, pinned top-left where it looked like a stray widget.
+//
+// Anchored on the board's own DOM rather than on a URL path. The path for the board is not
+// recorded anywhere on disk and guessing it risks hiding the row on the one page it belongs to;
+// these three nodes are all confirmed from the captures (AMAZON_SELECTORS.md) and none of them
+// exists on Trips:
+//   - the results summary panel      #search-results-summary-panel
+//   - the results list               div.load-list
+//   - Amazon's origin filter chips   "Origin city: ..." — board-only copy
+function isLoadBoardPage() {
+  try {
+    if (document.getElementById('search-results-summary-panel')) return true;
+    if (document.querySelector('div.load-list')) return true;
+    // The chips are the last resort: they are what this panel exists to mirror, so if they are
+    // on screen the board is too, even mid-render before the list paints.
+    return readActiveOriginCities().length > 0;
+  } catch (e) {
+    logger.error('originCities', 'isLoadBoardPage failed — assuming NOT the board', { error: e });
+    return false;   // on doubt, do not render. An absent row is better than one on Trips.
+  }
+}
+
 // Injects the panel's stylesheet once. Colours come entirely from the --ext-* design tokens,
 // which already carry html.ext-night overrides (utils/designTokens.js) — so this panel themes
 // itself in night mode with NO change to content/nightMode.js.
@@ -129,23 +139,25 @@ function injectOriginPanelStyle() {
   style.id = 'ext-origin-cities-style';
   style.setAttribute('data-testid', 'ext-origin-cities-style');
   style.textContent =
+    // MERGED INTO THE TOP BAR (2026-08-14). This was a separately positioned floating panel:
+    // position:fixed, its own z-index, and a requestAnimationFrame loop measuring Amazon's
+    // "Showing N results" row on every frame to sit under it. That overlapped Amazon's own
+    // filter controls and appeared on every Relay page, Trips included.
+    //
+    // It is now the SECOND ROW of #ext-sidebar. No position, no z-index, no follow loop — the
+    // bar owns all of that, and the row simply flows beneath row 1.
     '#ext-origin-cities{' +
-      // top/left are NOT set here — positionOriginPanel() measures and writes them on every
-      // render, resize and scroll. A hardcoded offset would drift the moment Amazon's chips
-      // wrap to a second row or the dispatcher scrolls.
-      'position:fixed;' +
-      // One below the sidebar's 2147483647, so if they ever meet the sidebar wins.
-      'z-index:2147483646;' +
-      // Horizontal band: caption + cities on one line, wrapping only when they do not fit.
+      // Horizontal band: All + cities on one line, wrapping only when they do not fit.
       'display:flex;flex-wrap:wrap;align-items:center;gap:8px;' +
-      // Bounded so a long filter set cannot run off the right edge; wrapping absorbs the rest.
-      'max-width:calc(100vw - 16px);' +
-      'background:var(--ext-bar-bg);color:var(--ext-n900);' +
-      'border:1px solid var(--ext-n200);border-radius:var(--ext-radius-card);' +
-      'box-shadow:var(--ext-shadow-2);' +
+      'width:100%;box-sizing:border-box;' +
+      // The bar's own background shows through; only a divider separates the two rows.
+      'background:transparent;color:var(--ext-n900);' +
+      'border-top:1px solid var(--ext-n200);' +
       'font-family:Arial,sans-serif;font-size:12px;' +
       'padding:6px 10px;user-select:none;' +
     '}' +
+    // Hidden entirely until there are cities to show, so the bar does not grow an empty strip.
+    '#ext-origin-cities[data-empty="true"]{display:none;}' +
     // THE "ALL" BUTTON (2026-08-13). Was a static caption; it is now the filter's reset control,
     // so it is styled as a pill like the cities rather than as a heading.
     '#ext-origin-cities [data-testid="ext-origin-cities-all"]{' +
@@ -169,6 +181,65 @@ function injectOriginPanelStyle() {
       'background:var(--ext-accent-bg);border-color:var(--ext-accent);' +
       'color:var(--ext-accent-text);font-weight:700;' +
     '}' +
+    // NEW-LOAD BADGE. --ext-accent on --ext-surface: a count the eye catches without competing
+    // with the active pill. Tokens only, so night mode is already handled.
+    '#ext-origin-cities [data-testid="ext-origin-city-new"]{' +
+      'display:inline-block;margin-left:6px;min-width:16px;padding:0 5px;' +
+      'font-size:11px;font-weight:700;line-height:16px;text-align:center;' +
+      'background:var(--ext-accent);color:var(--ext-surface);' +
+      'border-radius:var(--ext-radius-pill);' +
+    '}' +
+    // A city with unseen loads gets an accent outline even when it is not the active tab.
+    // REMOVED 2026-08-14: this gave every city with pending loads an accent border, so several
+    // buttons looked alike and the OPEN tab was no longer obvious. Border and background now
+    // belong to the active button and nothing else; pending loads are the badge's job alone.
+    //
+    // RESERVED BADGE SLOT (2026-08-14). The badge used to be appended and removed, which grew
+    // the button and shifted the whole row every time a load arrived. Every city button now
+    // carries the slot permanently and it is merely TRANSPARENT when empty, so the button's
+    // width and height never change. min-width covers a two-digit count without reflow.
+    '#ext-origin-cities [data-testid="ext-origin-city-new"][data-empty="true"],' +
+    '#ext-origin-cities [data-testid="ext-origin-unassigned"][data-empty="true"]{' +
+      'background:transparent;color:transparent;' +
+    '}' +
+    // UNASSIGNED COUNTER on the All button (2026-08-13). Loads whose id never arrived in any
+    // captured response cannot be attributed to a city, so they stay visible under every filter.
+    // Showing the number is the point: on 2026-08-13 EVERY card was unassigned and two city tabs
+    // showed an identical list, which looked exactly like a working filter over similar boards.
+    // A number the dispatcher can see makes that failure self-announcing.
+    //
+    // --ext-n700 on --ext-surface, measured 9.93:1 light / 7.22:1 night. Deliberately NOT the
+    // accent: this is not news, it is a caveat about how much of the board the filter can speak
+    // for, and it must not compete with the new-load badge sitting inches away. There is no
+    // warning/danger token in designTokens.js — the dark neutral is the honest choice from the
+    // palette that exists, rather than inventing a colour.
+    '#ext-origin-cities [data-testid="ext-origin-unassigned"]{' +
+      'display:inline-block;margin-left:6px;min-width:16px;padding:0 5px;' +
+      'font-size:11px;font-weight:700;line-height:16px;text-align:center;' +
+      'background:var(--ext-n700);color:var(--ext-surface);' +
+      'border-radius:var(--ext-radius-pill);cursor:pointer;' +
+    '}' +
+    // THE UNMATCHED-ONLY VIEW IS ACTIVE. The All button takes the SAME active treatment a city
+    // pill does — same two tokens, measured 5.80:1 / 5.43:1 — so "I am filtered" reads
+    // identically wherever the filter came from. The badge inverts to surface-on-n700 so it
+    // stays legible on the now-accent-coloured button.
+    '#ext-origin-cities [data-testid="ext-origin-cities-all"][data-unmatchedview="true"]{' +
+      'background:var(--ext-accent-bg);color:var(--ext-accent-text);' +
+      'border-color:var(--ext-accent);font-weight:700;' +
+    '}' +
+    '#ext-origin-cities [data-testid="ext-origin-cities-all"][data-unmatchedview="true"] ' +
+      '[data-testid="ext-origin-unassigned"]{' +
+      'background:var(--ext-accent-text);color:var(--ext-surface);' +
+    '}' +
+    '#ext-origin-cities [data-testid="ext-origin-cities-all"]{' +
+      'flex-direction:row;align-items:center;' +
+    '}' +
+    // The data-hasunassigned border rule was REMOVED 2026-08-14, for the same reason as the
+    // city border above: the count speaks for itself, and only the ACTIVE button is allowed to
+    // carry a border or a background.
+
+    // The city pill is a column flex container; the badge must sit beside the label, not under.
+    '#ext-origin-cities [data-testid="ext-origin-city"]{flex-direction:row;align-items:center;}' +
     // The label is a child element with its own colour rule, so it must follow the active state
     // too — otherwise the pill turns accent-coloured with unreadable dark text on it.
     '#ext-origin-cities [data-testid="ext-origin-city"][data-active="true"] ' +
@@ -232,7 +303,16 @@ function renderOriginCities(cities) {
 
   while (list.firstChild) list.removeChild(list.firstChild);
 
+  // THE ROW IS HIDDEN ENTIRELY WHEN THERE IS NOTHING TO SHOW (2026-08-14). data-empty drives a
+  // display:none rule, so the bar does not carry a blank strip on a page with no origin filter —
+  // or on a page that is not the load board at all.
+  var showRow = cities.length > 0 && isLoadBoardPage();
+  if (showRow) panel.removeAttribute('data-empty');
+  else panel.setAttribute('data-empty', 'true');
+
   if (cities.length === 0) {
+    // Kept for the case where the dispatcher is ON the board with no origin filter applied: the
+    // row is hidden, but the message is there the moment data-empty is cleared.
     var empty = document.createElement('div');
     empty.setAttribute('data-testid', 'ext-origin-cities-empty');
     empty.textContent = 'No origin cities in filters';
@@ -302,6 +382,69 @@ function buildCityItem(city) {
   return item;
 }
 
+// ── NEW-LOAD INDICATOR (2026-08-13) ───────────────────────────────────────────────────────
+//
+// WHY. With a city filter active, a new load for a DIFFERENT city is still detected and still
+// sounds — but its card is hidden, so auto-open would leave the dispatcher looking at a detail
+// panel with no card behind it. Instead the pipeline marks the owning city's button, and he
+// decides when to switch. Deliberately no auto-switch: changing tabs under his hands while he is
+// reading a load is worse than a missed second.
+//
+// city string -> unseen new-load count. Cleared for a city when he opens it.
+var _originNewCounts = {};
+
+// Records new loads for a city that is not currently visible. Called by content.js.
+function markCityNewLoads(city, count) {
+  logger.log('originCities', 'markCityNewLoads called', { count: count });
+  try {
+    if (!city || !count) return;
+    _originNewCounts[city] = (_originNewCounts[city] || 0) + count;
+    paintCityNewCounts();
+  } catch (e) {
+    logger.error('originCities', 'markCityNewLoads failed', { error: e, count: count });
+  }
+}
+
+// Renders each city's unseen count as a badge on its button. Additive to the pill's own content
+// so the city label is never replaced — textContent only, never innerHTML.
+function paintCityNewCounts() {
+  logger.log('originCities', 'paintCityNewCounts called');
+  try {
+    var panel = document.getElementById(ORIGIN_PANEL_ID);
+    if (!panel) return;
+    var items = panel.querySelectorAll('[data-testid="ext-origin-city"]');
+    for (var i = 0; i < items.length; i++) {
+      var city = items[i].getAttribute('data-city');
+      var n = _originNewCounts[city] || 0;
+      // RESERVED SLOT (2026-08-14). The badge used to be appended and removed, which changed the
+      // button's width every time a load arrived and shifted the whole row under the dispatcher's
+      // cursor. The slot is now permanent and merely goes transparent when empty, so the button
+      // is exactly the same size with and without a count.
+      var badge = items[i].querySelector('[data-testid="ext-origin-city-new"]');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.setAttribute('data-testid', 'ext-origin-city-new');
+        badge.setAttribute('aria-label', 'new loads');
+        items[i].appendChild(badge);
+      }
+      // A zero-width space keeps the slot's line box even when there is nothing to show, so an
+      // empty slot occupies exactly the height a filled one does.
+      badge.textContent = n > 0 ? String(n) : '​';
+      if (n > 0) {
+        badge.removeAttribute('data-empty');
+        // data-hasnew is kept as a hook for tests and future use, but it NO LONGER draws a
+        // border (2026-08-14) — only the active button is highlighted.
+        items[i].setAttribute('data-hasnew', 'true');
+      } else {
+        badge.setAttribute('data-empty', 'true');
+        items[i].removeAttribute('data-hasnew');
+      }
+    }
+  } catch (e) {
+    logger.error('originCities', 'paintCityNewCounts failed', { error: e });
+  }
+}
+
 // Applies a filter selection and repaints the active state. null = All.
 //
 // The filtering itself lives in cityAssign.js; this file only decides WHAT is selected and how
@@ -311,11 +454,119 @@ function selectCityFilter(city) {
   logger.log('originCities', 'selectCityFilter called', { toAll: city === null });
   try {
     _originActiveFilter = city;
+    // Opening a city clears its unseen-load badge — he has now seen them.
+    if (city !== null && _originNewCounts[city]) delete _originNewCounts[city];
     if (typeof applyCityFilter === 'function') applyCityFilter(city);
     else logger.warn('originCities', 'applyCityFilter unavailable — selection recorded only');
     paintActiveCityButton();
+    paintCityNewCounts();
   } catch (e) {
     logger.error('originCities', 'selectCityFilter failed', { error: e, hasCity: city !== null });
+  }
+}
+
+// How many rendered loads could NOT be attributed to any city, shown on the All button.
+//
+// WHY THIS EXISTS (2026-08-13). On the HEBRON and COLUMBUS tabs every card was unassigned, so
+// both tabs showed an identical list — and an identical list of plausible loads is exactly what a
+// working filter looks like. Nothing on screen contradicted it. This number does: when it equals
+// the board size, the filter is speaking for nothing, and that is visible at a glance instead of
+// needing a console.
+var _originUnassigned = 0;
+
+// Where clicking the badge a second time returns to. Captured when the view is entered, so the
+// toggle restores the city Ihor was actually on rather than dumping him on "All".
+var _originUnmatchedReturnTo = null;
+
+// Toggles the unmatched-only view. Wired to the badge, and to Enter/Space on it.
+function toggleUnmatchedFilter() {
+  logger.log('originCities', 'toggleUnmatchedFilter called', { count: _originUnassigned });
+  try {
+    if (typeof CITY_FILTER_UNMATCHED === 'undefined') {
+      logger.warn('originCities', 'cityAssign not loaded — unmatched view unavailable');
+      return;
+    }
+    if (_originActiveFilter === CITY_FILTER_UNMATCHED) {
+      selectCityFilter(_originUnmatchedReturnTo);      // back to where he was
+      return;
+    }
+    if (_originUnassigned <= 0) return;                // rule 4: nothing to inspect
+    _originUnmatchedReturnTo = _originActiveFilter;
+    selectCityFilter(CITY_FILTER_UNMATCHED);
+  } catch (e) {
+    logger.error('originCities', 'toggleUnmatchedFilter failed', { error: e });
+  }
+}
+
+function markUnassignedLoads(count) {
+  logger.log('originCities', 'markUnassignedLoads called', { count: count });
+  try {
+    var n = (typeof count === 'number' && isFinite(count) && count > 0) ? Math.floor(count) : 0;
+    if (n === _originUnassigned) return;    // no DOM write when nothing changed
+    _originUnassigned = n;
+    paintUnassignedCount();
+  } catch (e) {
+    logger.error('originCities', 'markUnassignedLoads failed', { error: e, count: count });
+  }
+}
+
+function paintUnassignedCount() {
+  logger.log('originCities', 'paintUnassignedCount called');
+  try {
+    var panel = document.getElementById(ORIGIN_PANEL_ID);
+    if (!panel) return;
+    var allBtn = panel.querySelector('[data-testid="ext-origin-cities-all"]');
+    if (!allBtn) return;
+    // Same reserved slot as the city badges (2026-08-14): always present, transparent when
+    // empty, so the All button never changes size.
+    var badge = allBtn.querySelector('[data-testid="ext-origin-unassigned"]');
+    {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.setAttribute('data-testid', 'ext-origin-unassigned');
+        badge.setAttribute('aria-label', 'loads with no city');
+        // addEventListener only, attached once at creation — the badge is rebuilt only when it
+        // goes from absent to present, so this cannot stack up. stopPropagation keeps the click
+        // off the All button underneath it, which would otherwise clear the filter instead.
+        badge.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          toggleUnmatchedFilter();
+        });
+        badge.addEventListener('keydown', function (ev) {
+          if (ev.key !== 'Enter' && ev.key !== ' ') return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          toggleUnmatchedFilter();
+        });
+        allBtn.appendChild(badge);
+      }
+      if (_originUnassigned > 0) {
+        badge.textContent = String(_originUnassigned);
+        badge.setAttribute('title', 'Show only the ' + _originUnassigned +
+          ' load(s) that could not be matched to a city. Click again to go back.');
+        badge.setAttribute('role', 'button');
+        badge.setAttribute('tabindex', '0');
+        badge.removeAttribute('data-empty');
+        allBtn.setAttribute('data-hasunassigned', 'true');
+      } else {
+        // The slot STAYS, transparent and inert, so the All button keeps its size. Not
+        // focusable and not described, so it cannot be tabbed to or clicked at zero —
+        // toggleUnmatchedFilter() refuses at zero anyway, this just removes the affordance.
+        badge.textContent = '​';
+        badge.setAttribute('data-empty', 'true');
+        badge.removeAttribute('title');
+        badge.removeAttribute('role');
+        badge.removeAttribute('tabindex');
+        allBtn.removeAttribute('data-hasunassigned');
+        // Leaving the view active with nothing to show would be a blank board with no way back.
+        if (_originActiveFilter === CITY_FILTER_UNMATCHED) {
+          logger.log('originCities', 'unmatched count fell to zero — leaving the unmatched view');
+          selectCityFilter(_originUnmatchedReturnTo);
+        }
+      }
+    }
+  } catch (e) {
+    logger.error('originCities', 'paintUnassignedCount failed', { error: e });
   }
 }
 
@@ -327,10 +578,17 @@ function paintActiveCityButton() {
   try {
     var panel = document.getElementById(ORIGIN_PANEL_ID);
     if (!panel) return;
+    var unmatchedView = (typeof CITY_FILTER_UNMATCHED !== 'undefined' &&
+                         _originActiveFilter === CITY_FILTER_UNMATCHED);
     var allBtn = panel.querySelector('[data-testid="ext-origin-cities-all"]');
     if (allBtn) {
+      // "All" is active only when nothing is filtered. The unmatched view is its own state and
+      // gets its own attribute — showing both would claim the board is unfiltered while it is
+      // hiding most of it.
       if (_originActiveFilter === null) allBtn.setAttribute('data-active', 'true');
       else allBtn.removeAttribute('data-active');
+      if (unmatchedView) allBtn.setAttribute('data-unmatchedview', 'true');
+      else allBtn.removeAttribute('data-unmatchedview');
     }
     var items = panel.querySelectorAll('[data-testid="ext-origin-city"]');
     for (var i = 0; i < items.length; i++) {
@@ -431,177 +689,12 @@ function loadDriverNames() {
 }
 
 
-// Finds Amazon's results-count element ("Showing 104 results") by TEXT — never by class or id.
-//
-// Requires a LEAF (no element children), so we match the node that literally holds the text
-// rather than every ancestor whose textContent happens to contain it.
-//
-// EXPENSIVE: scans every element in the document. Deliberately NOT called per frame — see
-// getAnchorElement().
-function findAnchorElement() {
-  logger.log('originCities', 'findAnchorElement called');
-  try {
-    var els = document.body.querySelectorAll('*');
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i];
-      if (el.children && el.children.length > 0) continue;      // leaves only
-      if (el.closest && el.closest('#' + ORIGIN_PANEL_ID)) continue;
-      var text = el.textContent;
-      if (!text) continue;
-      if (ORIGIN_ANCHOR_RE.test(text.trim())) return el;
-    }
-  } catch (e) {
-    logger.error('originCities', 'findAnchorElement failed', { error: e });
-  }
-  return null;
-}
 
-// Cached accessor. The rAF loop runs ~60x/sec; re-scanning every element every frame would be
-// indefensible. The element's IDENTITY does not change as the board reflows — only its rect —
-// so the scan runs once and is repeated only when the cached node leaves the DOM (Amazon's
-// React re-render). Steady-state cost per frame is therefore ONE getBoundingClientRect().
-function getAnchorElement() {
-  if (_originAnchorEl && _originAnchorEl.isConnected) return _originAnchorEl;
-  _originAnchorEl = findAnchorElement();
-  return _originAnchorEl;
-}
 
-// Walks up from the anchor to the nearest ANCESTOR with a non-zero height — that is the row.
-//
-// Starts at parentElement, not at the element itself. The results-count leaf usually has its own
-// non-zero height, so starting at `el` would return the leaf and centre the panel on the text
-// rather than on its row — a few px out, and wrong for the below-branch's row.bottom/row.left.
-// Returns { el, rect } — the rect is handed back so the caller does not re-measure the same
-// node. That keeps the steady-state frame cost at exactly TWO getBoundingClientRect() calls.
-function findAnchorRow(el) {
-  var node = el ? el.parentElement : null;
-  while (node && node !== document.body) {
-    var r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
-    if (r && r.height > 0) return { el: node, rect: r };
-    node = node.parentElement;
-  }
-  return null;
-}
 
-// Positions the panel relative to the results-count row. Called every animation frame.
-//
-// WHY THIS ANCHOR, not the chips (changed 2026-08-05): the results-count line sits ABOVE the
-// chip band, so a panel glued to it no longer covers the first load card — which the
-// below-the-chips placement did at narrow widths.
-//
-// Two branches, both logged on transition:
-//   BESIDE — vertically centred on the row, left edge at the text's right + 16px. Uses
-//            translateY(-50%) so the panel's own height is never measured: one rect read.
-//   BELOW  — when free width to the right is under 200px: row.bottom + 6px, aligned to row.left.
-//
-// Writes only when top or left moved by more than 0.5px, so a still board costs zero style
-// writes and zero layout invalidation.
-function positionOriginPanel() {
-  var panel = document.getElementById(ORIGIN_PANEL_ID);
-  if (!panel) return;
-  try {
-    var anchor = getAnchorElement();
-    var row    = anchor ? findAnchorRow(anchor) : null;
-    if (!anchor || !row) {
-      // HOLD THE LAST GOOD POSITION (2026-08-05 fix). Every board refresh clears and re-renders
-      // Amazon's load list, and the "Showing N results" row is briefly absent while that
-      // happens. This branch used to apply the corner fallback on those frames, so the panel
-      // snapped to top-left and back on every single refresh — read by the dispatcher as a
-      // flicker.
-      //
-      // If we have ever measured a real position, the panel's inline top/left are already
-      // correct: do nothing at all and let a later frame pick the anchor back up. No timeout,
-      // no retry counter, no visibility toggle — the loop runs every frame, so "keep the last
-      // value" is the whole mechanism.
-      //
-      // The corner fallback now only applies before the row has EVER existed, which is the one
-      // case where there is no last-good position to hold.
-      if (_originHasMeasured) {
-        if (!_originHoldLogged) {
-          _originHoldLogged = true;
-          logger.log('originCities', 'anchor missing — holding last measured position', {
-            heldTop: _originLastTop, heldLeft: _originLastLeft
-          });
-        }
-        return;
-      }
-      if (_originLastMode !== 'fallback') {
-        logger.warn('originCities', 'results-count text not found — using fallback position', {
-          anchorFound: !!anchor, rowFound: !!row,
-          pattern: String(ORIGIN_ANCHOR_RE),
-          fallbackTop: ORIGIN_FALLBACK_TOP_PX, fallbackLeft: ORIGIN_FALLBACK_LEFT_PX
-        });
-      }
-      applyOriginPosition(panel, ORIGIN_FALLBACK_TOP_PX, ORIGIN_FALLBACK_LEFT_PX, 'fallback');
-      return;
-    }
-    // Anchor is back (or here for the first time) — resume normal measuring.
-    _originHoldLogged = false;
 
-    var textRect = anchor.getBoundingClientRect();
-    var rowRect  = row.rect; // already measured by findAnchorRow — do not read it twice
 
-    // Free width is measured against the VIEWPORT, not the row: the panel is position:fixed, so
-    // the viewport edge is what actually clips it.
-    var freeRight = window.innerWidth - textRect.right - ORIGIN_ANCHOR_GAP_PX;
-    if (freeRight >= ORIGIN_MIN_RIGHT_SPACE_PX) {
-      applyOriginPosition(panel, rowRect.top + rowRect.height / 2,
-                          textRect.right + ORIGIN_ANCHOR_GAP_PX, 'beside');
-    } else {
-      applyOriginPosition(panel, rowRect.bottom + ORIGIN_BELOW_GAP_PX, rowRect.left, 'below');
-    }
-  } catch (e) {
-    logger.error('originCities', 'positionOriginPanel failed', { error: e });
-    applyOriginPosition(panel, ORIGIN_FALLBACK_TOP_PX, ORIGIN_FALLBACK_LEFT_PX, 'fallback');
-  }
-}
 
-// Single place that touches style. Skips the write unless something actually moved.
-function applyOriginPosition(panel, top, left, mode) {
-  var moved = _originLastTop  === null ||
-              Math.abs(top  - _originLastTop)  > ORIGIN_MOVE_EPSILON_PX ||
-              Math.abs(left - _originLastLeft) > ORIGIN_MOVE_EPSILON_PX;
-  if (!moved && mode === _originLastMode) return;
-
-  if (mode !== _originLastMode) {
-    logger.log('originCities', 'panel placement branch', { mode: mode });
-    // 'beside' centres on the row via translateY(-50%); the other two align to a top edge.
-    panel.style.transform = (mode === 'beside') ? 'translateY(-50%)' : '';
-  }
-  panel.style.top  = top + 'px';
-  panel.style.left = left + 'px';
-  _originLastTop  = top;
-  _originLastLeft = left;
-  _originLastMode = mode;
-  // Only a REAL measurement arms the hold. The corner fallback must never count as one, or the
-  // first-paint fallback would be held forever instead of being replaced once the row appears.
-  if (mode !== 'fallback') _originHasMeasured = true;
-}
-
-// requestAnimationFrame follow loop.
-//
-// WHY rAF AND NOT A DEBOUNCE (changed 2026-08-05): the dispatcher collapses Amazon's left
-// filter panel and the whole board reflows. A debounced reposition made the panel visibly SNAP
-// into place after the reflow had finished. Reading the rect every frame makes it travel with
-// the content instead. This also makes the previous resize and scroll listeners redundant —
-// both were only ever proxies for "the anchor may have moved", which the loop now observes
-// directly — so they were removed rather than left running alongside it.
-function startOriginFollowLoop() {
-  logger.log('originCities', 'startOriginFollowLoop called');
-  if (_originRafId !== null) return;
-  var tick = function () {
-    positionOriginPanel();
-    _originRafId = requestAnimationFrame(tick);
-  };
-  _originRafId = requestAnimationFrame(tick);
-}
-
-function stopOriginFollowLoop() {
-  if (_originRafId !== null) {
-    cancelAnimationFrame(_originRafId);
-    _originRafId = null;
-  }
-}
 
 // Reads + renders, but ONLY when the extracted list actually changed.
 //
@@ -714,11 +807,22 @@ function buildOriginCitiesPanel() {
       panel.addEventListener(type, function (ev) { ev.stopPropagation(); });
     });
 
-    document.body.appendChild(panel);
+    // MERGED INTO THE TOP BAR (2026-08-14). Was document.body.appendChild + position:fixed +
+    // an rAF loop measuring Amazon's results row every frame. It now lives INSIDE #ext-sidebar
+    // as a second row, so the bar owns position, stacking and dragging, and the panel can no
+    // longer overlap Amazon's own filter controls.
+    var bar = document.getElementById('ext-sidebar');
+    if (!bar) {
+      // The sidebar builds first in activateExtensionUI(), so this should not happen. Refusing
+      // is right if it ever does: appending to body would resurrect the floating panel this
+      // change exists to remove, and a panel with no position would land wherever it fell.
+      logger.warn('originCities', 'top bar not present — origin cities row NOT injected');
+      return;
+    }
+    bar.appendChild(panel);
 
     _originLastRender = null;     // force the first render
     startOriginObserver();
-    startOriginFollowLoop();      // owns ALL positioning from here on
     // Render only AFTER stored names are in, so no raw-city flash. refreshOriginCities()
     // early-returns until _originNamesReady, including if the observer fires first.
     loadDriverNames().then(function () { refreshOriginCities(); });
@@ -739,22 +843,16 @@ function removeOriginCitiesPanel() {
     }
     // Cancel the follow loop. Without this it would keep calling requestAnimationFrame forever
     // after logout — a permanent ~60fps callback on a page the extension no longer owns.
-    stopOriginFollowLoop();
+    // stopOriginFollowLoop() removed 2026-08-14 — there is no follow loop any more; the row
+    // is a child of #ext-sidebar and is removed with it.
     if (_originDebounce !== null) {
       clearTimeout(_originDebounce);
       _originDebounce = null;
     }
-    _originAnchorEl   = null;
-    _originLastTop    = null;
-    _originLastLeft   = null;
-    _originLastMode   = null;
-    // CLEARED, not carried over. Without this a logout→login cycle would start with the hold
-    // already armed and _originLastTop/_originLastLeft still holding the previous session's
-    // coordinates — so a rebuild whose anchor is not yet present would hold a stale position
-    // from a board that may have scrolled or resized since. Cleared, the rebuild correctly
-    // treats itself as a first paint.
-    _originHasMeasured = false;
-    _originHoldLogged  = false;
+    // The seven positioning variables that used to be reset here are GONE (2026-08-14) along
+    // with the follow loop. Leaving the assignments behind would have been worse than untidy:
+    // this file is not in strict mode, so assigning to an undeclared name creates a GLOBAL on
+    // window — silently, on every logout.
     _originLastRender = null;
     // Nothing is on screen after teardown, so the accessor must report nothing rather than a
     // stale list from the previous session.
@@ -762,6 +860,11 @@ function removeOriginCitiesPanel() {
     // Selection resets to All. cityAssign's teardown separately restores every hidden card, so
     // the two halves cannot disagree about the filter state after a logout.
     _originActiveFilter = null;
+    _originNewCounts = {};
+    // The unmatched view and its return-to memory reset with everything else, so a re-activation
+    // never starts inside a debug view or remembers the previous session's city.
+    _originUnassigned = 0;
+    _originUnmatchedReturnTo = null;
     // Driver-name state. The panel and its input go with the panel element; this just makes a
     // later rebuild re-read from storage rather than trusting an in-memory copy from the
     // previous session. Stored names themselves are NEVER cleared here — they persist.

@@ -164,6 +164,42 @@ function shouldContinue() {
   return gateActive && tabState.get('running');
 }
 
+// Checkpoint for the ONE window where `running` is false BY OUR OWN DOING (2026-08-13).
+//
+// The auto-open path now stops the loop the moment it commits to opening a load — before any
+// await — so that a refresh cannot land mid-open and have Amazon re-render the list out from
+// under the panel we are about to insert. From that point `shouldContinue()` is false by
+// design, and using it would abort the very render the stop exists to protect.
+//
+// So this checks the AUTH GATE only. A logout or deactivate still aborts, exactly as before;
+// our own deliberate stop does not. The distinction matters: `running === false` here means
+// "we are finishing an open", while a closed gate means "the extension is being torn down".
+function gateStillOpen() {
+  return (typeof isAuthGateActiveSync === 'function') ? isAuthGateActiveSync() : false;
+}
+
+// True when the dispatcher is reading something and the view must NOT move under him
+// (2026-08-13). Both of the conditions the auto-switch must respect collapse into this one
+// test, which is why no marker had to be added to the manual-click path:
+//
+//   - "a detail panel is open from a manual card click" -> #ext-inline-panel exists.
+//   - "the loop is already stopped for review"          -> running is false.
+//
+// It is deliberately BROADER than asked: a panel auto-opened on an earlier cycle also blocks a
+// switch. That is the same judgement — if anything is open, he may be reading it. Erring toward
+// not moving the view is the safe direction; a delayed alert costs a moment, a view yanked out
+// from under him costs the load he was looking at.
+function dispatcherIsMidWork() {
+  try {
+    if (document.getElementById('ext-inline-panel')) return true;
+    if (!tabState.get('running')) return true;
+    return false;
+  } catch (e) {
+    logger.error('content', 'dispatcherIsMidWork failed — assuming mid-work, will not switch', { error: e });
+    return true;   // on doubt, do not move the view
+  }
+}
+
 // Wipes every DOM node this pipeline can create. Called both by deactivateExtensionUI()
 // (a real logout/gate-close) and by every shouldContinue()-failing checkpoint below — a
 // tick already mid-flight when logout happens can leave something behind in the gap
@@ -216,12 +252,116 @@ async function runDetectionPipeline(sourceTag) {
     var opened   = false;
     // Sort by payout desc so openTopNewLoad always opens the highest-paying new load.
     var ordered  = sortByPayoutDesc(result.newLoads);
-    if (autoOpen) opened = openTopNewLoad(ordered);
+
+    // ── FILTER AWARENESS (2026-08-13) ──────────────────────────────────────────────────
+    //
+    // Detection above is deliberately untouched: it still covers EVERY city, so a new load is
+    // never missed and the sound always fires. What changes is what we OPEN.
+    //
+    // Observed live: on the HEBRON tab a LITTLE ROCK load arrived, the alert fired and the
+    // accordion opened — over a card the filter had hidden. The dispatcher saw a detail panel
+    // with nothing behind it. Opening a card he cannot see is worse than not opening one.
+    //
+    // So: auto-open only from the loads that are actually visible, and mark the owning city's
+    // button for the rest.
+    //
+    // ── AUTO-SWITCH (2026-08-13, Ihor's decision) ──────────────────────────────────────
+    //
+    // Badging alone proved too quiet: a load could arrive, sound the alert and then sit behind a
+    // city button he never looked at, so the alert pointed at nothing he could act on. The view
+    // now follows the load instead.
+    //
+    // Anchored on ordered[0] — the highest-paying new load, which is exactly the one
+    // openTopNewLoad would open. Switching to ITS city is what makes the auto-open and the switch
+    // agree when several cities get loads in one cycle; the rest stay badged below.
+    //
+    // The switch runs BEFORE the visible/hidden partition, so the load it uncovers is then
+    // treated as an ordinary visible load: same highlight, same auto-open, same everything. It is
+    // also synchronous, so the stop that follows still happens before any await (PLAN 7b holds).
+    //
+    // Three cases deliberately do NOT switch:
+    //   - filter is "All"  -> nothing is hidden, nothing to switch to.
+    //   - dispatcher mid-work -> see dispatcherIsMidWork(); badge only.
+    //   - the top load is already visible -> he is looking at its city.
+    if (typeof getActiveCityFilter === 'function' && getActiveCityFilter() !== null &&
+        typeof cityFilterHidesLoad === 'function' && ordered.length > 0 &&
+        cityFilterHidesLoad(ordered[0].loadId)) {
+      if (dispatcherIsMidWork()) {
+        logger.log('content', 'runDetectionPipeline: new load in another city, but the dispatcher ' +
+          'is reading something — badging only, not switching', { source: sourceTag });
+      } else {
+        // A load can be in range of several cities; the first is a deterministic pick and any of
+        // them makes it visible. The ACTIVE city is never among them — cityFilterHidesLoad just
+        // said so — so this always moves the view.
+        var switchTo = (typeof citiesOfLoad === 'function') ? citiesOfLoad(ordered[0].loadId) : [];
+        if (switchTo.length > 0 && typeof selectCityFilter === 'function') {
+          // selectCityFilter is the CLICK path itself, not a copy of it: it sets the active city,
+          // clears that city's badge, calls applyCityFilter and repaints the buttons. Hide/show,
+          // unassigned-always-visible and re-apply-after-refresh therefore behave identically to
+          // Ihor pressing the button — there is no second implementation to drift.
+          logger.log('content', 'runDetectionPipeline: new load in another city — switching the view to it', {
+            source: sourceTag, from: getActiveCityFilter(), to: switchTo[0], alsoIn: switchTo.length - 1
+          });
+          selectCityFilter(switchTo[0]);
+        }
+      }
+    }
+
+    var visible = ordered;
+    var hiddenByFilter = [];
+    if (typeof cityFilterHidesLoad === 'function') {
+      visible = [];
+      for (var vi = 0; vi < ordered.length; vi++) {
+        if (cityFilterHidesLoad(ordered[vi].loadId)) hiddenByFilter.push(ordered[vi]);
+        else visible.push(ordered[vi]);
+      }
+    }
+    if (hiddenByFilter.length > 0 && typeof markCityNewLoads === 'function') {
+      // A load can be in range of SEVERAL cities (2026-08-13), so it marks every one of them —
+      // each of those drivers could take it, and each should see it waiting.
+      var perCity = {};
+      for (var hi = 0; hi < hiddenByFilter.length; hi++) {
+        var hcs = (typeof citiesOfLoad === 'function') ? citiesOfLoad(hiddenByFilter[hi].loadId) : [];
+        for (var hj = 0; hj < hcs.length; hj++) perCity[hcs[hj]] = (perCity[hcs[hj]] || 0) + 1;
+      }
+      for (var pc in perCity) {
+        if (Object.prototype.hasOwnProperty.call(perCity, pc)) markCityNewLoads(pc, perCity[pc]);
+      }
+      logger.log('content', 'runDetectionPipeline: new loads in filtered-out cities — marked, not opened', {
+        source: sourceTag, hidden: hiddenByFilter.length, visible: visible.length
+      });
+    }
+    // Only ever open something on screen. With everything filtered out, `visible` is empty and
+    // openTopNewLoad is not called at all.
+    ordered = visible;
+    if (autoOpen && ordered.length > 0) opened = openTopNewLoad(ordered);
+
+    // STOP THE LOOP HERE — synchronously, BEFORE any await (2026-08-13, fixes PLAN 7b).
+    //
+    // It used to sit at the bottom of this block, i.e. after openTopNewLoad + await sleep(800)
+    // + showInlinePanel. At a 2.5s interval a refresh landed inside that window: refreshNow()
+    // made Amazon re-render the load list, and the inline panel — inserted as a SIBLING of the
+    // card inside that list (inlinePanel.js) — was destroyed with it. The dispatcher saw the
+    // accordion open and vanish about a second later.
+    //
+    // This is exactly what the MANUAL card-click path already does (inlinePanel.js, 2026-07-31):
+    // it stops at the click, before the sheet opens. Same call, same state, same visible result
+    // in the sidebar — the tabState subscriber fires synchronously, so the play/pause control
+    // shows "stopped" from this moment whether or not the render below succeeds. That is what
+    // keeps a failed or abandoned open from leaving the loop silently stopped.
+    //
+    // Unconditional, matching the previous behaviour: any new load auto-stops, opened or not.
+    tabState.set('running', false);
+    logger.log('content', 'runDetectionPipeline: new loads found — auto-stopping BEFORE the open ' +
+      'so a refresh cannot destroy the panel', {
+      source: sourceTag, newCount: result.newCount, opened: opened
+    });
 
     if (autoOpen && opened) {
       await sleep(800);
-      if (!shouldContinue()) {
-        logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel' });
+      // Gate-only: `running` is false because WE just set it. See gateStillOpen().
+      if (!gateStillOpen()) {
+        logger.log('content', 'runDetectionPipeline: bailing — auth gate closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel' });
         clearPipelineDom();
         return;
       }
@@ -232,11 +372,6 @@ async function runDetectionPipeline(sourceTag) {
         logger.warn('content', 'runDetectionPipeline: inline panel render failed', { source: sourceTag, error: e });
       }
     }
-
-    tabState.set('running', false);
-    logger.log('content', 'runDetectionPipeline: new loads found — auto-stopping', {
-      source: sourceTag, newCount: result.newCount
-    });
   } else if (surgeLoads.length > 0) {
     var surgeAutoOpen  = await storage.get(STORAGE_KEYS.AUTO_OPEN, true);
     if (!shouldContinue()) {
@@ -248,10 +383,20 @@ async function runDetectionPipeline(sourceTag) {
     var orderedSurge   = sortByPayoutDesc(surgeLoads);
     if (surgeAutoOpen) surgeOpened = openTopNewLoad(orderedSurge);
 
+    // Same reordering as the new-load branch above, for the same reason — this path opens a
+    // card and inserts the same panel through the same code, so it had the identical race.
+    // Fixing only one of the two would have left the bug alive on the surge path.
+    tabState.set('running', false);
+    logger.log('content', 'runDetectionPipeline: surge detected — auto-stopping BEFORE the open ' +
+      'so a refresh cannot destroy the panel', {
+      source: sourceTag, surgeCount: surgeLoads.length, opened: surgeOpened
+    });
+
     if (surgeAutoOpen && surgeOpened) {
       await sleep(800);
-      if (!shouldContinue()) {
-        logger.log('content', 'runDetectionPipeline: bailing — gate/running closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel (surge)' });
+      // Gate-only: `running` is false because WE just set it. See gateStillOpen().
+      if (!gateStillOpen()) {
+        logger.log('content', 'runDetectionPipeline: bailing — auth gate closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel (surge)' });
         clearPipelineDom();
         return;
       }
@@ -262,11 +407,6 @@ async function runDetectionPipeline(sourceTag) {
         logger.warn('content', 'runDetectionPipeline: inline panel render failed for surge', { source: sourceTag, error: e });
       }
     }
-
-    tabState.set('running', false);
-    logger.log('content', 'runDetectionPipeline: surge detected — auto-stopping', {
-      source: sourceTag, surgeCount: surgeLoads.length
-    });
   }
 }
 
@@ -384,11 +524,19 @@ function stopOrchestrator() {
 tabState.subscribe('running', function (val) {
   if (val) {
     closePanelsForStart(); // close detail panel once per loop start
+    // START clears our own panel too (2026-08-13). closePanelsForStart() only closes AMAZON's
+    // detail sheet; ours survived, and a panel left over from before a START would then be
+    // carried into whatever the loop rendered next. Pressing START means "begin a clean pass".
+    removeInlinePanel();
     startLoadObserver();   // instant detection via MutationObserver
     startOrchestrator();   // timer-tick fallback
   } else {
     stopLoadObserver();
     stopOrchestrator();
+    // STOP does NOT remove the panel — stopping is exactly what an auto-open does when it opens
+    // one for review (PLAN 7b), so removing here would destroy the panel the stop exists to
+    // protect. It is verified instead: if its load is gone from the board, it goes.
+    if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('loop stopped');
   }
 });
 
@@ -511,6 +659,10 @@ function deactivateExtensionUI() {
     if (sidebarEl._runningSubscriber) tabState.unsubscribe('running', sidebarEl._runningSubscriber);
     if (sidebarEl._memoryPollInterval) clearInterval(sidebarEl._memoryPollInterval);
     if (sidebarEl._rateLimitStorageListener) chrome.storage.onChanged.removeListener(sidebarEl._rateLimitStorageListener);
+    // The drag listeners live on WINDOW, not on the element (the pointer leaves the bar
+    // mid-drag), so removing the element does not take them with it — 2026-08-14.
+    if (sidebarEl._extDragMove) window.removeEventListener('pointermove', sidebarEl._extDragMove);
+    if (sidebarEl._extDragUp) window.removeEventListener('pointerup', sidebarEl._extDragUp);
     sidebarEl.remove();
   }
   // 2026-07-30: the shared-rate status row (see sidebar.js) sets body padding-top via

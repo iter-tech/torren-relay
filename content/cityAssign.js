@@ -43,9 +43,61 @@ var CITY_ASSIGN_EARTH_RADIUS_MI = 3958.8;
 // 150–250 mi, raise it. If junk is being absorbed, lower it.
 var CITY_ASSIGN_MAX_MILES = 150;
 
-// A refresh can deliver several /search responses (other saved-search tabs). We keep the last
-// few and choose between them by id overlap with the cards actually on screen — see pickBuffer.
-var CITY_ASSIGN_MAX_BUFFERS = 4;
+// A refresh can deliver several responses. The raw responses are still buffered for DIAGNOSTICS
+// ONLY; assignment reads the merged map below, not these.
+//
+// CAN EVICTION LOSE SOMETHING WE NEED? No — checked, not assumed (2026-08-13). mergePickupCoords()
+// runs inside onCityCoordsMessage, i.e. the moment a response ARRIVES, so its coordinates are in
+// the persistent map before this array is ever trimmed. Every remaining reader of the array is
+// either pickBuffer() (defined, never called) or a CITY_ASSIGN_DEBUG-only diagnostic. Dropping an
+// old raw body costs a log line, never an assignment.
+//
+// RAISED 4 -> 6 anyway (2026-08-13), for the diagnostic's sake: a refresh now delivers search +
+// similar + recommendations, so a cap of 4 could not hold even one complete refresh and the
+// inventory would show a torn picture of what arrived together. Six covers a refresh with room
+// for a second saved-search tab's search.
+var CITY_ASSIGN_MAX_BUFFERS = 6;
+
+// ── THE MERGED PICKUP MAP (2026-08-13) ────────────────────────────────────────────────────
+//
+// work-opportunity id -> { lat, lng }, taken from Amazon's OWN coordinates
+// (workOpportunities[].loads[0].stops[0].location.latitude/.longitude).
+//
+// THIS REPLACED pickBuffer(), WHICH WAS THE ACTUAL DEFECT. pickBuffer chose the ONE buffered
+// response with the highest id overlap and discarded the rest, so a board whose cards came from
+// two responses — any paginated board, any board rendered after a second saved-search tab
+// answered — lost every id living in the responses that lost the vote.
+//
+// MERGING IS SAFE, and it is safe for a checkable reason rather than an assumed one: the join key
+// is the work-opportunity id, which is globally unique. If the same id appears in two responses
+// it is the SAME load, so the coordinates agree. Measured across the captures on disk: 13 ids
+// appear in more than one response, 13 carry identical coordinates, 0 conflict. There is a test
+// that reads those files and re-checks it rather than trusting this paragraph.
+//
+// IT PERSISTS ACROSS CYCLES. Coverage on a paginated board accumulates as pages arrive: page 1's
+// response covers the first 50 ids, page 2's adds the next 25, and neither evicts the other.
+// Rebuilding from the current buffers alone is what made coverage collapse the moment a refresh
+// pushed a response out of the 4-slot window.
+//
+// BOUNDED, oldest-first, so a long session cannot grow it without limit. 4000 entries is ~80
+// pages of results — far beyond any board — at roughly 40 bytes each.
+var CITY_PICKUP_MAX = 4000;
+var _cityPickupById = {};   // id -> { lat, lng }
+var _cityPickupOrder = [];  // insertion order, for eviction
+
+// Ids a response DID list but WITHOUT coordinates. Kept only so an unmatched card can be given
+// the right reason: "we never saw this load" and "we saw it and Amazon sent no position" are the
+// same outcome but very different problems, and Ihor cannot report a pattern from a number.
+var _cityNoCoordIds = {};
+
+// The third filter state, alongside null (All) and a city name: show ONLY the cards that could
+// not be matched to any city. Carried inside _cityFilterActive as a sentinel rather than as a
+// fourth variable, so re-apply-after-refresh, restore-on-teardown and the panel-anchor check
+// all keep working untouched. City strings come from Amazon's filter chips and look like
+// "CHICAGO, IL", so this cannot collide with one. Plain ASCII deliberately: the first attempt
+// used a U+0000 prefix and put a real NUL byte in the source, which made the file read as
+// binary to grep and every other text tool.
+var CITY_FILTER_UNMATCHED = '__EXT_UNMATCHED__';
 
 // The response arrives BEFORE React has rendered the cards it describes, so reading the DOM at
 // arrival would find the previous page's cards (or none). This waits for the render to settle
@@ -53,6 +105,31 @@ var CITY_ASSIGN_MAX_BUFFERS = 4;
 // ⚠ ALSO A GUESS — tune against real logs. If cycles report "no captured response matches the
 // cards on screen" on a slow board, this is the first thing to raise.
 var CITY_ASSIGN_SETTLE_MS = 700;
+
+// Folds one response's { id, lat, lng } triples into the persistent map. Returns how many ids
+// were NEW, which is what makes accumulation visible in the log.
+function mergePickupCoords(pairs) {
+  var added = 0;
+  if (!pairs || !pairs.length) return 0;
+  for (var i = 0; i < pairs.length; i++) {
+    var p = pairs[i];
+    if (!p || !p.id) continue;
+    if (typeof p.lat !== 'number' || typeof p.lng !== 'number') continue;
+    if (!Object.prototype.hasOwnProperty.call(_cityPickupById, p.id)) {
+      _cityPickupOrder.push(p.id);
+      added++;
+    }
+    // Last write wins on a repeat. Harmless by the uniqueness argument above — the values are
+    // equal — and it keeps the entry fresh rather than stale if Amazon ever did revise one.
+    _cityPickupById[p.id] = { lat: p.lat, lng: p.lng };
+  }
+  while (_cityPickupOrder.length > CITY_PICKUP_MAX) {
+    var old = _cityPickupOrder.shift();
+    if (!Object.prototype.hasOwnProperty.call(_cityPickupById, old)) continue;
+    delete _cityPickupById[old];
+  }
+  return added;
+}
 
 var _cityAssignBuffers  = [];    // recent captured responses, oldest first
 var _cityAssignTimer    = null;  // settle-debounce handle
@@ -211,26 +288,72 @@ function findMainResultsList() {
   }
 }
 
-// Parses N from the board's "Showing 1 - N of N results" line. Text-anchored, same reasoning as
+// Reads the board's "Showing 1 - 50 of 230 results" line. Text-anchored, same reasoning as
 // originCities.js: the visible copy is far more stable than the hashed classes around it.
-// Returns null when the line is absent or unparseable — never a guess.
-function readShowingTotal() {
-  logger.log('cityAssign', 'readShowingTotal called');
+//
+// ⚠ THE LINE CARRIES TWO DIFFERENT NUMBERS (2026-08-13). This function used to return only the
+// "of N" — the GRAND TOTAL — and its caller compared that against the cards on screen. On every
+// single-page board (9 of 9, 30 of 30) the two are equal and the bug is invisible; on any
+// paginated board they are not, and the mismatch skipped the whole cycle. Captures on disk:
+// 50 rendered of 338 total, 50 of 104, 5 of 11. So:
+//
+//   rendered — how many cards are on screen right now, from the RANGE "1 - 50"
+//   total    — how many exist across all pages, from "of 230"
+//
+// rendered is computed as hi - lo + 1 rather than taken as `hi`, so it stays correct both when
+// Amazon replaces the list per page ("Showing 51 - 100 of 230" -> 50) and when it appends on
+// scroll ("Showing 1 - 100 of 230" -> 100).
+//
+// Returns { rendered, total, raw }. Any field is null when it could not be read — never a guess.
+// `raw` is the matched line itself, so a parse failure can be diagnosed from the log without
+// having to reproduce the board.
+function readShowingCounts() {
+  logger.log('cityAssign', 'readShowingCounts called');
+  // `from`/`to` are the range endpoints, kept since 2026-08-13 because they identify WHICH page
+  // is on screen — "Showing 51 - 100" is a different working set from "Showing 1 - 50" even
+  // though both render 50 cards, so `rendered` alone cannot tell a page change from a refresh.
+  var out = { rendered: null, total: null, raw: null, from: null, to: null };
   try {
     var els = document.querySelectorAll('span, div, p');
-    var re = /Showing\b[^]*?\bof\s+([\d,]+)\s+results?/i;
+    // Both numbers in one pass. The dash class covers hyphen-minus, en dash and em dash — the
+    // board uses a plain hyphen today, but the copy is Amazon's and a typographic dash would
+    // otherwise silently drop us back to the total-only branch. Written as \u escapes so the
+    // class cannot be mangled by an editor or an encoding round-trip.
+    var reRange = /Showing\b\D*?([\d,]+)\s*[-\u2010-\u2015]\s*([\d,]+)\s+of\s+([\d,]+)\s+results?/i;
+    // Fallback: keeps the total readable on a board that prints no range at all, so the
+    // diagnostic line stays useful even when the guard has to stand down.
+    var reTotal = /Showing\b[^]*?\bof\s+([\d,]+)\s+results?/i;
+    var num = function (s) { return parseInt(String(s).replace(/,/g, ''), 10); };
+
     for (var i = 0; i < els.length; i++) {
       // Leaf-ish only: an ancestor's textContent would concatenate unrelated copy.
       if (els[i].children && els[i].children.length > 0) continue;
       var t = els[i].textContent;
       if (!t) continue;
-      var m = re.exec(t.trim());
-      if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+      t = t.trim();
+
+      var mr = reRange.exec(t);
+      if (mr) {
+        var lo = num(mr[1]), hi = num(mr[2]);
+        out.raw = t;
+        out.total = num(mr[3]);
+        // Guard the arithmetic: a reversed or nonsensical range must read as "unknown", not as a
+        // negative count that would then compare as "collected MORE" and skip every cycle.
+        if (isFinite(lo) && isFinite(hi) && hi >= lo) {
+          out.rendered = hi - lo + 1;
+          out.from = lo;
+          out.to = hi;
+        }
+        return out;
+      }
+
+      var mt = reTotal.exec(t);
+      if (mt) { out.raw = t; out.total = num(mt[1]); return out; }
     }
-    return null;
+    return out;
   } catch (e) {
-    logger.error('cityAssign', 'readShowingTotal failed', { error: e });
-    return null;
+    logger.error('cityAssign', 'readShowingCounts failed', { error: e, raw: out.raw });
+    return out;
   }
 }
 
@@ -797,10 +920,30 @@ var _cityAssignByCard = {};     // id -> assigned city name, or null; rebuilt ev
 
 // Card container for an id-bearing div. Returns null when the container cannot be identified,
 // which the caller treats as "do not hide" — see rule 2.
-function cardContainerFor(idEl) {
+function cardContainerFor(idEl, mainList) {
   try {
     if (!idEl || typeof idEl.closest !== 'function') return null;
-    return idEl.closest('div.load-card, div.load-card__selected, div.wo-card-header--highlighted');
+    var byClass = idEl.closest('div.load-card, div.load-card__selected, div.wo-card-header--highlighted');
+    if (byClass) return byClass;
+
+    // FALLBACK (2026-08-13). The class list is not exhaustive: a recently-added card can carry a
+    // shape none of these match — measured live, 8 by class against 9 by UUID id.
+    //
+    // Under the capture-based source that card was still ASSIGNED (ids were collected class-
+    // agnostically) and merely could not be hidden. Now that assignment reads the container, no
+    // container meant no assignment at all, so the card fell out of the coverage count entirely.
+    // Same visible outcome — it stays on screen — but it made "every rendered card is assigned"
+    // false, which is the promise this whole change is judged on.
+    //
+    // Walk UP to the child of the main list, which IS the card wrapper whatever it is called.
+    // BOUNDED DELIBERATELY: never return the list itself, and never anything above it. Hiding
+    // the list would blank the entire board — the one failure this feature must never produce.
+    if (mainList && idEl !== mainList) {
+      var n = idEl;
+      while (n && n.parentElement && n.parentElement !== mainList) n = n.parentElement;
+      if (n && n.parentElement === mainList) return n;
+    }
+    return null;
   } catch (e) {
     logger.error('cityAssign', 'cardContainerFor failed', { error: e });
     return null;
@@ -819,7 +962,7 @@ function readMainCardElements() {
     for (var i = 0; i < idEls.length; i++) {
       var id = idEls[i].id;
       if (!id || !CARD_UUID_RE.test(id)) continue;
-      var container = cardContainerFor(idEls[i]);
+      var container = cardContainerFor(idEls[i], mainList);
       if (!container) continue;              // cannot identify the card -> never hide it
       out.push({ id: id, el: container });
     }
@@ -828,6 +971,159 @@ function readMainCardElements() {
     return [];
   }
   return out;
+}
+
+// ── PER-CITY DEADHEAD (2026-08-13, Ihor's decision) ───────────────────────────────────────
+//
+// THE PROBLEM. Amazon's deadhead is ONE value per load — the distance to the NEAREST of the five
+// origin cities in the search. A load 5 mi from HEBRON, KY still prints "5 mi" on the COLUMBUS, OH
+// tab, where it is really ~100 mi away. One DOM node, one number; the filter only hides and shows
+// the card around it.
+//
+// MEASURED, NOT ASSUMED: the payload has NO per-origin-city deadhead. `deadhead` is a single
+// {value, unit} scalar on every work opportunity across all captures on disk — 204 distinct key
+// paths searched, nothing per-city. So the figure has to be computed. See api-samples.md.
+//
+// It is also STRAIGHT-LINE, not road miles, which is what makes substituting ours honest: across
+// the 50-load five-city capture, Amazon's value is LOWER than a straight line on 42 of 50 loads,
+// and road distance can never be lower than a straight line. The small residual (mean -1 mi, max
+// 4.1) is Amazon measuring from its own city-centre point rather than ours.
+//
+// RULES, exactly as Ihor set them:
+//   - Replace, never append. One number on the card.
+//   - ONLY on loads that belong to 2+ active cities. On a one-city load Amazon's number IS the
+//     distance to that city, so touching it would add error for nothing.
+//   - Nothing at all on "All".
+//   - Unknown coordinates: leave Amazon's value alone.
+//
+// The anchor is `span[title="Deadhead"]` — derived from samples/paired-card.html, where it occurs
+// exactly once and the VALUE is its previousElementSibling. A title attribute, not a css-<hash>.
+var DEADHEAD_LABEL_SELECTOR = 'span[title="Deadhead"]';
+var DEADHEAD_TESTID         = 'ext-city-deadhead';
+
+// One record per patched card, so the restore is exact rather than a best guess.
+var _deadheadPatched = [];
+
+// Amazon's deadhead VALUE node for a card, or null when the card has no deadhead block.
+function findDeadheadValue(cardEl) {
+  try {
+    if (!cardEl || !cardEl.querySelector) return null;
+    var label = cardEl.querySelector(DEADHEAD_LABEL_SELECTOR);
+    if (!label) return null;
+    return label.previousElementSibling || null;
+  } catch (e) {
+    logger.error('cityAssign', 'findDeadheadValue failed', { error: e });
+    return null;
+  }
+}
+
+// Undoes every deadhead substitution, exactly. Restores the original inline display (including
+// "no inline display at all") and removes our node. Safe to call at any time.
+function restoreDeadheads() {
+  logger.log('cityAssign', 'restoreDeadheads called');
+  var restored = 0, swept = 0;
+  try {
+    for (var i = 0; i < _deadheadPatched.length; i++) {
+      var rec = _deadheadPatched[i];
+      if (!rec) continue;
+      try {
+        if (rec.ourEl && rec.ourEl.parentNode) rec.ourEl.parentNode.removeChild(rec.ourEl);
+        if (rec.valueEl && rec.valueEl.style) {
+          if (rec.hadInline) rec.valueEl.style.display = rec.prevDisplay;
+          else rec.valueEl.style.removeProperty('display');
+        }
+        restored++;
+      } catch (e1) {
+        logger.error('cityAssign', 'one deadhead restore failed — continuing', { error: e1 });
+      }
+    }
+    _deadheadPatched = [];
+
+    // Orphan sweep, same reasoning as restoreAllCards(): an extension reload leaves our nodes in
+    // the DOM with an empty tracker. Without this the dispatcher would be left reading a number
+    // nothing is updating.
+    var stray = document.querySelectorAll('[data-testid="' + DEADHEAD_TESTID + '"]');
+    for (var s = 0; s < stray.length; s++) {
+      var el = stray[s];
+      if (!el.parentNode) continue;
+      // Un-hide whatever sibling we hid before removing ourselves, so the card is never left
+      // with NO number at all.
+      var sib = el.nextElementSibling;
+      if (sib && sib.style && sib.style.display === 'none') sib.style.removeProperty('display');
+      el.parentNode.removeChild(el);
+      swept++;
+    }
+    if (restored > 0 || swept > 0) {
+      logger.log('cityAssign', 'CITY DEADHEAD  restored ' + restored + ', swept ' + swept + ' orphan(s)');
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'restoreDeadheads failed', { error: e });
+    _deadheadPatched = [];
+  }
+}
+
+// Substitutes our distance-to-the-active-city on multi-city loads only.
+// `cards` are the ones the filter just left VISIBLE; `activeCity` is resolved to coordinates.
+function applyCityDeadheads(cards, activeCity) {
+  logger.log('cityAssign', 'applyCityDeadheads called');
+  var replaced = 0, singleCity = 0, noCoords = 0, noNode = 0;
+  try {
+    if (!activeCity) return { replaced: 0 };
+    for (var i = 0; i < cards.length; i++) {
+      var id = cards[i].id;
+      var assigned = Object.prototype.hasOwnProperty.call(_cityAssignByCard, id)
+        ? _cityAssignByCard[id] : null;
+
+      // Rule 2: exactly one membership -> Amazon's number is already this city's distance.
+      if (!assigned || assigned.length < 2) { singleCity++; continue; }
+
+      // Rule 6: no coordinates -> leave Amazon's value untouched.
+      var pickup = Object.prototype.hasOwnProperty.call(_cityPickupById, id)
+        ? _cityPickupById[id] : null;
+      if (!pickup) { noCoords++; continue; }
+
+      var valueEl = findDeadheadValue(cards[i].el);
+      if (!valueEl || !valueEl.style) { noNode++; continue; }
+
+      var miles = haversineMiles(pickup.lat, pickup.lng, activeCity.lat, activeCity.lng);
+
+      // OUR node. textContent only — never innerHTML, and never a read of Amazon's text.
+      // font/colour inherit, so it carries the same size, weight and colour as the value it
+      // stands in for and the card does not look edited. No hardcoded colour, no hash class.
+      var ours = document.createElement('span');
+      ours.setAttribute('data-testid', DEADHEAD_TESTID);
+      ours.setAttribute('title', 'Deadhead to ' + activeCity.name + ' (Torren Relay)');
+      ours.style.font = 'inherit';
+      ours.style.color = 'inherit';
+      ours.textContent = formatMiles(miles);
+
+      var hadInline = !!(valueEl.style.display && valueEl.style.display.length);
+      _deadheadPatched.push({
+        valueEl: valueEl, hadInline: hadInline, prevDisplay: valueEl.style.display, ourEl: ours
+      });
+
+      // Rule 4: hide with display only. The node stays, its text is never touched.
+      valueEl.parentNode.insertBefore(ours, valueEl);
+      valueEl.style.display = 'none';
+      replaced++;
+    }
+    if (replaced > 0) {
+      logger.log('cityAssign', 'CITY DEADHEAD  ' + activeCity.name + ' — replaced ' + replaced +
+        ' multi-city value(s)  |  left alone: ' + singleCity + ' single-city, ' +
+        noCoords + ' without coordinates, ' + noNode + ' with no deadhead node');
+    }
+    return { replaced: replaced, singleCity: singleCity, noCoords: noCoords, noNode: noNode };
+  } catch (e) {
+    logger.error('cityAssign', 'applyCityDeadheads failed — restoring Amazon values', { error: e });
+    restoreDeadheads();
+    return { replaced: 0, error: true };
+  }
+}
+
+// Matches Amazon's own formatting: one decimal place and " mi", e.g. "33.9 mi".
+function formatMiles(miles) {
+  var n = Math.round(miles * 10) / 10;
+  return n.toFixed(1) + ' mi';
 }
 
 // Undoes every hide we performed, exactly. Also sweeps the main list for a stray display:none
@@ -878,7 +1174,10 @@ function applyCityFilter(cityKey) {
     }
 
     // ALWAYS restore first: guarantees no residue, and re-applies cleanly onto re-rendered nodes.
+    // The deadhead substitution restores here too — BEFORE the new city is applied, so switching
+    // from HEBRON to COLUMBUS can never leave Hebron's number on a card (rule 5).
     restoreAllCards();
+    restoreDeadheads();
     _cityFilterActive = (cityKey === undefined || cityKey === null) ? null : String(cityKey);
 
     if (_cityFilterActive === null) {
@@ -888,15 +1187,34 @@ function applyCityFilter(cityKey) {
 
     var cards = readMainCardElements();
     var hidden = 0, shown = 0, unassignedShown = 0;
+    var shownCards = [];       // the cards left VISIBLE, for the deadhead substitution below
     for (var i = 0; i < cards.length; i++) {
       var assigned = Object.prototype.hasOwnProperty.call(_cityAssignByCard, cards[i].id)
         ? _cityAssignByCard[cards[i].id] : null;
 
-      if (assigned === null || assigned === undefined) {
-        unassignedShown++;                   // rule 2: never hide what we could not assign
-        continue;
+      var isUnassigned = !assigned || !assigned.length;
+
+      // THE UNMATCHED VIEW (2026-08-13) inverts the test: show only what we could NOT place, so
+      // Ihor can look at the misses instead of just counting them. Everything else about the
+      // filter is identical — display-only hiding, the same restore list, the same re-apply.
+      if (_cityFilterActive === CITY_FILTER_UNMATCHED) {
+        if (isUnassigned) { shown++; continue; }
+        // fall through to hide the assigned ones
+      } else {
+        // `assigned` is the SET of cities this card is in range of. An empty or missing set
+        // means unassigned.
+        if (isUnassigned) {
+          unassignedShown++;                 // rule 2: never hide what we could not assign
+          continue;
+        }
+        // Shown when the active city is ONE OF the card's cities — a load in range of two cities
+        // appears under both.
+        if (assigned.indexOf(_cityFilterActive) !== -1) {
+          shown++;
+          shownCards.push(cards[i]);
+          continue;
+        }
       }
-      if (assigned === _cityFilterActive) { shown++; continue; }
 
       var el = cards[i].el;
       if (!el || !el.style) continue;
@@ -905,21 +1223,91 @@ function applyCityFilter(cityKey) {
       el.style.display = 'none';
       hidden++;
     }
-    logger.log('cityAssign', 'CITY FILTER  ' + _cityFilterActive +
+    logger.log('cityAssign', 'CITY FILTER  ' +
+      (_cityFilterActive === CITY_FILTER_UNMATCHED ? 'UNMATCHED ONLY' : _cityFilterActive) +
       '  shown: ' + shown + '  hidden: ' + hidden +
       '  unassigned kept visible: ' + unassignedShown + '  of ' + cards.length + ' cards');
+
+    // PER-CITY DEADHEAD, on the cards this filter left visible. Only for a real city — never on
+    // "All" (which returned above) and never in the unmatched view, where there is no active city
+    // to measure to.
+    if (_cityFilterActive !== CITY_FILTER_UNMATCHED) {
+      var activeCoords = _cityCoordCache[_cityFilterActive];
+      if (activeCoords) {
+        applyCityDeadheads(shownCards, {
+          name: _cityFilterActive, lat: activeCoords.lat, lng: activeCoords.lng
+        });
+      } else {
+        logger.log('cityAssign', 'CITY DEADHEAD  skipped — the active city has no coordinates yet');
+      }
+    }
+
+    // A filter change can hide the card an open panel belongs to. A panel over a hidden row is
+    // an orphan, so it goes — checked AFTER the hiding above, so the display values are final.
+    if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('city filter changed');
     return { applied: true, city: _cityFilterActive, hidden: hidden, shown: shown,
              unassignedShown: unassignedShown };
   } catch (e) {
     logger.error('cityAssign', 'applyCityFilter failed — restoring to a visible board', {
       error: e, requested: cityKey
     });
-    // Any failure ends with everything visible. Never leave the board partly hidden.
-    try { restoreAllCards(); _cityFilterActive = null; } catch (e2) {
+    // Any failure ends with everything visible AND every original number back. Never leave the
+    // board partly hidden, and never leave our figure on a card the filter has abandoned.
+    try { restoreAllCards(); restoreDeadheads(); _cityFilterActive = null; } catch (e2) {
       logger.error('cityAssign', 'restore after applyCityFilter failure ALSO failed', { error: e2 });
     }
     return { applied: false, reason: 'error' };
   }
+}
+
+// ── READ-ONLY ACCESSORS for the new-load pipeline (2026-08-13) ────────────────────────────
+//
+// content.js uses these to stay filter-aware: detection still covers every city, but auto-open
+// must never target a card the dispatcher cannot see. Both are pure reads — no DOM, no state.
+
+// The SET of cities a load is in range of this cycle — [] when it could not be assigned.
+//
+// Returns an ARRAY as of 2026-08-13 (was a single city string). A load within range of two
+// selected cities belongs to both, so every consumer must handle more than one: the filter shows
+// it under either, and a new load marks BOTH city buttons.
+//
+// Returns a COPY so a caller cannot corrupt the cycle's own map.
+function citiesOfLoad(loadId) {
+  try {
+    if (!loadId) return [];
+    var v = Object.prototype.hasOwnProperty.call(_cityAssignByCard, loadId)
+      ? _cityAssignByCard[loadId] : null;
+    return (v && v.length) ? v.slice() : [];
+  } catch (e) {
+    logger.error('cityAssign', 'citiesOfLoad failed', { error: e });
+    return [];
+  }
+}
+
+// True only when this load is CURRENTLY hidden by the active filter.
+//
+// Deliberately mirrors applyCityFilter's rule exactly, including the most important part: an
+// UNASSIGNED load is never hidden, so it never counts as hidden here either. If these two ever
+// disagreed, the pipeline would either skip a visible card or open an invisible one.
+function cityFilterHidesLoad(loadId) {
+  try {
+    if (typeof CITY_FILTER_ENABLED === 'undefined' || !CITY_FILTER_ENABLED) return false;
+    if (_cityFilterActive === null) return false;      // showing all
+    var assigned = citiesOfLoad(loadId);
+    // In the unmatched view the test inverts: an ASSIGNED load is the one being hidden.
+    if (_cityFilterActive === CITY_FILTER_UNMATCHED) return assigned.length > 0;
+    if (assigned.length === 0) return false;           // unassigned is always visible
+    // Hidden only when the active city is NOT among the card's cities.
+    return assigned.indexOf(_cityFilterActive) === -1;
+  } catch (e) {
+    logger.error('cityAssign', 'cityFilterHidesLoad failed', { error: e, loadId: !!loadId });
+    return false;                                      // on doubt, treat as visible
+  }
+}
+
+// The city currently being shown, or null for All.
+function getActiveCityFilter() {
+  return _cityFilterActive;
 }
 
 // Called at the end of each cycle so the filter reasserts itself on Amazon's re-rendered nodes.
@@ -933,6 +1321,119 @@ function reapplyCityFilter() {
   } catch (e) {
     logger.error('cityAssign', 'reapplyCityFilter failed', { error: e, active: _cityFilterActive });
   }
+}
+
+// ── ASSIGNMENT CORE ───────────────────────────────────────────────────────────────────────
+//
+// Amazon's own coordinates, joined by work-opportunity id through the merged persistent map.
+// Nothing is parsed out of the card and nothing is geocoded per load: the response already
+// carries stops[0].location.latitude/.longitude for every work opportunity, which was measured
+// at 50/50 on the captures and gave a full 30/30 join live.
+//
+// The only geocoding left is for the ACTIVE ORIGIN CITIES — the filter chips — which are city
+// names and have no coordinates of their own.
+//
+// Fully synchronous: the map and the city coordinates are both in memory, so this is safe to
+// call from a MutationObserver, which is what keeps a re-render from flashing unfiltered.
+function computeAssignment(cards, resolved) {
+  var counts = {}, unmatched = [], assignByCard = {};
+  var unresolved = 0, outOfRange = 0;
+  for (var ri = 0; ri < resolved.length; ri++) counts[resolved[ri].name] = 0;
+
+  for (var k = 0; k < cards.length; k++) {
+    var id = cards[k].id;
+    var pickup = Object.prototype.hasOwnProperty.call(_cityPickupById, id)
+      ? _cityPickupById[id] : null;
+
+    // UNASSIGNED means exactly one thing now: this id has never appeared in any captured
+    // response. It stays out of assignByCard and is therefore never hidden — and it is counted,
+    // because a board full of these is what "the filter looks like it works but does nothing"
+    // actually is. The count reaches the dispatcher on the All button.
+    if (!pickup) {
+      unresolved++;
+      // TWO DIFFERENT PROBLEMS, and the distinction is the point of logging this at all:
+      // "we never saw this load" points at the capture path (a response that landed before
+      // activation, or an endpoint we do not watch), while "Amazon listed it with no position"
+      // points at the data. Ihor cannot report a pattern from a count.
+      unmatched.push({
+        id: id,
+        why: Object.prototype.hasOwnProperty.call(_cityNoCoordIds, id)
+          ? 'seen in a captured response, but it carried no coordinates'
+          : 'id never seen in any captured response'
+      });
+      continue;
+    }
+
+    // RANGE MEMBERSHIP, unchanged: a card belongs to EVERY active city within
+    // CITY_ASSIGN_MAX_MILES, not only the nearest, and the <= boundary includes a load sitting
+    // exactly on the threshold.
+    var inRange = [];
+    var bestDist = Infinity;
+    var nearestName = null;
+    for (var m = 0; m < resolved.length; m++) {
+      var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
+      if (d < bestDist) { bestDist = d; nearestName = resolved[m].name; }
+      if (d <= CITY_ASSIGN_MAX_MILES) inRange.push(resolved[m].name);
+    }
+    if (inRange.length === 0) {
+      // Resolved, and the answer is "no city" — a different thing from unresolved, and NOT
+      // counted as such. It is still never hidden.
+      outOfRange++;
+      unmatched.push({
+        id: id,
+        why: 'nearest city ' + (nearestName || '?') + ' ' + Math.round(bestDist) + ' mi > ' +
+             CITY_ASSIGN_MAX_MILES + ' mi max'
+      });
+      continue;
+    }
+    for (var ci = 0; ci < inRange.length; ci++) counts[inRange[ci]]++;
+    assignByCard[id] = inRange;
+  }
+
+  return { assignByCard: assignByCard, counts: counts, unmatched: unmatched,
+           unresolved: unresolved, outOfRange: outOfRange };
+}
+
+// Distances for a handful of cards, so a dispatcher can check the arithmetic against a map he
+// already knows. Diagnostics only — never feeds a decision.
+function sampleDistances(cards, resolved, howMany) {
+  var out = [];
+  for (var i = 0; i < cards.length && out.length < howMany; i++) {
+    var p = _cityPickupById[cards[i].id];
+    if (!p) continue;
+    var parts = [];
+    for (var m = 0; m < resolved.length; m++) {
+      parts.push(resolved[m].name + ' ' +
+        Math.round(haversineMiles(p.lat, p.lng, resolved[m].lat, resolved[m].lng)) + 'mi');
+    }
+    out.push(cards[i].id.slice(0, 8) + ' @' + p.lat.toFixed(3) + ',' + p.lng.toFixed(3) +
+             ' -> ' + parts.join(', '));
+  }
+  return out;
+}
+
+// The active origin cities, resolved to coordinates. Cached after the first call per city.
+async function resolveActiveCities() {
+  logger.log('cityAssign', 'resolveActiveCities called');
+  var cities = getActiveOriginCities();
+  var resolved = [];
+  for (var ci = 0; ci < cities.length; ci++) {
+    var coords = await resolveCityCoords(cities[ci]);
+    if (!coords) continue;                    // already warned by name inside resolveCityCoords
+    resolved.push({ name: cities[ci], lat: coords.lat, lng: coords.lng });
+  }
+  return { cities: cities, resolved: resolved };
+}
+
+// Same, but cache-only — for the synchronous re-render path.
+function resolveActiveCitiesFromCache() {
+  var cities = getActiveOriginCities();
+  var resolved = [];
+  for (var ci = 0; ci < cities.length; ci++) {
+    var c = _cityCoordCache[cities[ci]];
+    if (c) resolved.push({ name: cities[ci], lat: c.lat, lng: c.lng });
+  }
+  return resolved;
 }
 
 // ── THE CYCLE ─────────────────────────────────────────────────────────────────────────────
@@ -952,25 +1453,43 @@ async function runCityAssignCycle() {
   }
   _cityAssignRunning = true;
   try {
-    var cardIds = readRenderedCardIds();
+    // A lost observer means pagination stops being noticed, silently. Cheap to check, and the
+    // cycle is the natural place — it runs on every refresh.
+    ensureBoardRenderObserver();
+    // Read the cards ONCE — id plus the element the filter will hide. THIS IS THE WORKING SET:
+    // whatever is rendered right now, and nothing else. The coordinates come from the merged
+    // pickup map, keyed by that id.
+    var cards   = readMainCardElements();
+    // Keep the page signature current here too, so a page turn that happens without a mutation
+    // the observer sees (or before it is attached) still registers rather than leaving the
+    // previous page's key in place and suppressing the next real change.
+    _cityPageKey = currentPageKey(cards);
+    var cardIds = [];
+    for (var idi = 0; idi < cards.length; idi++) cardIds.push(cards[idi].id);
     if (cardIds.length === 0) {
       logger.warn('cityAssign', 'no load cards rendered — cycle skipped');
       return;
     }
-    // MAIN-LIST SCOPE CHECK (2026-08-12). THE tell that similar-matches cards are excluded:
-    // the collected count must EQUAL the N the board prints in "Showing 1 - N of N results".
-    // Before the scope fix a 9-result board collected 13. Logged first so it is visible even
-    // if something below throws.
-    var showingN = readShowingTotal();
+    // MAIN-LIST SCOPE CHECK (2026-08-12, premise corrected 2026-08-13). THE tell that
+    // similar-matches cards are excluded: the collected count must not EXCEED the number of
+    // cards the board says are RENDERED. Before the scope fix a 9-result board collected 13.
+    //
+    // It used to compare against the GRAND TOTAL, which is only the same number on a
+    // single-page board — see readShowingCounts(). Logged first so it is visible even if
+    // something below throws.
+    var showing  = readShowingCounts();
+    var rendered = showing.rendered;
     logger.log('cityAssign', 'CITY DIAG 0/5  main-list scope check — collected ' +
-      cardIds.length + ' card(s)  |  board says "of ' +
-      (showingN === null ? '?' : showingN) + ' results"  |  ' +
-      (showingN === null
-        ? 'MATCH: unknown (could not parse the Showing line)'
-        : (cardIds.length === showingN
-            ? 'MATCH: YES — similar-matches cards are excluded'
-            : 'MATCH: NO — collected ' + (cardIds.length > showingN ? 'MORE' : 'FEWER') +
-              ' than the board reports (diff ' + (cardIds.length - showingN) + ')')));
+      cardIds.length + ' card(s)  |  board renders ' +
+      (rendered === null ? '?' : rendered) + ' of ' +
+      (showing.total === null ? '?' : showing.total) + ' total  |  ' +
+      (rendered === null
+        ? 'SCOPE: unknown (no rendered range to compare against) — proceeding'
+        : (cardIds.length <= rendered
+            ? 'SCOPE: OK — collected ' + (cardIds.length === rendered ? 'exactly' : 'no more than') +
+              ' what is rendered, similar-matches cards are excluded'
+            : 'SCOPE: BAD — collected MORE than the board renders (diff +' +
+              (cardIds.length - rendered) + ')')));
 
     // Diagnostics parts 1-3 (2026-08-08). BEFORE the mismatch bail below, so a cycle that stops
     // still leaves the full inventory in the console — that cycle is the most worth diagnosing.
@@ -978,122 +1497,118 @@ async function runCityAssignCycle() {
     // the page or enumerate id-bearing descendants just to print nothing.
     if (cityVerboseDiagnostics()) logBufferInventory(cardIds);
 
-    // A MISMATCHED SET IS NOT USABLE (2026-08-13). If the collected count and the board's N
-    // disagree we are holding the wrong cards — too many (similar-matches leaking back in) or
-    // too few (a card shape we do not match). Either way the per-city counts computed from it
-    // would be wrong, so the cycle stops here rather than publishing a number that looks
-    // authoritative. An unparsed "Showing" line is NOT a mismatch: N is simply unknown, and the
-    // cycle proceeds as it did before this check existed.
-    if (showingN !== null && cardIds.length !== showingN) {
-      logger.warn('cityAssign', 'card count does not match the board — cycle SKIPPED, nothing ' +
-        'may consume a mismatched set', { collected: cardIds.length, boardSays: showingN });
-      return;
+    // THE SCOPE CHECK NO LONGER SKIPS ANYTHING (2026-08-13). It is now pure diagnostics.
+    //
+    // It existed because assignment came from a captured response: one shared id join for the
+    // whole board, so a set containing cards the response did not describe produced wrong
+    // per-city counts, and refusing to publish was the safe move.
+    //
+    // With the DOM as the source that reasoning is gone. Each card carries its OWN origin and is
+    // assigned independently — an extra card cannot corrupt another card's answer. The worst a
+    // miscount can now do is assign a card that should not have been collected, and that card is
+    // in the main list to begin with.
+    //
+    // Meanwhile skipping had become actively harmful, which is what Ihor hit live: on a
+    // "Showing 1 - 50 of 75" board the collected count was 52 against 50 rendered, the cycle
+    // returned, and the filter re-applied the PREVIOUS cycle's map onto a board of different
+    // loads — the Chicago tab showed Tulsa loads. A stale map is far worse than an imperfect
+    // fresh one, because it is silently wrong rather than visibly incomplete.
+    //
+    // So both conditions warn and continue. Nothing here returns.
+    if (rendered === null) {
+      logger.warn('cityAssign', 'could not read a rendered range from the board — proceeding; ' +
+        'the scope check is diagnostics only and never blocks assignment', {
+        collected: cardIds.length, total: showing.total,
+        rawShowingLine: showing.raw === null ? '(no "Showing ... results" line found)' : showing.raw
+      });
+    } else if (cardIds.length > rendered) {
+      logger.warn('cityAssign', 'collected MORE cards than the board renders — proceeding anyway; ' +
+        'each card carries its own origin so an extra card cannot corrupt the others', {
+        collected: cardIds.length, rendered: rendered, total: showing.total,
+        excess: cardIds.length - rendered, rawShowingLine: showing.raw
+      });
     }
     // Raw id samples (2026-08-08). Also before pickBuffer: when overlap is zero there IS no
     // selected response, and this block is precisely what explains why.
     if (cityVerboseDiagnostics()) logIdShapeSamples(cardIds);
 
-    // THE response this cycle matches against — whichever buffered response shares the most ids
-    // with the board right now. This is again the assignment's real source, as it was before
-    // the accumulator existed; pickBuffer's own selection logic is unchanged.
-    //
-    // Null means no buffered response shares a single id with the board. The cycle still runs
-    // and reports every card as unmatched, which is the honest result and keeps one CITY ASSIGN
-    // line per cycle. pickBuffer has already warned with the per-response breakdown.
-    var buf = pickBuffer(cardIds);
-    var pickupById = buf ? buf.byId : {};
-
     // Reused from originCities.js, NOT re-scraped — see getActiveOriginCities() there.
-    var cities = getActiveOriginCities();
-    if (!cities.length) {
+    var active = await resolveActiveCities();
+    if (!active.cities.length) {
       logger.warn('cityAssign', 'no active origin cities available — cycle skipped', {
-        cardCount: cardIds.length
+        cardCount: cards.length
       });
       return;
     }
-
-    // Resolve coordinates. Cached, so this awaits the network only on the first cycle after a
-    // city appears; every later cycle resolves from memory.
-    var resolved = [];
-    for (var ci = 0; ci < cities.length; ci++) {
-      var coords = await resolveCityCoords(cities[ci]);
-      if (!coords) continue;   // already warned by name inside resolveCityCoords
-      resolved.push({ name: cities[ci], lat: coords.lat, lng: coords.lng });
-    }
-    if (resolved.length === 0) {
+    if (active.resolved.length === 0) {
       logger.warn('cityAssign', 'no origin city could be resolved to coordinates — cycle skipped', {
-        cities: cities.length
+        cities: active.cities.length
       });
       return;
     }
+    var resolved = active.resolved;
 
-    var counts = {};
-    for (var ri = 0; ri < resolved.length; ri++) counts[resolved[ri].name] = 0;
-    var unmatched = [];
-    // Per-card assignment for this cycle, rebuilt from scratch. This is the filter's ONLY input;
-    // an id absent from it, or present with null, is treated as unassigned and never hidden.
-    var assignByCard = {};
-
-    for (var k = 0; k < cardIds.length; k++) {
-      var id = cardIds[k];
-      // Reads THIS cycle's response only — no memory of prior cycles. The join key itself is
-      // untouched: still the card's div[id] .id against workOpportunities[].id, as confirmed
-      // at 20/20.
-      var pickup = Object.prototype.hasOwnProperty.call(pickupById, id) ? pickupById[id] : null;
-      if (!pickup) {
-        unmatched.push({
-          id: id,
-          why: (buf && buf.noCoord[id]) ? 'no coord in JSON' : 'id not in any response'
-        });
-        continue;
-      }
-      var bestCity = null;
-      var bestDist = Infinity;
-      for (var m = 0; m < resolved.length; m++) {
-        var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
-        if (d < bestDist) { bestDist = d; bestCity = resolved[m].name; }
-      }
-      // Too far to be credible — counted as unmatched rather than forced onto a city.
-      if (bestDist > CITY_ASSIGN_MAX_MILES) {
-        unmatched.push({
-          id: id,
-          why: 'nearest city ' + Math.round(bestDist) + ' mi > ' + CITY_ASSIGN_MAX_MILES + ' mi max'
-        });
-        continue;
-      }
-      counts[bestCity]++;
-      // Only a card that reached HERE is assigned. Everything that hit a `continue` above stays
-      // out of the map and is therefore never hidden by the filter.
-      assignByCard[id] = bestCity;
-    }
+    // NOTHING IS GEOCODED PER LOAD. Every card's coordinates come from Amazon, already merged
+    // into _cityPickupById as responses arrived. The only await above is for the chips.
+    var result       = computeAssignment(cards, resolved);
+    var counts       = result.counts;
+    var unmatched    = result.unmatched;
+    var assignByCard = result.assignByCard;
 
     // THE line this whole file exists to print.
+    //
+    // These are MEMBERSHIPS, not a partition. Since 2026-08-13 a card belongs to every city it
+    // is within CITY_ASSIGN_MAX_MILES of, so a load shared by two cities is counted in both and
+    // the per-city numbers can sum to MORE than the card count. That is correct, not a
+    // double-count — the line says so explicitly rather than leaving it to look like a bug.
     var parts = [];
+    var membershipTotal = 0;
     for (var pi = 0; pi < resolved.length; pi++) {
       parts.push(resolved[pi].name + ': ' + counts[resolved[pi].name]);
+      membershipTotal += counts[resolved[pi].name];
     }
     parts.push('unmatched: ' + unmatched.length);
-    logger.log('cityAssign', 'CITY ASSIGN  ' + parts.join(' | '));
 
-    // Second line, same gate: WHY each unmatched card was unmatched. Only when there are any —
-    // a clean cycle should not print an empty list.
-    if (unmatched.length > 0) {
-      var detail = [];
-      for (var ui = 0; ui < unmatched.length; ui++) {
-        detail.push(unmatched[ui].id + ' (' + unmatched[ui].why + ')');
-      }
-      logger.log('cityAssign', 'CITY ASSIGN unmatched  ' + detail.join(' | '));
+    // COVERAGE IS THE NUMBER TO READ. resolved/rendered — how many cards the merged map could
+    // answer for at all. This is the line that would have made the HEBRON/COLUMBUS failure
+    // obvious in one glance instead of looking like a working filter: it read 0/N.
+    var resolvedCount = cardIds.length - result.unresolved;
+    logger.log('cityAssign', 'CITY ASSIGN  ' + parts.join(' | ') +
+      '   [coverage ' + resolvedCount + '/' + cardIds.length + ' resolved' +
+      (result.unresolved > 0 ? '  ** ' + result.unresolved + ' NOT IN ANY CAPTURED RESPONSE **' : '') +
+      '  |  ' + result.outOfRange + ' resolved but outside ' + CITY_ASSIGN_MAX_MILES + ' mi' +
+      '  |  ' + membershipTotal + ' memberships — a load in range of 2 cities counts in both, ' +
+      'so the sum may exceed the card count' +
+      '  |  merged map holds ' + _cityPickupOrder.length + ' ids]');
+
+    // Three worked examples, so the arithmetic can be checked against a map by eye.
+    var samples = sampleDistances(cards, resolved, 3);
+    if (samples.length > 0) {
+      logger.log('cityAssign', 'CITY ASSIGN distances  ' + samples.join('   |   '));
     }
 
-    // Diagnostics part 4 + verdict (2026-08-08). Last, because it classifies the unmatched list
-    // the loop above just produced.
-    if (cityVerboseDiagnostics()) logUnmatchedProvenance(unmatched, buf, cardIds);
+    // ONE LINE PER UNMATCHED CARD (2026-08-13). It used to be one joined line capped at 20,
+    // which is unreadable at 50 and silently dropped the rest. These are logger.log, so they
+    // appear only at DEBUG_LEVEL 3 and cost a shipped build nothing.
+    for (var ui = 0; ui < unmatched.length; ui++) {
+      logger.log('cityAssign', 'CITY UNMATCHED  ' + (ui + 1) + '/' + unmatched.length + '  ' +
+        unmatched[ui].id + '  —  ' + unmatched[ui].why);
+    }
+
+    // logUnmatchedProvenance() is NOT called any more. It classified an unmatched card against
+    // the SELECTED BUFFER, and there is no selected buffer any more — the map is merged from all
+    // of them. Left in place with the rest of the capture path; see the dead-weight list.
 
     // Publish this cycle's assignment, then let any active filter reassert itself on the nodes
     // Amazon just re-rendered. Both are no-ops on a normal board: reapplyCityFilter returns
     // immediately unless a filter is active AND the feature flag is on.
     _cityAssignByCard = assignByCard;
+    publishUnassignedCount(result.unresolved);
     reapplyCityFilter();
+    // Last, after the filter has settled: the cards this cycle describes may not be the ones the
+    // open panel belongs to. reapplyCityFilter runs its own check, but only when a filter is
+    // active — this covers the "All" case too.
+    if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('assignment cycle');
   } catch (e) {
     logger.error('cityAssign', 'runCityAssignCycle failed', { error: e });
   } finally {
@@ -1101,6 +1616,229 @@ async function runCityAssignCycle() {
     // and silence the feature for the rest of the session.
     _cityAssignRunning = false;
   }
+}
+
+// ── IMMEDIATE RE-FILTER ON RE-RENDER (2026-08-13) ─────────────────────────────────────────
+//
+// THE FLASH THIS REMOVES: Amazon re-rendered, the fresh nodes carried no display:none, and the
+// filter only re-asserted at the END of the network-triggered cycle — after a 700 ms debounce
+// that each additional response restarted. Every refresh showed the whole board for 1-1.5 s.
+//
+// It could not be fixed before this change because assignment NEEDED the response. Now it does
+// not: the origin is on the card, so a re-render can be filtered from the DOM alone, with no
+// network wait at all.
+//
+// HOW THE RE-RENDER IS DETECTED: a MutationObserver watching childList+subtree. Cards are added
+// and removed, so childList fires; we deliberately do NOT observe attributes, which is what keeps
+// our own work invisible to it — applyCityFilter only writes style.display, an attribute change,
+// so the filter cannot retrigger itself. It observes the main list's PARENT, not the list, because
+// Amazon replaces the list element itself on some renders; the parent survives.
+//
+// Coalesced with requestAnimationFrame: a render arrives as a burst of mutations, and this runs
+// once per frame at most, before the browser paints. That is what makes it flash-free rather than
+// merely fast.
+var _cityRenderObserver = null;
+var _cityRenderFrame    = null;
+var _cityRenderTarget   = null;   // the node the observer is attached to, for re-attach checks
+
+// ── THE RENDERED PAGE IS THE WORKING SET (2026-08-13, Ihor's rule) ────────────────────────
+//
+// Work only with the loads currently rendered. "Showing 1 - 50 of 145" means we assign and
+// filter those 50 and nothing else; when he clicks page 2, the new 50 become the working set.
+// We never try to hold or filter loads that are not on screen, and we never drive Amazon's page
+// controls — he changes pages, we react.
+//
+// HOW A PAGE CHANGE IS DETECTED: the identity of the working set, not a click on a control.
+// Two independent signals, combined:
+//
+//   1. The RANGE in the "Showing 51 - 100 of 145" line. This is the reliable one and it is
+//      text-anchored, not css-<hash> — see AMAZON_SELECTORS.md. It distinguishes page 2 from
+//      page 1 even though both render 50 cards, which a count alone cannot.
+//   2. The FIRST AND LAST rendered card ids. This catches a page change on a board that prints
+//      no range at all, and catches Amazon re-rendering different loads into the same range.
+//
+// Deliberately NOT the pagination buttons: they are unlabelled and hash-classed, and reacting to
+// a click would race the render anyway. The signature is read AFTER the DOM has changed, so it
+// describes what is actually on screen.
+var _cityPageKey = null;
+
+function currentPageKey(cards) {
+  try {
+    var showing = readShowingCounts();
+    var range = (showing.from !== null && showing.to !== null)
+      ? (showing.from + '-' + showing.to) : '?';
+    var first = (cards && cards.length) ? cards[0].id : '-';
+    var last  = (cards && cards.length) ? cards[cards.length - 1].id : '-';
+    return range + '|' + (cards ? cards.length : 0) + '|' + first + '|' + last;
+  } catch (e) {
+    logger.error('cityAssign', 'currentPageKey failed', { error: e });
+    return null;
+  }
+}
+
+function onBoardRerender() {
+  logger.log('cityAssign', 'onBoardRerender called');
+  try {
+    // FIRST, AND BEFORE EVERY EARLY RETURN BELOW (2026-08-13). This observer is the only thing
+    // that sees Amazon swap a saved-search tab, and the inline panel leaking across those tabs
+    // was a separate bug from filtering — it happened with the filter on "All" too. So the
+    // anchor check must not sit behind the filter's own guards.
+    if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('board re-render');
+
+    // PAGE CHANGE IS CHECKED BEFORE THE FILTER GUARDS, so it is noticed even on "All". Reading
+    // the cards is the only cost, and the observer already fired because the DOM changed.
+    var cards   = readMainCardElements();
+    var pageKey = currentPageKey(cards);
+    var pageChanged = (pageKey !== null && pageKey !== _cityPageKey);
+    if (pageChanged) {
+      logger.log('cityAssign', 'CITY PAGE  working set changed — ' + cards.length +
+        ' card(s) now rendered  [' + _cityPageKey + '  ->  ' + pageKey + ']');
+      _cityPageKey = pageKey;
+    }
+
+    if (typeof CITY_FILTER_ENABLED === 'undefined' || !CITY_FILTER_ENABLED) return;
+    if (_cityFilterActive === null) return;      // nothing to hide; the board is already correct
+
+    // IN-MEMORY ONLY, so this whole path is synchronous and completes inside the frame. An id
+    // the merged map has never seen is simply unassigned for this frame, which means VISIBLE —
+    // never wrongly hidden.
+    var resolved = resolveActiveCitiesFromCache();
+    if (resolved.length === 0) return;            // chips not geocoded yet; the async cycle will
+    if (cards.length === 0) return;
+    var result = computeAssignment(cards, resolved);
+
+    // ON A PAGE CHANGE, REPLACE. Otherwise MERGE.
+    //
+    // The working set IS the rendered page (Ihor's rule), so when the page turns, last page's
+    // answers must not linger in the map — that is how a load from another city ended up visible
+    // under a city tab past result 50. On an ordinary re-render the merge still applies: a card
+    // whose id has not arrived in a response yet would otherwise lose an assignment it already
+    // had and flash into view.
+    //
+    // The COORDINATES are not touched either way. _cityPickupById persists across pages, so
+    // going back to page 1 re-assigns instantly from memory with no new request (requirement 3).
+    if (pageChanged) {
+      _cityAssignByCard = result.assignByCard;
+    } else {
+      var merged = {};
+      for (var oldId in _cityAssignByCard) {
+        if (Object.prototype.hasOwnProperty.call(_cityAssignByCard, oldId)) {
+          merged[oldId] = _cityAssignByCard[oldId];
+        }
+      }
+      for (var newId in result.assignByCard) {
+        if (Object.prototype.hasOwnProperty.call(result.assignByCard, newId)) {
+          merged[newId] = result.assignByCard[newId];
+        }
+      }
+      _cityAssignByCard = merged;
+    }
+    publishUnassignedCount(result.unresolved);
+    reapplyCityFilter();
+
+    logger.log('cityAssign', 'CITY REFILTER  ' + (pageChanged ? 'PAGE CHANGE' : 're-render') +
+      ' filtered in-frame — ' + cards.length + ' card(s), coverage ' +
+      (cards.length - result.unresolved) + '/' + cards.length);
+
+    // Ids we have never seen: a response for them may still be in flight, so ask for a cycle.
+    if (result.unresolved > 0) scheduleCityAssignCycle();
+  } catch (e) {
+    logger.error('cityAssign', 'onBoardRerender failed — leaving the board as it is', { error: e });
+  }
+}
+
+function startBoardRenderObserver() {
+  logger.log('cityAssign', 'startBoardRenderObserver called');
+  try {
+    if (_cityRenderObserver) return;
+    if (typeof MutationObserver !== 'function') {
+      logger.warn('cityAssign', 'MutationObserver unavailable — re-renders will only be filtered ' +
+        'by the debounced cycle, i.e. with the old delay');
+      return;
+    }
+    var list = findMainResultsList();
+    // The list's parent survives a list replacement; document.body is the fallback so a board
+    // that has not rendered yet still gets watched.
+    var target = (list && list.parentElement) ? list.parentElement : document.body;
+    if (!target) return;
+
+    _cityRenderObserver = new MutationObserver(function () {
+      if (_cityRenderFrame !== null) return;               // already scheduled for this frame
+      var raf = (typeof requestAnimationFrame === 'function')
+        ? requestAnimationFrame
+        : function (fn) { return setTimeout(fn, 0); };     // jsdom / headless fallback
+      _cityRenderFrame = raf(function () {
+        _cityRenderFrame = null;
+        onBoardRerender();
+      });
+    });
+    _cityRenderObserver.observe(target, { childList: true, subtree: true });
+    _cityRenderTarget = target;
+    logger.log('cityAssign', 'board render observer active', { onBody: target === document.body });
+  } catch (e) {
+    logger.error('cityAssign', 'startBoardRenderObserver failed', { error: e });
+  }
+}
+
+// Re-attaches the observer if the node it was watching has been detached.
+//
+// The observer sits on the results list's PARENT, chosen because it survives the list itself
+// being replaced. A page change is a bigger re-render, and there is no guarantee the parent
+// survives it — if it does not, the observer is left watching an orphan and pagination stops
+// being noticed at all, which is silent and would look exactly like the bug this task fixes.
+// Called from the cycle, so a lost observer is recovered within one refresh at worst.
+function ensureBoardRenderObserver() {
+  try {
+    if (!_cityRenderObserver) { startBoardRenderObserver(); return; }
+    if (!_cityRenderTarget) return;
+    var attached = (typeof document.contains === 'function')
+      ? document.contains(_cityRenderTarget)
+      : true;                                   // cannot tell -> leave it alone
+    if (attached) return;
+    logger.log('cityAssign', 'render observer was watching a detached node — re-attaching');
+    stopBoardRenderObserver();
+    startBoardRenderObserver();
+  } catch (e) {
+    logger.error('cityAssign', 'ensureBoardRenderObserver failed', { error: e });
+  }
+}
+
+function stopBoardRenderObserver() {
+  logger.log('cityAssign', 'stopBoardRenderObserver called');
+  try {
+    if (_cityRenderFrame !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(_cityRenderFrame);
+      else clearTimeout(_cityRenderFrame);
+      _cityRenderFrame = null;
+    }
+    if (_cityRenderObserver) {
+      _cityRenderObserver.disconnect();
+      _cityRenderObserver = null;
+    }
+    _cityRenderTarget = null;
+  } catch (e) {
+    logger.error('cityAssign', 'stopBoardRenderObserver failed', { error: e });
+  }
+}
+
+// Hands the unassigned count to the panel. Kept behind a typeof check so cityAssign never
+// depends on originCities having loaded — the filter must work with or without the badge.
+function publishUnassignedCount(n) {
+  try {
+    if (typeof markUnassignedLoads === 'function') markUnassignedLoads(n);
+  } catch (e) {
+    logger.error('cityAssign', 'publishUnassignedCount failed', { error: e, count: n });
+  }
+}
+
+// The debounced async cycle, as a named function so both the network message and the re-render
+// path can ask for one.
+function scheduleCityAssignCycle() {
+  if (_cityAssignTimer !== null) clearTimeout(_cityAssignTimer);
+  _cityAssignTimer = setTimeout(function () {
+    _cityAssignTimer = null;
+    runCityAssignCycle();
+  }, CITY_ASSIGN_SETTLE_MS);
 }
 
 // ── PLUMBING ──────────────────────────────────────────────────────────────────────────────
@@ -1128,7 +1866,13 @@ function onCityCoordsMessage(ev) {
     // request, and the origin-city set changes during the normal staged load of the SAME search.
     var noCoord = {};
     var nc = data.noCoordIds || [];
-    for (var j = 0; j < nc.length; j++) noCoord[nc[j]] = true;
+    for (var j = 0; j < nc.length; j++) {
+      noCoord[nc[j]] = true;
+      // Persisted alongside the pickup map so an unmatched card can be told apart from one we
+      // simply never saw. Bounded by the same reasoning: it only ever holds ids a response
+      // actually listed, and teardown clears it.
+      _cityNoCoordIds[nc[j]] = true;
+    }
 
     _cityAssignBuffers.push({
       endpoint: data.endpoint, byId: byId, noCoord: noCoord,
@@ -1158,13 +1902,15 @@ function onCityCoordsMessage(ev) {
       withoutCoords: nc.length, woCount: data.woCount, buffers: _cityAssignBuffers.length,
     });
 
-    // Debounce rather than run now: the cards this response describes are not rendered yet, and
-    // one refresh can deliver several responses. One cycle per settled refresh.
-    if (_cityAssignTimer !== null) clearTimeout(_cityAssignTimer);
-    _cityAssignTimer = setTimeout(function () {
-      _cityAssignTimer = null;
-      runCityAssignCycle();
-    }, CITY_ASSIGN_SETTLE_MS);
+    // MERGE INTO THE PERSISTENT MAP — this is assignment's input again, and the merge is the
+    // whole fix: every response contributes, none is discarded by a vote, and what earlier
+    // responses taught us survives.
+    var addedNow = mergePickupCoords(pairs);
+    logger.log('cityAssign', 'CITY MERGE  +' + addedNow + ' new id(s) from this ' +
+      data.endpoint + ' response; merged map now holds ' + _cityPickupOrder.length +
+      ' of a possible ' + CITY_PICKUP_MAX);
+
+    scheduleCityAssignCycle();
   } catch (e) {
     logger.error('cityAssign', 'onCityCoordsMessage failed', { error: e });
   }
@@ -1238,8 +1984,20 @@ function initCityAssign() {
     // is on, at DEBUG_LEVEL 1 with both debug flags off.
     if (!cityAssignEnabled()) return;
     if (_cityAssignListener) return;  // idempotent: activation can be re-entered
+    // The capture listener STAYS (2026-08-13) — the response path is kept intact, it simply no
+    // longer feeds assignment. All it does now is buffer and log.
     _cityAssignListener = onCityCoordsMessage;
     window.addEventListener('message', _cityAssignListener);
+
+    // Watches for Amazon re-rendering the board, so the filter re-asserts in the same frame
+    // instead of 700 ms later. This is what removes the un-filtered flash.
+    startBoardRenderObserver();
+
+    // ASSIGNMENT NO LONGER WAITS FOR A RESPONSE (2026-08-13). The board is usually already
+    // rendered when the extension activates, and nothing else would trigger a first cycle now
+    // that the network message is not the source. Without this, a dispatcher who activated on an
+    // already-loaded board saw nothing assigned until the next refresh.
+    scheduleCityAssignCycle();
 
     // The two DIAGNOSTIC receivers stay debug-only — they exist to log, and a shipped build has
     // nothing to log. Not registering them also means their messages are never even inspected.
@@ -1282,6 +2040,9 @@ function teardownCityAssign() {
       clearTimeout(_cityAssignTimer);
       _cityAssignTimer = null;
     }
+    // Same reason as the message listener: a logged-out page must be left with no live observer
+    // of ours on it, and no pending animation frame.
+    stopBoardRenderObserver();
     // deactivateExtensionUI() runs on logout, so a different dispatcher signing in on the same
     // browser profile can never inherit the previous one's load ids or coordinates. With the
     // accumulator gone the only id-bearing state left is the response buffer, which is dropped
@@ -1291,12 +2052,25 @@ function teardownCityAssign() {
     // board with no extension running to un-filter it. Deliberately FIRST — if anything below
     // were to throw, the board is already restored.
     restoreAllCards();
+    // And every deadhead we substituted. A logged-out page must show Amazon's own numbers, not a
+    // frozen figure from a session that no longer exists — same reasoning as un-hiding the cards.
+    restoreDeadheads();
     _cityFilterActive = null;
     _cityAssignByCard = {};
 
     _cityAssignBuffers = [];
     _cityCoordCache    = {};
     _cityAssignRunning = false;
+    // The merged pickup map is load data keyed by work-opportunity id. teardownCityAssign runs
+    // from deactivateExtensionUI, i.e. on LOGOUT — so a different dispatcher signing in on the
+    // same profile can never inherit the previous one's loads or their coordinates.
+    _cityPickupById  = {};
+    _cityPickupOrder = [];
+    _cityNoCoordIds  = {};
+    // The page signature too, so a re-activation treats the first board it sees as a new working
+    // set rather than matching a key left over from the previous session.
+    _cityPageKey     = null;
+    publishUnassignedCount(0);
   } catch (e) {
     logger.error('cityAssign', 'teardownCityAssign failed', { error: e });
   }

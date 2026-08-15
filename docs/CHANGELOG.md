@@ -2,6 +2,780 @@
 
 ## [Unreleased]
 
+### 2026-08-14 — Cosmetic pass: one merged bar, draggable, reserved badge slots, active-only highlight
+
+**Files:** `content/originCities.js`, `content/sidebar.js`, `content/content.js` (teardown only).
+UI only — no assignment, filtering, detection, alert, auto-switch, deadhead, START/STOP or PAT
+logic was touched.
+
+**1. MERGED INTO ONE ELEMENT.** The city panel was a separately positioned floating panel:
+`position:fixed`, its own z-index, and a `requestAnimationFrame` loop measuring Amazon's
+"Showing N results" row **on every frame** to sit under it. It overlapped Amazon's own filter
+controls and appeared on every Relay page, Trips included. It is now the **second row of
+`#ext-sidebar`** — no position, no z-index, no follow loop; the bar owns all of it.
+
+It **refuses to inject when the bar is absent** rather than falling back to `document.body`,
+which would resurrect the floating panel this change exists to remove.
+
+**Load board only.** New `isLoadBoardPage()` keys off the board's own DOM — the results summary
+panel, the results list, or Amazon's "Origin city:" chips — not a URL path. The board's route is
+not recorded anywhere on disk, and guessing it risks hiding the row on the one page it belongs to.
+On doubt it returns false: an absent row beats a row on Trips. The row also carries
+`data-empty="true"` when there is nothing to show, which `display:none`s it so the bar never
+grows a blank strip.
+
+**Dead and removed** — 165 lines: `positionOriginPanel()`, `startOriginFollowLoop()`,
+`stopOriginFollowLoop()`, `findAnchorElement()`, `getAnchorElement()`, `findAnchorRow()`,
+`applyOriginPosition()`, and 14 declarations (`ORIGIN_ANCHOR_RE`, `ORIGIN_ANCHOR_GAP_PX`,
+`ORIGIN_BELOW_GAP_PX`, `ORIGIN_MIN_RIGHT_SPACE_PX`, `ORIGIN_MOVE_EPSILON_PX`,
+`ORIGIN_FALLBACK_TOP_PX`, `ORIGIN_FALLBACK_LEFT_PX`, `_originAnchorEl`, `_originRafId`,
+`_originLastTop`, `_originLastLeft`, `_originLastMode`, `_originHasMeasured`,
+`_originHoldLogged`). **Their teardown assignments went too** — this file is not in strict mode,
+so leaving `_originAnchorEl = null` behind would have created a **global on `window`**, silently,
+on every logout.
+
+**2. DRAGGABLE, WITH A WAY BACK.** The bar is its own handle. Position persists
+(`extSidebarPos`); **double-click snaps it back** to docked and clears the stored position, so a
+reload stays docked. Clamped on both the way out and the way in — a window smaller than when the
+position was saved would otherwise restore the bar off-screen, where it could not be
+double-clicked back.
+
+**A drag must not click.** The bar's controls are click-driven, so without a threshold the
+`pointerup` ending a drag fires whatever is under the cursor — dragging by the "All" button would
+clear the filter. Below `SIDEBAR_DRAG_SLOP_PX` (4) the gesture is a click and nothing moves; above
+it, exactly one following click is swallowed. A press that *starts* on a control never drags at
+all. Move/up listen on **window**, since the pointer routinely leaves the bar mid-drag — so
+teardown removes them explicitly; removing the element cannot.
+
+**3. RESERVED BADGE SLOTS.** The badge used to be appended and removed, which changed the button's
+width every time a load arrived and shifted the row under the cursor. Every city button and the
+"All" button now carry the slot permanently; it goes **transparent** when empty (a zero-width
+space keeps its line box). Asserted directly: no child is added to any button when a count
+arrives. At zero the All slot also drops `role` and `tabindex`, so it cannot be tabbed to or
+clicked.
+
+**4. HIGHLIGHT ONLY THE ACTIVE BUTTON.** The `data-hasnew` and `data-hasunassigned` **border rules
+are gone**. Background and border now belong to the active button alone; pending loads are the
+badge's job. `data-hasnew` survives as a hook but draws nothing.
+
+**Tests.** New `merged-suite` (69 checks). **1073 green, 0 red.**
+
+Four suites needed a `#ext-sidebar` host — production correctly refuses without one. Badge-count
+assertions across three suites moved from "how many badges exist" to "how many are filled", which
+is the reserved-slot change. Four of my own assertions were matching **comments**: the file header
+names two `css-<hash>` classes to explain why they are avoided, and two comments mention
+`innerHTML` to say it is never used.
+
+**A NUL byte was also removed from `unmatched-suite.mjs`** — my own "no NUL byte in the source"
+assertion had been written with a literal NUL inside the regex.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — Per-city deadhead on multi-city loads
+
+**File:** `content/cityAssign.js`.
+
+**The problem.** Amazon's deadhead is ONE value per load — the distance to the **nearest** of the
+five origin cities in the search. A load 5 mi from HEBRON, KY still printed "5 mi" on the
+COLUMBUS, OH tab, where it is ~100 mi away. One DOM node, one number; the filter only hid and
+showed the card around it.
+
+**REPORTED FIRST, because it gates the task: there is NO per-origin-city deadhead in the payload.**
+`deadhead` is a single `{value, unit}` scalar on every work opportunity in every capture on disk —
+204 distinct key paths scanned, nothing keyed by city, nothing array-shaped. So the per-city figure
+has to be computed; there is no Amazon figure to prefer.
+
+**Ihor's premise also checked, not taken on faith.** Across the 50-load five-city capture, Amazon's
+deadhead is **lower** than a straight-line measurement on **42 of 50** loads. Road distance can
+never be shorter than a straight line, so it cannot be road miles — the small residual (mean −1 mi,
+max 4.1) is Amazon measuring from its own city-centre point rather than ours. Our figure is
+therefore directly comparable, and no "approximate" caveat is needed.
+
+**What it does.** With a specific city tab active, for each visible card belonging to **2+** active
+cities: Amazon's value is hidden and our distance from the card's pickup coordinates to the
+**active** city is shown, using the same haversine and the same coordinates assignment uses.
+
+**Exactly as specified:** replace, never append — one number on the card. **Single-membership loads
+are untouched**, because Amazon's number already *is* that city's distance and substituting would
+add error for nothing. **Nothing at all on "All"**, and nothing in the unmatched view, where there
+is no active city to measure to. **Unknown coordinates leave the card alone.** No sorting, no
+reordering.
+
+**The anchor is `span[title="Deadhead"]`** — derived from `samples/paired-card.html`, where it
+occurs exactly once and the value is its `previousElementSibling`. A title attribute, not a
+`css-<hash>`.
+
+**Hidden with `style.display` only; the node stays and its text is never written.** Ours is
+inserted with `textContent`, `data-testid="ext-city-deadhead"`, and `font`/`color: inherit` so it
+carries the same size, weight and colour as the value it stands in for — no hardcoded colour, no
+hash class copied, and the card does not look edited.
+
+**Restore is exact and total** — on city switch (before the new city is applied), "All", the
+unmatched view, refresh re-render, teardown, logout, deactivate, and the `applyCityFilter` failure
+path. Plus an orphan sweep for a node left behind by an extension reload, which also un-hides the
+sibling so a card can never be left with **no** number at all. A test asserts that after every one
+of those, no card carries our node and no value is left hidden.
+
+**Unchanged:** assignment, hide/show mechanics, detection, alert, auto-switch, PAT, START/STOP.
+
+**Tests.** New `deadhead-suite` (69 checks). **999 green, 0 red.**
+
+**⚠ Five long-standing invariant guards were NARROWED, not loosened.** They asserted that
+`cityAssign` never touches DOM structure and never writes a non-`display` style — true until this
+task, which inserts a node for the first time. They now assert the invariant that actually protects
+the board: **every `insertBefore`/`removeChild` names our own element, no card is removed or
+reordered, and the only style written to an AMAZON node is `display`.** Both are computed from the
+source rather than pattern-matched, so a future non-display write on an Amazon node still fails.
+
+Two fixture gaps found: `previousElementSibling` did not exist, and `makeCityAssignSandbox`'s
+document had no `createElement` — so every insertion threw, and the `try/catch` turned it into a
+silent "failed, restoring" that looked like a product bug. My own test geometry was also wrong: it
+put the shared load exactly midway between the two cities and then asserted the two distances
+differ, which is impossible by construction.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — Capture /recommendations/get: the "Recently added" loads were the unassigned ones
+
+**Files:** `content/networkObserver.js` (the path + one label helper), `content/cityAssign.js`
+(buffer cap only).
+
+**The find.** `https://relay.amazon.com/api/loadboard/recommendations/get` — 200, ~19 kB, fetch.
+The observer was already **seeing** it and throwing it away, because `CAPTURE_PATHS` held only
+`/search` and `/similar`. It is the source of the **"Recently added"** cards, which is why the
+newest loads — the entire point of this extension — were exactly the ones reporting
+`id never seen in any captured response`, left unassigned and unfilterable.
+
+**Same body shape as `/search`, confirmed against a real capture:** `searchAuditId`,
+`workOpportunities[].id`, and `workOpportunities[].loads[0].stops[0].location.latitude` /
+`.longitude`, with `stops[0].stopType === "PICKUP"` — so the existing `stops[0]` rule holds and
+the extractor needed **no** special case. A test feeds the identical body through both the
+recommendations and the search URL and asserts the emitted pairs are byte-identical, differing
+only in the label.
+
+**`WATCH_PATH` is untouched, deliberately.** Rate-limit reporting stays search-only; widening it
+would start feeding recommendations failures into `background.js`'s backoff. Four assertions now
+pin that separation.
+
+**New `endpointLabel(url)`** replaces the two inline ternaries, so `recommendations` / `similar` /
+`search` are distinguishable in `CITY ENDPOINT SHAPE` and `CITY MERGE`. Its ids and coordinates
+merge into the same `id -> {lat,lng}` map as everything else — **assignment has no idea which
+endpoint a coordinate came from**, and a test asserts no endpoint string appears anywhere in
+`computeAssignment`.
+
+**The buffer bound — checked, not assumed.** `mergePickupCoords()` runs inside
+`onCityCoordsMessage`, i.e. the moment a response *arrives*, so its coordinates are in the
+persistent map before the buffer array is ever trimmed. Every remaining reader of that array is
+either `pickBuffer()` (defined, never called) or a `CITY_ASSIGN_DEBUG`-only diagnostic.
+**Eviction cannot cost an assignment** — proven by a test that floods 12 responses past the cap and
+confirms the original cards are still assigned.
+
+Raised **4 → 6** anyway, for the diagnostic's sake: a refresh now delivers three responses, so a
+cap of 4 could not hold even one complete refresh and the inventory would show a torn picture of
+what arrived together.
+
+**Unchanged:** assignment rules, hide/show, detection, alert, auto-switch, PAT.
+
+**Tests.** New `recommendations-suite` (58 checks), driving the real `networkObserver.js`.
+**927 green, 0 red.**
+
+Four assertions elsewhere pinned the old constants. Three were the buffer cap. The fourth was
+`capture-suite`'s **"CAPTURE_PATHS unchanged"** — a guard written to catch capture scope widening
+by accident. It did its job: this widening was deliberate, so it is rewritten to assert the list
+holds **exactly** these three and that the watch path stays separate, rather than being deleted.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — The rendered page is the working set
+
+**File:** `content/cityAssign.js`.
+
+**Ihor's rule, adopted:** work only with the loads currently rendered. "Showing 1 - 50 of 145"
+means we assign and filter those 50 and nothing else; clicking page 2 makes the new 50 the working
+set. We never hold or filter loads that are not on screen, and we never drive Amazon's page
+controls — he changes pages, we react.
+
+**Why it degraded past 50.** Assignment was already per-cycle over the rendered cards, but the
+re-render path **merged** its result into the existing map. On a page turn last page's answers
+therefore lingered, and a card that page 2 did not contain kept an assignment from page 1 — so
+under a city tab, loads from other cities stayed visible. The merge is right for an ordinary
+re-render and wrong for a page change; the fix is to tell them apart.
+
+**How a page change is detected — the identity of the working set, not a click.** Two signals
+combined into `_cityPageKey`:
+
+1. **The range** in the "Showing 51 - 100 of 145" line. Text-anchored, never `css-<hash>`. This is
+   what distinguishes page 2 from page 1 when both render 50 cards — a count alone cannot.
+2. **The first and last rendered card ids.** Catches a board that prints no range, and catches
+   Amazon re-rendering different loads into the same range.
+
+Read **after** the DOM changes, so it describes what is actually on screen. The pagination buttons
+are deliberately not touched: they are unlabelled and hash-classed, and reacting to a click would
+race the render anyway.
+
+**On a page change the assignment map is REPLACED; on an ordinary re-render it still merges.**
+The coordinate map `_cityPickupById` is untouched either way, so **returning to page 1 re-filters
+instantly from memory with no new request** — verified by a test that asserts zero merges occur on
+the way back.
+
+**Also fixed:** the render observer watches the results list's *parent*, and there is no guarantee
+that survives a page-level re-render. If it is left watching a detached node, pagination stops
+being noticed **silently** — which would look exactly like the bug being fixed here.
+`ensureBoardRenderObserver()` re-attaches, called from the cycle so a lost observer is recovered
+within one refresh.
+
+**REPORTED, from the captures on disk — not assumed.** Every captured `/search` response carries
+**at most 50** work opportunities, `nextItemToken` equals the records delivered (a cursor, not a
+total), and `totalResultsSize` far exceeds it (338, 232, 145, 104). **One response covers ONE page,
+never several.** So page 2 is assignable only if its own request is captured — which it is, since
+it hits the same `/api/loadboard/search` path the hook already watches. The consequence worth
+knowing: a page whose response arrived **before the extension activated** has no coordinates until
+a refresh, and those cards show in the unmatched badge rather than being silently mis-filtered.
+
+**Unchanged:** hide/show mechanics, unassigned-always-visible, similar-matches, detection,
+highlight, alert, auto-switch, START/STOP, PAT.
+
+**Tests.** New `pagination-suite` (59 checks) over a 145-load, three-page board. **868 green,
+0 red.**
+
+The suite's first run measured nothing: it did not load `originCities.js`, so every cycle threw a
+`ReferenceError` on `getActiveOriginCities` that the try/catch turned into a silent "cycle failed".
+Traced before any assertion was touched.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — The unmatched-loads count becomes a filter you can click
+
+**Files:** `content/cityAssign.js`, `content/originCities.js`.
+
+Ihor could see **that** three loads were unmatched but not **which**, so he could neither judge
+whether the miss mattered nor report a pattern.
+
+**The badge on "All" is now a toggle.** Clicking shows only the loads that could not be matched
+to a city; clicking again returns to **the state he was in**, not to All — the previous filter is
+captured on entry.
+
+**Implemented as a third filter state, not a second mechanism.** `_cityFilterActive` already held
+either `null` (All) or a city name; it now also accepts the sentinel `CITY_FILTER_UNMATCHED`, and
+`applyCityFilter` simply inverts its test. Everything that already worked keeps working with no
+changes: display-only hiding, the same restore list, re-apply after refresh, full restore on
+teardown, similar-matches untouched, and the panel-anchor check.
+
+**The active state reuses the city pill's exact treatment** — `--ext-accent-bg` +
+`--ext-accent-text` with an `--ext-accent` border, measured 5.80:1 / 5.43:1 — so "I am filtered"
+reads the same wherever the filter came from. The badge inverts to stay legible on the now-accent
+button. No new colours. "All" **stops** being marked active while the view is on: showing both
+would claim the board is unfiltered while it hides most of it.
+
+**At zero the badge is not rendered at all**, so it cannot be clicked. And if the count falls to
+zero *while the view is active* it lets go and returns to the previous filter — otherwise the
+board would be blank with no visible control to click back.
+
+**One log line per unmatched card at DEBUG_LEVEL 3**, `CITY UNMATCHED i/N <id> — <reason>`,
+replacing a single joined line that was capped at 20 and silently dropped the rest. Three distinct
+reasons, and telling the first two apart is new:
+
+| reason | what it points at |
+|---|---|
+| `id never seen in any captured response` | the capture path — a response that landed before activation, or an endpoint we do not watch |
+| `seen in a captured response, but it carried no coordinates` | the data — Amazon listed the load with no position |
+| `nearest city TULSA, OK 1177 mi > 150 mi max` | neither; it is genuinely far away |
+
+Distinguishing them needed a small addition: `_cityNoCoordIds`, populated from the `noCoordIds`
+the emitter already sends, cleared on teardown with everything else.
+
+**Keyboard reachable:** `role="button"`, `tabindex="0"`, Enter and Space. `addEventListener` only.
+The click calls `stopPropagation()` — without it the click falls through to the All button
+underneath and clears the filter instead of applying it.
+
+**Unchanged:** auto-switch, detection, highlight, alert, PAT, START/STOP.
+
+**Tests.** New `unmatched-suite` (73 checks). **809 green, 0 red.**
+
+Seven assertions elsewhere were updated for the two intentional changes here — the log line moving
+to one-per-card, and `applyCityFilter` hoisting `isUnassigned` (same rule, new shape). No product
+behaviour changed under them.
+
+**A NUL byte briefly reached `content/cityAssign.js`.** The sentinel was first written with a
+`U+0000` prefix, which made the file read as binary to grep and every other text tool. Replaced
+with plain ASCII `__EXT_UNMATCHED__`; a test now asserts no NUL survives in the source.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — The inline panel leaked across saved-search tabs
+
+**Files:** `content/inlinePanel.js` (the fix), `content/cityAssign.js` + `content/content.js`
+(three enforcement call sites).
+
+**Symptom, five screenshots.** Switching between CHICAGO / TULSA / HEBRON / JACKSONVILLE /
+TREMONT left the same MDT4 → LEWISTOWN, PA → TREMONT panel in every tab — under a different
+unrelated load in each, and with no card above it at all where the list was shorter. One panel,
+re-inserted, not five.
+
+**DIAGNOSIS**
+
+*What it anchored on:* a **remembered element reference**. `inlinePanel.js:1223` was
+`cardElement.parentNode.insertBefore(panel, cardElement.nextSibling)`, with
+`currentPanelCard = cardElement` at `:1227`. The load id **was** computed at `:1116-1117` — but
+only to key `loadStore`. Nothing tied the panel to it.
+
+*What removed it — the complete list, and what actually fired on a tab switch:*
+
+| path | fires on a tab switch? |
+|---|---|
+| `content.js:212` `clearPipelineDom()` → `removeInlinePanel()`, from the seven `shouldContinue()`-failing checkpoints in `runDetectionPipeline` | **No** — only when the auth gate closes or `running` goes false |
+| `content.js:631` `deactivateExtensionUI()` | **No** — logout only |
+| `inlinePanel.js:1273` toggle-off (clicking the same card again) | **No** |
+| `showInlinePanel:1105` removes the old panel before inserting a new one | **No** — only when another panel opens |
+
+So **nothing** removed it on a tab switch, a new `/search` render, a filter change, a normal
+refresh cycle, or START/STOP. Only logout, or opening/closing another panel.
+
+*Why it survived into a list without its load:* a tab switch is a **client-side re-render**.
+React reconciles the children it owns; our panel is a node it has never heard of, so it stays at
+its DOM position while the cards around it are replaced — landing under whichever load now
+occupies the adjacent slot, or under nothing. `currentPanelCard` meanwhile pointed at a detached
+node, so even the toggle-off comparison could never match again.
+
+**THE FIX.** The panel carries `data-load-id`, and `enforcePanelAnchor()` removes it whenever
+that id is not present **and visible** in the main results list. A hidden card counts as absent —
+no panel over a row the city filter has hidden. A card in the Similar-matches list is not an
+anchor either.
+
+`showInlinePanel` now **re-resolves the anchor from the id** instead of trusting the reference it
+was handed, and refuses to render at all without one. That also closes a second, quieter version
+of the same bug: on the auto-open path there is an 800 ms settle between the click and the render,
+and a re-render inside it left `cardElement` detached.
+
+**It re-seats rather than always removing.** If the load is still on the board, the panel is moved
+back directly under its own card. Destroying a live panel is its own bug — that is PLAN 7b, and
+this must not reintroduce it.
+
+**Now enforced on:** board re-render (the tab-switch path, placed **before** the filter's early
+returns so it works with "All" selected too), filter change, assignment cycle, and STOP. **START
+now removes our panel outright** — `closePanelsForStart()` only ever closed *Amazon's* detail
+sheet. STOP verifies instead of removing, because stopping is exactly what an auto-open does when
+it opens a panel for review.
+
+**Every one of those paths previously did nothing.**
+
+**Unchanged:** the manual click's stop-the-loop, detection, highlight, alert, the auto-switch, PAT.
+
+**Tests.** New `panelanchor-suite` (46 checks) driving the real `visibleAnchorFor` /
+`enforcePanelAnchor` against a fixture that models React's tab swap. **735 green, 0 red.**
+
+Two fixture stubs had to become real to test this: `insertBefore` and `remove` were mutation
+recorders, so the re-seat appeared to do nothing. `parentNode`, `nextSibling` and `contains` were
+also missing — production reads all three.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — Back to Amazon's own coordinates, with a MERGED, PERSISTENT id map
+
+**Files:** `content/cityAssign.js`, `content/originCities.js` (the counter).
+
+**Reverts the DOM-origin + geocoder approach built earlier today.** It failed live: on the
+HEBRON, KY and COLUMBUS, OH tabs every card came back unassigned, so both tabs showed an
+identical list — which is indistinguishable from a filter that works. The source was never the
+problem. `/search` already carries `workOpportunities[].loads[0].stops[0].location.latitude` and
+`.longitude` for every load; measured **50 of 50** on `paired-search.json`, and it gave a full
+30/30 join live. Nothing is parsed from a card and nothing is geocoded per load any more.
+
+**What actually broke was delivery, and all three parts are fixed:**
+
+1. **`pickBuffer()` chose ONE response and discarded the rest.** Replaced by `_cityPickupById`,
+   a merged `id -> {lat, lng}` map fed by **every** response.
+2. **The buffer held only 4 responses**, so a few refreshes evicted the one describing the board.
+   The merged map now **persists across cycles**, bounded at `CITY_PICKUP_MAX = 4000` ids with
+   oldest-first eviction. A paginated board accumulates coverage as pages arrive.
+3. **The count guard skipped whole cycles**, leaving the *previous* cycle's map applied to a
+   different board. It already stopped skipping earlier today; that stands, and is re-asserted.
+
+**Merging is safe, and it is checked rather than asserted.** The join key is the work-opportunity
+id, which is globally unique — the same id in two responses is the same load. A test reads the six
+captures in `samples/` and measures it: **13 ids appear in more than one response, 13 carry
+identical coordinates, 0 conflict.** If that ever stops being true the suite goes red.
+
+**New: the unassigned counter on the "All" button** (`data-testid="ext-origin-unassigned"`). This
+exists because of how the failure presented — two city tabs showing plausible, identical lists,
+with nothing on screen contradicting it. The number makes it self-announcing: when it equals the
+board size, the filter is speaking for nothing. `--ext-n700` on `--ext-surface`, measured
+**9.93:1 light / 7.22:1 night**. Deliberately not the accent, which the new-load badge beside it
+already uses. There is no warning/danger token in `designTokens.js`, so the dark neutral is the
+honest pick from the palette that exists rather than a new colour.
+
+**The console line to read is `CITY ASSIGN`,** now leading with `coverage N/M resolved` and
+flagging `** n NOT IN ANY CAPTURED RESPONSE **`. A second `CITY ASSIGN distances` line prints
+three worked examples — id, coordinates, and the computed miles to each active city — so the
+arithmetic can be checked against a map by eye.
+
+**Removed:** `readCardOrigin()`, `parseStopCityState()`, `CARD_ORIGIN_SELECTOR` /
+`CARD_ORIGIN_FALLBACK_SELECTOR`, `readMainCardsWithOrigin()`, and the per-load geocode loop.
+`resolveCityCoords()` / `resolvePATCity()` remain — the filter chips are city *names* and have no
+coordinates of their own.
+
+**Now unreachable, kept for a deliberate removal later:** `pickBuffer()`,
+`logUnmatchedProvenance()`, `readRenderedCardIds()`, `logBufferInventory()`, and the raw
+`_cityAssignBuffers` store with `CITY_ASSIGN_MAX_BUFFERS`. The buffers are still filled — they
+are diagnostics now, not input.
+
+**One deviation from the brief, stated plainly.** The brief says a card is unassigned only when
+its id "has never appeared in any captured response". An id that appears **with no coordinates**
+(`noCoordIds`) also cannot be placed, and assignment cannot tell the two apart — neither has a
+position. Both therefore read as `id not in any captured response`. Measured 0 of 50 in the
+captures, so this is a theoretical case, but the wording is not exactly what was asked for.
+
+**Tests.** New `mergedmap-suite` (71 checks). `domorigin-suite` is **retired in place** — the file
+now carries a note explaining what was tried and why it failed, so the approach is not quietly
+reinvented. **689 green, 0 red.**
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — ARCHITECTURE: a card's city now comes from the card, not from the network
+
+**File:** `content/cityAssign.js`. Approved by Ihor as an architecture change.
+
+**Why.** The old chain was `piggyback response -> 4-slot buffer -> pickBuffer selects one of
+several saved-search tabs -> id join`. Every link had a failure mode, and they compounded: on a
+`Showing 1 - 50 of 75` board the collected count was 52 against 50 rendered, the scope guard
+skipped the cycle, and the filter re-applied the **previous** cycle's map to a board of different
+loads — the Chicago tab showed Tulsa loads. A stale map is worse than no map, because it is
+confidently wrong.
+
+Meanwhile every card already prints its own first stop.
+
+**The selector, derived from `samples/paired-card.html` — not from memory.**
+
+    span[tabindex="0"] span.wo-card-header__components     (fallback: span[tabindex="0"])
+
+The captured card contains **exactly two** `span[tabindex="0"]`, and both are stop locations; the
+first in document order is the origin. **`.wo-card-header__components` alone is not a location
+selector** — it occurs 7 times in the same card and also wraps `Tue Aug 4 01:30 CDT`, `314.0 mi`,
+`7h 6m` and `$2.35/mi`. The tabindex is what separates the two locations from all of it. The
+fixture now reproduces those decoys deliberately, so a class-only selector fails the suite.
+
+`parseStopCityState()` turns `XMD2 JOLIET, IL 60436-8548` into `JOLIET, IL`. The facility code is
+dropped by the shape of the pattern, not by a rule about codes: the city group accepts only
+letters, spaces and `.'-`, so a token containing a digit cannot be part of it. A code with **no**
+digit would be absorbed and fail to geocode — leaving the card unassigned and visible, the safe
+direction. All three codes in the capture contain a digit.
+
+**Geocoding is unchanged.** Origins go through the same `resolveCityCoords` → `resolvePATCity`
+the filter chips use, sharing one cache, so a chip city and a card origin for the same city cost
+one lookup between them. Range membership is untouched: a card belongs to **every** active city
+within `CITY_ASSIGN_MAX_MILES`. Unreadable or ungeocodable origins stay **unassigned and visible**.
+
+**The 700 ms flash is gone.** Assignment no longer needs the response, so a re-render can be
+filtered from the DOM alone. A `MutationObserver` on the main list's **parent** (the parent
+survives a list replacement) watches `childList` + `subtree`, coalesced with
+`requestAnimationFrame` so it runs once per frame, before paint. It does **not** observe
+attributes — which is what stops the filter retriggering itself, since hiding writes
+`style.display`. The re-render path is strictly cache-only and contains no `await`; an origin
+that is not geocoded yet leaves its card **visible** and schedules the async cycle. That path
+**merges** rather than replacing the map, so a not-yet-geocoded card cannot lose an assignment it
+already had and flash into view.
+
+**The SCOPE guard no longer skips anything — it is now pure diagnostics.** Recommended and
+applied: with one shared id join, an unexpected card meant the whole board's counts were suspect
+and refusing to publish was right. With per-card origins an extra card cannot corrupt another
+card's answer, and skipping had become the thing causing the live bug. Both branches warn and
+continue; nothing in that block returns.
+
+**Also fixed, and it would have broken the headline promise.** `cardContainerFor()` matched a
+fixed class list, and a recently-added card can carry a shape none of them match — measured live
+at 8 by class against 9 by id. Under the old source that card was still assigned (ids were
+collected class-agnostically); once assignment read the container it silently fell out of the
+coverage count. It now falls back to walking up to the main list's direct child, **bounded so it
+can never return the list itself** — hiding that would blank the whole board.
+
+**Dead weight, kept in place for a deliberate removal later.** All still present, all now
+unreachable from assignment: `pickBuffer()`, `logUnmatchedProvenance()` (its call was removed —
+it referenced the buffer variable and would have been a `ReferenceError` the first time verbose
+diagnostics were switched on), `readRenderedCardIds()`, the `noCoordIds` field, and the whole
+buffer store — `_cityAssignBuffers`, `CITY_ASSIGN_MAX_BUFFERS`, `logBufferInventory()`. The
+capture path itself (`onCityCoordsMessage`, the `Response.prototype` hook) is untouched and still
+buffers; its only remaining role is as a "a refresh happened" signal.
+
+**`initCityAssign()` now schedules a first cycle.** Nothing else would trigger one on an
+already-rendered board now that the network message is not the source.
+
+**Tests.** New `domorigin-suite` (93 checks) including the live 52-of-50 case end to end.
+**708 green, 0 red.**
+
+**The fixtures modelled the old architecture, and 104 assertions went red on this change.** Every
+one was traced before being touched: all were "the fixture card carries no origin", not product
+defects. `card()` now builds the captured stop block including the decoys; `buildBoard` gained
+`originById`; `makeCityAssignSandbox` stamps the suite's primary city onto any card that has
+none. Sections whose cards needed exact coordinates now declare synthetic origin cities with the
+**same** latitudes and longitudes as before — the geometry and the expected answers are unchanged.
+Sections built on buffer eviction or `pickBuffer` selection were rewritten to assert the stronger
+property that replaced them: another tab's response cannot affect this board at all.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — Fix the count guard that killed every cycle on a paginated board
+
+**File:** `content/cityAssign.js`. `readShowingTotal()` becomes `readShowingCounts()`, and the
+guard that consumed it is rewritten. No other file changed.
+
+**The defect.** The guard compared the collected card count against `readShowingTotal()`, which
+parsed the **grand total** out of "Showing 1 - 50 of 230 results". On a single-page board the two
+numbers are equal and the guard is invisible; on any paginated board they are not, so the cycle
+`return`ed **before** publishing `_cityAssignByCard` and before `reapplyCityFilter()`. Nothing was
+ever assigned, the filter correctly kept every unassigned card visible, and filtering looked
+completely dead. Captures already on disk disagreed with the premise before it was written:
+**50 of 338, 50 of 104, 5 of 11.** The live tests that passed — 9 of 9, 30 of 30 — were all
+single-page, which is exactly why this survived verification.
+
+**The fix is to the premise, not a workaround.** The Showing line carries **two** numbers and
+`readShowingCounts()` now returns both: `rendered` from the range "1 - 50", `total` from "of 230",
+plus `raw` (the matched line) so a future parse failure is diagnosable without the board.
+`rendered` is computed as `hi - lo + 1`, not taken as `hi`, so it is right both when Amazon
+replaces the list per page ("Showing 51 - 100 of 230" → 50) and if it appends on scroll
+("Showing 1 - 100 of 230" → 100).
+
+**The guard keeps its original purpose.** It exists to prove Similar-matches cards are excluded,
+and **collecting MORE than the board renders still skips the cycle** with a warn naming the excess.
+What changed is that collecting FEWER is now normal, not fatal.
+
+**A parse failure can never silently disable filtering again.** A missing or unreadable range does
+**not** skip — it proceeds and warns, with the raw line attached and the words "NOT disabling
+assignment" in the message. That failure mode is precisely what this guard already caused once.
+
+**Unchanged:** cards in no buffered response stay UNASSIGNED and therefore VISIBLE.
+
+**Pagination beyond one page is NOT solved by this change** — see the note in STATE.md. Buffers are
+capped at 4 (`CITY_ASSIGN_MAX_BUFFERS`) and `pickBuffer()` selects a single response by highest id
+intersection without merging, so if Amazon appends pages on scroll the later ones stay unassigned
+(and visible). No merge was implemented here; whether one is needed depends on a live observation
+nobody has made yet.
+
+**Also:** the diagnostic `CITY DIAG 0/5` now prints `collected N | board renders R of T total` and
+a `SCOPE: OK / BAD / unknown` verdict, replacing `MATCH: YES / NO / unknown`, which described a
+comparison that no longer exists.
+
+**Tests.** New `showing-suite` (82 checks) covering the parse matrix, both guard directions, the
+parse-failure path, unassigned-stays-visible, and an end-to-end hide on a 50-of-230 board.
+**611 green, 0 red.**
+
+**Twelve assertions in `cityassign-suite` were rewritten, not "made to pass".** They asserted the
+old wording and, in section 7, that collecting FEWER than the board reports must SKIP — the exact
+premise being corrected. Section 7 now asserts the new rule in both directions and gained an
+over-collection case; the rest were wording. Called out because a batch of reds turning green
+deserves scrutiny.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — Auto-switch the city filter when a new load arrives elsewhere
+
+**File:** `content/content.js`. One block inside `runDetectionPipeline` plus one new predicate.
+No other file changed.
+
+**Product decision (Ihor, 2026-08-13) — this REVERSES the decision taken earlier the same day.**
+Filter-awareness stopped the extension opening a card the dispatcher could not see, but it
+replaced that with a quieter failure: the load sounded the alert, badged a city button, and then
+sat there behind a tab nobody looked at. An alert pointing at something you cannot see is barely
+better than no alert. The view now follows the load.
+
+**Behaviour.** When the highest-paying new load of a cycle is hidden by the active city filter,
+the filter switches to that load's city; it is then treated as an ordinary visible load — same
+highlight, same auto-open, same panel. Loads in *other* non-active cities stay badged, and the
+badge on the switched-to city clears (that is `selectCityFilter`'s existing behaviour, not new
+code).
+
+**Anchored on `ordered[0]`,** the load `openTopNewLoad` would take. That is what makes the switch
+and the open agree when several cities receive loads in one cycle — the alternative ("switch to
+the first city that has a new load") could land on a city whose load is not the one that opens.
+
+**It goes through `selectCityFilter()` — the button's own handler, not a copy of it.** So
+hide/show, unassigned-always-visible and re-apply-after-refresh cannot drift from what a click
+does, because there is no second implementation. `content.js` never calls `applyCityFilter`
+directly; that is now asserted in two suites.
+
+**Three cases deliberately do not switch:** the filter is "All" (nothing is hidden); the load is
+already visible; or the dispatcher is mid-work.
+
+**`dispatcherIsMidWork()` — the guard, and why no marker was needed.** The brief named two
+conditions: a detail panel open from a *manual* card click, and the loop already stopped for
+review. Nothing in the codebase distinguishes a manually-opened panel from an auto-opened one,
+and adding a marker would have meant touching the manual click path, which the brief put
+off-limits. Both conditions collapse into one test that needs neither: **is a panel open, or is
+the loop stopped.** It is deliberately *broader* than asked — a panel auto-opened on an earlier
+cycle also blocks a switch — which is the same judgement anyway: if anything is open, he may be
+reading it. Its `catch` returns `true`, so a fault means the view stays put.
+
+**Ordering (PLAN 7b holds).** The switch runs before the visible/hidden partition and is entirely
+synchronous, so the loop is still stopped before any `await`. Asserted three ways: a live call
+trace, a source-order check, and a check that no `await` appears between the switch and the stop.
+
+**Unchanged and asserted:** detection still covers every city, `playAlert` still fires
+unconditionally and before the switch, the manual click path, START/STOP, PAT, similar-matches.
+
+**Not extended to the price-surge branch.** That branch has no filter awareness at all — it can
+still open a hidden card, which is a pre-existing gap from the filter-awareness change, not one
+introduced here. Unlike PLAN 7b (an identical race in both branches, so both were fixed), whether
+a *price increase* should yank the view is a product question, not a bug. Left for Ihor to decide.
+
+**Tests.** New `autoswitch-suite` (83 checks) loads `cityAssign.js`, `originCities.js` **and**
+`content.js` into one sandbox — full-stack, because the central claim is that the switch uses the
+real click path, and stubbing `selectCityFilter` would have tested nothing. **524 green, 0 red.**
+
+**One assertion in `citybuttons-suite` was rewritten, not "made to pass":** it read `NO auto-switch
+of the active tab` and encoded the product decision Ihor has now reversed. It is replaced by the
+narrower, stricter rule that survives — a switch is allowed, but only through the button path and
+only under the mid-work guard.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-13 — PLAN 7b: auto-open stops the refresh loop BEFORE it awaits
+
+**File:** `content/content.js`. Two moved statements and one new predicate.
+
+**The bug.** `tabState.set('running', false)` sat at the *bottom* of the auto-open block — after
+`openTopNewLoad()`, after `await sleep(800)`, after `showInlinePanel()`. At a 2.5s interval a
+refresh landed inside that window: `refreshNow()` made Amazon re-render the load list, and the
+inline panel — inserted as a **sibling of the card inside that list** — was destroyed with it.
+The dispatcher saw the accordion open and vanish about a second later.
+
+**The fix.** The stop now runs **synchronously, the moment auto-open commits**, before any await
+— matching what the manual card-click path has done since 2026-07-31. Stopping the loop is the
+protection: the `running` subscriber calls `stopOrchestrator()` and `scheduleNextTick()` refuses
+to schedule while `running` is false, so no refresh can fire between the open and the render.
+
+**⚠ The half that is easy to miss.** `shouldContinue()` returns `gateActive && running`, so
+stopping first would have made the post-await checkpoint bail and `clearPipelineDom()` destroy the
+very panel the fix exists to protect. A new **`gateStillOpen()`** checks the **auth gate only**,
+and the two post-await checkpoints now use it. A logout or deactivate still aborts; our own
+deliberate stop does not. `shouldContinue()` itself is unchanged and still guards the other five
+checkpoints.
+
+**Requirement 1 — a failed or abandoned open never leaves the loop silently stopped.** The stop
+goes through `tabState`, whose subscriber fires synchronously, so the sidebar's play/pause shows
+"stopped" from that instant whether or not the render succeeds — exactly the state a manual click
+produces. Verified for both a failed open (`openTopNewLoad` returns false) and a throwing render.
+
+**The surge branch got the identical fix.** It opens a card and inserts the same panel through the
+same code, so it had the same race; fixing only one would have left the bug alive there.
+
+**Unchanged:** `sleep(800)`, the refresh interval, the manual-click stop, detection, highlighting,
+`playAlert` ordering (still before the stop, so the sound is never lost), and the filter awareness
+added earlier today.
+
+**Verification:** new `autoopen-suite` — **41 checks** driving the real `content.js` and recording
+the call ORDER: `… playAlert → openTopNewLoad → STOP → sleep → showInlinePanel`. Covers the failed
+open, the throwing render, the logout-during-open abort, the surge branch, and a source-level
+ordering check with comments stripped. Full run **440 green, 0 red**. **Not exercised in a
+browser.**
+
+**Two harness notes:** `content.js` defines its own `sleep()` and `clearPipelineDom()`, so my
+sandbox stubs for those were shadowed — the first left the pipeline's await unsettled, the second
+made a teardown assertion look like a failure. Both fixed by tracing what the real functions
+actually call.
+
+### 2026-08-13 — Assignment is RANGE MEMBERSHIP, not nearest-city-wins
+
+**Files:** `content/cityAssign.js` (assignment + accessors), `content/content.js` (one loop, so a
+new load marks every city it serves). Product decision by Ihor.
+
+**Why.** Nearest-wins gave each load to exactly one city, so a load sitting between two selected
+cities was **hidden from the second driver** even though he could take it. A dispatcher thinks in
+range, not in winners.
+
+**What changed.** For each card the haversine distance is computed to **every** active origin
+city and the full set within `CITY_ASSIGN_MAX_MILES` is recorded. A card now belongs to **zero,
+one, or several** cities. Filtering shows a card when the active city is **in its set**, so a
+shared load appears under both tabs; "All" shows everything exactly once.
+
+- **Threshold unchanged and still a single named constant** — `CITY_ASSIGN_MAX_MILES = 150`,
+  asserted to be the only assignment of it and the only place the number appears in the range
+  check. `<=` so a load exactly on the boundary is **included**, erring toward showing.
+- **In range of no city → unassigned and always visible.** Unchanged rule, and the accessor
+  mirrors it exactly.
+- **New loads mark EVERY city button** whose range they fall in, not just one.
+
+**`cityOfLoad()` → `citiesOfLoad()`**, now returning an array (a copy). Both consumers updated:
+the filter tests membership with `indexOf`, and the new-load indicator marks each city.
+
+**The counts line now reports memberships and says so**, because the sum can legitimately exceed
+the card count:
+
+```
+CITY ASSIGN  CITY A: 2 | CITY B: 2 | unmatched: 0   [4 memberships across 3 cards within 150 mi
+— a load in range of 2 cities counts in both, so the sum may exceed the card count]
+```
+
+**Untouched:** the capture path, the buffer, `pickBuffer`, the DOM reader, the hide/show
+mechanism, detection, alert, auto-open, START/STOP, PAT.
+
+**Verification:** `cityassign-suite` +5 sections — a load in range of two cities appearing under
+both (with cities 200 mi apart so exclusive zones exist), in range of none, the threshold
+boundary, and the memberships line. Full run **399 green, 0 red**. **Not exercised in a browser.**
+
+**Two test-side notes, both mine, not the product.** My first two-city fixture put the cities
+99 mi apart — inside a 150 mi radius *every* load is in range of both, so the code's 3/3 was
+correct and the test was wrong; corrected to 200 mi. And a shell-escaping slip wrote a literal
+backspace byte (0x08) into a regex, making it unmatchable; found with `cat -A`, repaired with a
+script file rather than another shell one-liner.
+
+### 2026-08-13 — New-load pipeline is filter-aware; new-load badge on filtered-out cities
+
+**Files:** `content/content.js`, `content/cityAssign.js`, `content/originCities.js`.
+
+**Symptom (live).** On the HEBRON tab a LITTLE ROCK load arrived: the alert fired and the
+accordion opened over a card the filter had hidden — a detail panel with nothing behind it.
+**Root cause confirmed in code:** `detectNewLoads` / highlighting / `playAlert` / `openTopNewLoad`
+all ran against the full main list and knew nothing about the active filter.
+
+**What changed — only what we OPEN:**
+- **Detection is untouched.** It still covers every city, and `playAlert()` still fires
+  unconditionally on `newCount > 0` — asserted, including that the sound is *not* downstream of
+  any filter check. A new load is never missed because its city is filtered out.
+- **Auto-open partitions by visibility.** `openTopNewLoad` is called only with loads that are
+  actually on screen; with everything filtered out it is not called at all.
+- **Hidden new loads mark their city instead** — a count badge
+  (`data-testid="ext-origin-city-new"`) on that city's button, plus `data-hasnew` for an accent
+  outline. Counts accumulate across cycles and clear when he opens that city.
+- **No auto-switch**, deliberately: changing tabs while he is reading a load is worse than a
+  missed second.
+
+**Two new read-only accessors** in `cityAssign.js`: `cityOfLoad(id)` and `cityFilterHidesLoad(id)`.
+The second mirrors `applyCityFilter`'s rule exactly — including that an **unassigned load is never
+hidden** — and the suite asserts the accessor agrees with what is actually on screen, so the
+pipeline can never skip a visible card or open an invisible one.
+
+**Badge contrast measured:** `--ext-accent` on `--ext-surface` = **4.51:1** light, **5.34:1**
+night, both at or past the 4.5:1 floor for 11px bold. Tokens only.
+
+**Verification:** `citybuttons-suite` grew to 94 checks. Full run **372 green, 0 red**.
+**Not exercised in a browser.**
+
+---
+
+### 2026-08-13 — INVESTIGATION (not fixed): why the auto-opened accordion closes after ~1s
+
+**The hypothesis in the brief is wrong — the auto-open path DOES stop the refresh loop.**
+`tabState.set('running', false)` is at `content.js:274`. But the timing differs from the manual
+click in a way that matters:
+
+| Path | When the loop stops |
+|---|---|
+| **Manual card click** (`inlinePanel.js:1300`) | **At the click**, synchronously, before the sheet opens |
+| **Auto-open** (`content.js:274`) | **After** `openTopNewLoad()`, **after** `await sleep(800)`, **after** `showInlinePanel()` |
+
+So auto-open leaves a window of **at least 800ms** (plus however long `playAlert()` awaited)
+during which the loop is still running. With a 2.5s refresh interval, a refresh can fire inside
+that window; Amazon re-renders the load list, and the inline panel — inserted as a **sibling of
+the card inside that list** (`inlinePanel.js:1223`,
+`cardElement.parentNode.insertBefore(panel, cardElement.nextSibling)`) — is destroyed with it.
+
+**This is the same class of bug the manual path already fixed on 2026-07-31**, by moving the stop
+to the click. The likely fix is to stop the loop immediately after `openTopNewLoad()` returns
+true, before the 800ms settle. **Not applied here** — out of scope for this task, and the exact
+timing cannot be confirmed without a browser.
+
+**Ruled out:** the filter is not the cause. The panel is a sibling of the card, not a child, so
+hiding the card cannot hide the panel.
+
 ### 2026-08-13 — Per-city filtering is a FEATURE: works in a shipped build, wired to the buttons
 
 **Files:** `utils/constants.js`, `content/networkObserver.js`, `content/cityAssign.js`,
