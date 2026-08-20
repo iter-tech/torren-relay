@@ -113,6 +113,9 @@ document.addEventListener('DOMContentLoaded', function () {
   var surgeToggle        = document.getElementById('popup-surge');
   var surgeThreshold     = document.getElementById('popup-surge-threshold');
   var fastBookToggle     = document.getElementById('popup-fast-book');
+  // D1 (2026-08-20): the shared-limit toggle was removed from popup.html and the feature ships
+  // OFF. These three lookups now return null and every use below is already null-guarded, so
+  // the wiring is inert rather than deleted — restoring the markup restores the feature.
   var sharedLimitToggle  = document.getElementById('popup-shared-limit');
   var sharedLimitInfo    = document.getElementById('popup-shared-limit-info');
   var sharedLimitTooltip = document.getElementById('popup-shared-limit-tooltip');

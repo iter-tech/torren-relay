@@ -1,5 +1,297 @@
 # Amazon Relay API samples (real captured payloads)
 
+> ## 🔴 11. THE P / R BADGE CANNOT BE DETERMINED FROM THE RESPONSE BODIES (2026-08-19, final)
+>
+> ### 11a. E1 — THE REQUEST SIDE IS NOT CAPTURED AT ALL
+>
+> `content/networkObserver.js` wraps `window.fetch` and reads `arguments[1]` (`init`) **only
+> for `.signal`**. It never touches `init.body` or `init.method`, and no request payload,
+> URL query string or filter selection is stored anywhere.
+>
+> **And the response does not echo the request.** Every top-level key was enumerated:
+> `workOpportunities`, `totalResultsSize`, `nextItemToken`, `searchAuditId`, `isBotRequest`,
+> `metadata`, `carrierDetails`. `metadata` is a CARB compliance warning; `carrierDetails` is
+> account-level scoring, **byte-identical across all seven captures**. Neither carries the
+> equipment filter.
+>
+> **To answer E1 properly would need the `/search` REQUEST body captured** — a change to
+> `networkObserver.js` to record `init.body` for watched paths.
+>
+> ### 11b. 🔑 E1 COROLLARY — the record CANNOT encode the variant
+>
+> Amazon's own filter chips read **"53' Trailer (R)"** and **"53' Container (R)"** — the P/R marker
+> is attached to the **equipment filter option**. But every record serialises **both** variants to
+> the **same** enum: `loads[].equipmentType` is only ever `FIFTY_THREE_FOOT_TRUCK` (215) or
+> `FIFTY_THREE_FOOT_CONTAINER` (15). **A "53' Trailer (P)" load and a "53' Trailer (R)" load are
+> indistinguishable in `equipmentType`.**
+>
+> ### 11c. E2 — THE LABELLED SET IS 1 P, 0 R, AND THAT IS THE BLOCKER
+>
+> | label | in a capture? |
+> |---|---|
+> | `72e5184e` = **P** (badge read from `paired-card.html`) | ✅ yes |
+> | `4c0565e4` = **P** (Ihor, live) | ❌ no |
+> | COLUMBUS,IN → GROVEPORT,OH = **R** (Ihor, live) | ❌ no |
+> | TOTOWA,NJ → HAZLETON,PA = **R** (Ihor, live) | ❌ no |
+>
+> Only **one** captured card file exists (`paired-card.html`), so exactly **one** record inside the
+> captures has a known badge, and it is a P.
+>
+> ⚠ **With zero labelled R records inside the captures, no field can ever be CONFIRMED** — a rule is
+> only confirmed by showing it separates a known P from a known R. Fields can only be **refuted**,
+> and only when they split two known-Ps apart or contradict the board. That is exactly how
+> `assetOwner`, `containerOwner`, C1 and C5 all died: **by refutation, never by confirmation.**
+>
+> **Measured vacuity: 83 fields vary across the 146 records; 63 of them are consistent with the one
+> labelled P.** A test with one positive label and no negatives cannot narrow 63 candidates.
+> Enumerating more fields is not a path to an answer.
+>
+> ### 11d. ✅ THE HONEST FINDING
+>
+> **The captured response bodies cannot answer this.** The badge is a property of Amazon's
+> equipment-filter *option*, the request that carries that option is not captured, and the response
+> collapses both variants onto one enum. This is not "we have not looked hard enough" — it is
+> structural.
+>
+> **What Amazon itself marks is in the DOM**, and the extension already reads it:
+> `div.trailer-type-circle > p` → `content/loadParser.js:84` → `trailerLetter` → `loadStore`.
+> See §10a.
+
+> ## 🔑 10. THE P / R BADGE — where it is rendered, and what has been ruled out (2026-08-19)
+>
+> Labelled evidence: `samples/pr-badge-labelled-records-2026-08-19.json`.
+>
+> ### 10a. THE BADGE IN THE DOM — and the extension already reads it
+>
+> From `samples/paired-card.html`, verbatim:
+>
+> ```html
+> <span class="css-1maqsxd equipment-type-text"><span>53' Trailer </span></span>
+> <div class="trailer-type-circle"><p class="css-nnltzv">P</p></div>
+> …
+> <span class="css-1maqsxd loading-type" title="Drop">Drop</span>
+> ```
+>
+> **The badge letter is the `<p>` inside `div.trailer-type-circle`** — a **stable semantic
+> class**, not a `css-<hash>`. `content/loadParser.js:84` already reads it into
+> `trailerLetter`, and `loadStore` already carries it.
+>
+> ⚠ **This is evidence, not the fix.** PAT posts from one id plus one API record; the badge will
+> not be read from the DOM in production. It is here to tell us what Amazon itself marks.
+>
+> ### 10b. 🔑 THE ONE FULLY-LABELLED PAIRING ON DISK
+>
+> The card above **is** work opportunity `72e5184e-7728-4c51-9562-5160c91d4132`, so its badge and
+> its record are both known:
+>
+> | | |
+> |---|---|
+> | badge | **P** |
+> | card "Loading Type" text | **Drop** |
+> | record `stops[].loadingType` | **PRELOADED** |
+> | record `stops[].unloadingType` | **DROP** |
+> | `assetOwner` | AZNG |
+> | `existingSubCarrierName` | AZNG |
+>
+> ### 10c. ❌ REFUTED — `trailerDetails[].assetOwner`. Do not re-derive.
+>
+> **Two records with a KNOWN P badge carry DIFFERENT values:**
+> `72e5184e` = `"AZNG"`, `4c0565e4` = `"NCSL"` (Ihor confirmed the latter live).
+> **A non-null or non-Amazon `assetOwner` does NOT mean carrier-owned, in either direction.**
+> Separately, 42 of 159 work opportunities carry two different owners across their own stops, so
+> there is no single value to read even in principle. **Tested and ruled out.**
+>
+> ### 10d. ❌ ALSO REFUTED — `containerOwner == "EMPTY_CONTAINER_ID"`
+>
+> `4c0565e4` (P) carries it; `72e5184e` (**also P**) does not. Two known-P records disagree.
+> It appears in 64 of 146 work opportunities.
+>
+> ### 10e. ❌ CANNOT DISCRIMINATE — `stopRequirements[].stopRequirementType`
+>
+> `"CONTAINER"` in **146 of 146**. No variation at all.
+>
+> ### 10f. 🟡 SURVIVING HYPOTHESES — consistent with both known-P records, none confirmed
+>
+> Every field that varies across work opportunities was enumerated. Only these are consistent with
+> **both** known-P records sitting on the P side:
+>
+> | # | hypothesis (would mean R) | loads it would call R |
+> |---|---|---|
+> | **C1** | any stop has `loadingType: "LIVE"` | **15 / 146** |
+> | C2 | `existingSubCarrierName` is not purely `AZNG` | 29 / 146 |
+> | C3 | any load has `isExternalLoad: true` | 24 / 146 |
+> | C4 | equipment includes `FIFTY_THREE_FOOT_CONTAINER` | 15 / 146 |
+>
+> **C1 is ranked first, and it is the only one with a mechanism rather than a correlation:**
+> a PRELOADED stop means the trailer is already loaded and waiting — Amazon supplied it; a LIVE
+> stop means the trailer is loaded while the driver waits, which is what a carrier bringing its own
+> trailer does. It also matches §8a exactly: the captured upserts tie `AMAZON_PROVIDED` to
+> `loadingTypeList ["DROP"]` (7/7) and `CARRIER_OWNED` to `["LIVE"]` (4/4).
+>
+> **Half of C1 is already confirmed:** §10b is a *Drop / PRELOADED* card and its badge is **P**.
+> The untested half is whether a *Live* card is **R**.
+>
+> ⚠ **All four remain HYPOTHESES until a load with a known badge confirms one.**
+
+> ## 🔴 9. TRAILER OWNERSHIP IS NOT IN THE SEARCH RESPONSE (measured 2026-08-19)
+>
+> **The board shows a P / R badge per load and Amazon's own panel says "Provided" or "Required".
+> Nothing in the captured `/api/loadboard/search` bodies carries that fact.**
+>
+> Measured across **159 work opportunities / 506 stops** in every capture on disk:
+>
+> | check | result |
+> |---|---|
+> | any path whose VALUE is `AMAZON_PROVIDED` or `CARRIER_OWNED` | **none, anywhere** |
+> | any path whose value is a bare `"P"` or `"R"` | **none** |
+> | `trailerDetails` in `projectRecord()` | not projected |
+>
+> ### 9a. The PLAN 29f candidate, verified: `loads[].stops[].trailerDetails[].assetOwner`
+>
+> It exists — an **array on each stop**, 253 entries across 506 stops. Every sibling field is
+> **null in all 253**: `assetId`, `assetType`, `assetSource`, `dropTrailerETA`,
+> `trailerLoadingStatus`. Only `assetOwner` is populated:
+>
+> `"AZNG"` ×164 · `"NCSL"` ×68 · `(null)` ×17 · `"HUBG"` ×3 · `"AZNU"` ×1
+>
+> ### 9b. 🔴 IT IS DISQUALIFIED, AND HERE IS THE MEASUREMENT THAT DISQUALIFIES IT
+>
+> **42 of 159 work opportunities carry MORE THAN ONE distinct `assetOwner` across their own
+> stops** (e.g. `AZNG` + `NCSL` on the same load, 40 work opportunities). A post has exactly ONE
+> trailer ownership, so a field that varies *within* a single load cannot be its source. There is
+> no non-arbitrary rule for which stop wins.
+>
+> It is also the wrong KIND of value: `AZNG`/`NCSL`/`HUBG` are carrier or owner **codes**, not a
+> provision flag. Mapping them by prefix — "AZN* means Amazon" — would be an **inference**, and it
+> would set trailer ownership on **every** post.
+>
+> ### 9c. What is needed
+>
+> **The `/api/loadboard/search` response for a load whose card shows the R badge, and one showing
+> P.** Comparing the two is the only way to find the discriminating field. Until then P/R stays
+> unwired and every post carries `AMAZON_PROVIDED`.
+
+> ## 🔑 8. ELEVEN CAPTURED UPSERTS — trailer ownership and equipment enums (2026-08-19)
+>
+> Captured by Ihor from the live Post-a-Truck form via **DevTools Offline** (built, never sent).
+> Artefact: `samples/pat-upsert-eleven-2026-08-19.json`. ⚠ `samples/` is **gitignored** — this
+> table is the durable copy.
+>
+> ### 8a. Trailer ownership — the only two values
+>
+> `providedTrailerType` and `visibleProvidedTrailerType` **always carry the SAME value**, one of:
+>
+> | value | captures | `loadingTypeList` in those captures |
+> |---|---|---|
+> | `"AMAZON_PROVIDED"` | 7 | **`["DROP"]` in all 7** |
+> | `"CARRIER_OWNED"` | 4 | **`["LIVE"]` in all 4** |
+>
+> ### 8b. Equipment enums, by ownership
+>
+> **AMAZON_PROVIDED (7):** `FIFTY_THREE_FOOT_TRUCK` ⚠, `TWENTY_FOOT_CONTAINER`,
+> `FORTY_FOOT_CONTAINER`, `FORTY_FIVE_FOOT_CONTAINER`, `FORTY_FOOT_HIGHCUBE_CONTAINER`,
+> `FORTY_FIVE_FOOT_HIGHCUBE_CONTAINER`, `FIFTY_THREE_FOOT_CONTAINER`
+>
+> **CARRIER_OWNED (4):** `TWENTY_SIX_FOOT_BOX_TRUCK`, `CUBE_TRUCK`,
+> `FIFTY_THREE_FOOT_CONTAINER`, `FIFTY_THREE_FOOT_TRUCK` ⚠
+>
+> ### ✅ THE 53' TRAILER ARRAY IS NOW FULLY CAPTURED (2026-08-19) — gap closed
+>
+> Expanded in DevTools, captured **twice**, once per order type. Artefact:
+> `samples/pat-upsert-53ft-expanded-2026-08-19.json`.
+>
+> ```json
+> "equipmentTypes": [
+>   "FIFTY_THREE_FOOT_TRUCK",
+>   "SKIRTED_FIFTY_THREE_FOOT_TRUCK",
+>   "FIFTY_THREE_FOOT_DRY_VAN",
+>   "FIFTY_THREE_FOOT_A5_AIR_TRAILER",
+>   "FORTY_FIVE_FOOT_TRUCK"
+> ],
+> "visibleEquipmentTypes": "FIFTY_THREE_FOOT_TRUCK"
+> ```
+>
+> **Exactly five elements, and IDENTICAL for both order types.** Power only (AMAZON_PROVIDED) and
+> Tractor & Trailer (CARRIER_OWNED) send the same array for 53' Trailer — only
+> `providedTrailerType` / `visibleProvidedTrailerType` differ.
+>
+> 🔑 **This is byte-identical to `PAT_EQUIPMENT_TYPES_53` in `content/patApi.js`**, captured
+> 2026-07-14 (§3) — same five values, same order. **The July constant is independently
+> re-confirmed** and the doubt raised in BACKLOG 0r is resolved: no change was needed.
+>
+> ⚠ **SHAPE LESSON.** One UI choice expands to SEVERAL enum values, so `equipmentTypes` is **not**
+> a one-to-one mapping from the record's equipment field. Any mapping must be able to return a
+> multi-element array — `PAT_EQUIPMENT_BY_ENUM` returns the array itself, so it already can.
+>
+> ### 8c. Shapes and constants seen in every capture
+>
+> `equipmentTypes` is an **ARRAY**; `visibleEquipmentTypes` is a **STRING** carrying the
+> first/primary enum. Both are sent. Also: `payoutType: "FLAT_RATE"`,
+> `distanceOrDuration: "DISTANCE"`, `excludeSpecialServices: ["SWING_DOOR"]`.
+> `runType` was `"ONE_WAY"` or `"ROUND_TRIP"` — PAT's handling of it is unchanged.
+>
+> ### 8d. 🔑 WHY the loading type tracks ownership — UI finding
+>
+> From Ihor's screenshots: the **"Load" control (Drop & Hook / Live or Drop & Hook) exists ONLY
+> under the "Power only" order type.** Box truck and Tractor & Trailer have **no Load section at
+> all**. So `LIVE` is not *chosen* for carrier-owned posts — **it is what the form always sends
+> for them.** The loading type is a consequence of the order type, not a free choice.
+
+> ## 🔑 7. CAPTURED UPSERT — Team / 26' Box Truck / carrier-owned (2026-08-19)
+>
+> **Captured by Ihor from the live Post-a-Truck form using DevTools Offline** — the request was
+> built by the form but never sent. Artefacts: `samples/pat-upsert-team-26ft-carrier-owned.json`
+> and `samples/pat-upsert-loading-type-control.json`. ⚠ `samples/` is **gitignored**, so the
+> values are recorded here as the durable copy.
+>
+> ⚠ **PARTIAL.** Only the fields quoted below were captured. Anything absent is still unknown —
+> absence is not evidence.
+>
+> ```json
+> "driverTypes":                ["TEAM"],
+> "equipmentTypes":             ["TWENTY_SIX_FOOT_BOX_TRUCK"],
+> "visibleEquipmentTypes":      "TWENTY_SIX_FOOT_BOX_TRUCK",
+> "providedTrailerType":        "CARRIER_OWNED",
+> "visibleProvidedTrailerType": "CARRIER_OWNED",
+> "loadingTypeList":            ["LIVE"],
+> "payoutType":                 "FLAT_RATE",
+> "runType":                    "ONE_WAY",
+> "distanceOrDuration":         "DISTANCE",
+> "excludeSpecialServices":     ["SWING_DOOR"]
+> ```
+>
+> ### 7a. The Load control, isolated (second capture, same method)
+>
+> | form option | `loadingTypeList` |
+> |---|---|
+> | **Live or Drop & Hook** | **`["LIVE"]`** |
+> | Drop & Hook | `["DROP"]` |
+>
+> 🔑 **In THIS API `["LIVE"]` IS the wider "Live or Drop & Hook" option.** `["LIVE","DROP"]` has
+> **never** been observed and must not be sent. The extension was sending exactly that pair, from
+> an inference; it now sends `["LIVE"]`.
+>
+> ### 7b. ⚠ THIS CAPTURE CONTRADICTS §3's "do not send" list
+>
+> §3 lists `visibleEquipmentTypes`, `visibleProvidedTrailerType`, `distanceOrDuration` and
+> `payoutType` as *"UI-only fields seen in page state but NOT in the POST body (do not send)"*.
+> **This capture is the outgoing request body and contains all four.** The newer capture wins: it
+> is the actual request, not an inference about page state. §3's note is stale on those four.
+>
+> ### 7c. Shapes that matter
+>
+> `equipmentTypes` is an **ARRAY**; `visibleEquipmentTypes` is a **STRING** carrying the same
+> value. Both are sent. The extension already does this
+> (`visibleEquipmentTypes: formState.equipmentTypes[0]`).
+>
+> ### 7d. What is still NOT captured
+>
+> - the `providedTrailerType` value for an **Amazon-provided (P)** trailer — but see §3, which
+>   captured `"AMAZON_PROVIDED"` in a real payload, so **P is capture-backed after all**;
+> - `FORTY_FOOT_CONTAINER` in any upsert — **stays unmapped**;
+> - anything that would let the RECORD say whether a load is P or R. **That, not the constants, is
+>   what blocks BACKLOG 0n.**
+
 > Reference for ext-action-post and any code touching Amazon's internal APIs.
 > **Rule: never guess field names, enums, or formats — check here or capture a new sample.**
 > All samples captured from the live Relay UI on 2026-07-13/14.
@@ -202,6 +494,60 @@ No remaining blocked types at this time. For any new type seen on the board:
 
 ---
 
+## 5.8 EQUIPMENT fields — every observed value, and what drives Amazon's own text ✅ 2026-08-17
+
+Enumerated across **all six captures on disk — 159 records, 506 stops.** These are the *only*
+values that exist; anything else must render as an em dash, never a guessed label.
+
+### `workOpportunities[].loads[i].equipmentType`
+
+| value | count | our label |
+|---|---|---|
+| `FIFTY_THREE_FOOT_TRUCK` | 235 | `53' Trailer` |
+| `FIFTY_THREE_FOOT_CONTAINER` | 16 | `53' Container` |
+
+### `workOpportunities[].loads[i].stops[j].loadingType` / `.unloadingType`
+
+| field | values | counts |
+|---|---|---|
+| `loadingType` | `null`, `PRELOADED`, `LIVE` | 253 / 236 / 17 |
+| `unloadingType` | `null`, `DROP`, `LIVE` | 253 / 226 / 27 |
+
+A stop carries one or the other, never both.
+
+### ⚠ `stops[j].trailerDetails[]` is USELESS for display
+
+253 of 506 stops have one entry. In **every single entry**:
+
+| field | value |
+|---|---|
+| `.assetId` | `null` — 253/253 |
+| `.assetType` | `null` — 253/253 |
+| `.assetSource` | `null` — 253/253 |
+| `.trailerLoadingStatus` | `null` — 253/253 |
+| `.dropTrailerETA` | `null` — 253/253 |
+| `.assetOwner` | **populated**: `AZNG` 164, `NCSL` 68, `null` 17, `HUBG` 3, `AZNU` 1 |
+
+`assetOwner` is the only readable field, and it is a carrier code, not a trailer id. **Do not
+expect a trailer number from this endpoint** — the board does not send one.
+
+### What drives Amazon's own "53' Trailer P" — ESTABLISHED, not inferred
+
+`samples/paired-card.html` and `samples/paired-search.json` are a genuine pair: the card's
+`div id` is `72e5184e-7728-4c51-9562-5160c91d4132`, and that id **is** in the response. Comparing
+the two directly:
+
+| Amazon's card renders | comes from |
+|---|---|
+| `53' Trailer` (`.equipment-type-text`) | `loads[0].equipmentType = FIFTY_THREE_FOOT_TRUCK` |
+| `P` (`.trailer-type-circle`) | `stops[0].loadingType = PRELOADED` — the initial |
+
+The equipment half of our label is therefore **character-identical** to Amazon's. The circle letter
+is confirmed for `PRELOADED` on this one pairing only; `LIVE` and `DROP` have no captured card, so
+we render the full word (`Preloaded` / `Live` / `Drop`) rather than invent `L` and `D`.
+
+---
+
 ## 5.9 `/api/loadboard/recommendations/get` — the "Recently added" source ✅ confirmed 2026-08-13
 
 **The endpoint we were missing.** Found in the Network tab and confirmed against its response body.
@@ -328,11 +674,29 @@ reconnaissance).
 most likely to cause a subtle wrong-data bug and the least verified — **capture it before
 building.**
 
-### 6.5 Pagination still applies
+### 6.5 Pagination still applies — but the PAGE SIZE IS NOT FIXED ✅ corrected 2026-08-17
 
-`/search` paginates at **page size 50** (`paired-search.json`: `workOpportunities.length` 50,
-`totalResultsSize` 338, `nextItemToken` 50). A 104-result multi-origin search therefore spans
-**more than one page**. The DOM remains the source of truth for what is on screen.
+⚠ **This section used to claim "page size 50", and §6.7 used to claim "the live board now
+paginates at 5". Both were over-generalised from a single capture, and they contradicted each
+other.** Measured across every capture on disk:
+
+| capture | records | `nextItemToken` | `totalResultsSize` |
+|---|---|---|---|
+| `paired-search` | 50 | 50 | 338 |
+| `similar-1` | 50 | 50 | 232 |
+| `search-5cities-active` | 50 | 50 | 104 |
+| `search-5cities-other` | **5** | 5 | 11 |
+| `search-2` | **4** | null | 4 |
+
+**4, 5 and 50 have all been observed.** What IS stable, and safe to rely on:
+
+- **one response carries ONE page, never several** — at most 50 records
+- `nextItemToken` is a **cursor** equal to the records delivered so far, not a total
+- `totalResultsSize` is the grand total across all pages
+- a response with no more pages carries `nextItemToken: null`
+
+**Never hardcode a page size.** Read the RENDERED range from the board's "Showing" line — see
+§6.5b. The DOM remains the source of truth for what is on screen.
 
 ---
 
@@ -417,9 +781,16 @@ during one search session. Pages are **merged**, not replaced; a repeated id **o
 the newest coordinates. **Never stores a response body.** 215 bytes/entry measured; capped at
 3000 entries (~629 KB), oldest-out.
 
-**Why it is needed:** `/search` serves **5 loads per page** on the live board and loads more on
-scroll. §6.5 records page size 50 from the July captures — **the live board now paginates at 5**,
-so a fixed handful of buffers covers only a fraction of the rendered list.
+**Why it was thought to be needed:** this section claimed `/search` serves **5 loads per page**
+and that §6.5's "page size 50" was stale. ⚠ **Both claims were wrong** — see the corrected §6.5:
+the page size is not fixed (4, 5 and 50 all observed), so neither number generalises.
+
+The underlying concern was real, though, and was solved differently: a fixed handful of buffers
+covered only part of the rendered list. The answer was **not** an accumulator but a **merged,
+persistent `id -> {lat,lng}` map** fed by every buffered response and bounded at 4000 entries —
+see PLAN 7e. Merging is safe because the work-opportunity id is globally unique: measured across
+the captures, **13 ids appear in more than one response, 13 with identical coordinates, 0
+conflicts.**
 
 **Reset rule — one search session = one accumulator.** Checked on each arriving response
 **before** the merge, so the page that announces a new search is kept:

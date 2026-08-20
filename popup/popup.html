@@ -93,19 +93,12 @@
       </label>
     </div>
 
-    <div class="popup-row">
-      <span class="popup-label-with-info">
-        <label class="popup-label" for="popup-shared-limit">Shared refresh limit</label>
-        <span class="popup-info-icon" id="popup-shared-limit-info" data-testid="popup-shared-limit-info"
-              tabindex="0" role="button" aria-label="About shared refresh limit" aria-describedby="popup-shared-limit-tooltip">i
-          <span class="popup-info-tooltip" id="popup-shared-limit-tooltip" data-testid="popup-shared-limit-tooltip" role="tooltip">Amazon blocks too-frequent refreshes and can temporarily cut off access from your IP. This mode shares one refresh budget across all your tabs so you don't hit that limit. Turn it off to give each tab its own timer.</span>
-        </span>
-      </span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="popup-shared-limit" data-testid="popup-shared-limit">
-        <span class="toggle-track"></span>
-      </label>
-    </div>
+    <!-- D1 (2026-08-20, Ihor): the "Shared refresh limit" toggle was REMOVED from the UI and
+         the shared cross-tab limit now ships OFF. Silently slowing refreshes while the bar says
+         "Refresh every 2.5s" reads as broken, not as protection; dispatchers know Amazon
+         throttles and manage their own tab count. The machinery in background.js is intact and
+         unreachable, deferred to a later release — see BACKLOG. popup.js keeps its null-guarded
+         wiring for the same reason, so re-adding this block is all it takes. -->
 
     <div class="popup-sound">
       <div class="popup-sound-head">Sound</div>

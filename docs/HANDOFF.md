@@ -1,27 +1,43 @@
-# HANDOFF — snapshot for an incoming project manager
+# HANDOFF.md — onboarding for a new project manager
 
-**As of 2026-08-12.** Read this first, then `STATE.md`. No history here — only what you need to
-act. Everything below was pulled from the repo, not from memory.
+**Written 2026-08-17.** Every fact below was read out of this repo today, not recalled. Where a
+claim is unverified, it says so.
 
----
-
-## 1. What the project is
-
-**Torren Relay** is a Chrome MV3 extension in vanilla JS (no framework, no jQuery, no build step)
-for **Amazon Relay carrier dispatchers**. It refreshes the load board, highlights new loads, plays
-an alert, opens the top new load's detail panel, and helps create Post-a-Truck orders. **The
-dispatcher books manually — the extension never books.** The working model is
-**PM writes prompts / Claude Code executes**: you write the task specs and decide sequencing;
-Claude Code writes the actual files. You do not write production code directly. The user
-(**Ihor**) is the dispatcher and the only person who can run the extension in a real browser —
-Claude Code has **no browser**, so every UI-affecting claim must be confirmed by him.
+Read this file first, then `docs/PLAN.md` (sequence), then `STATE.md` (detail). `docs/CLAUDE.md`
+is the rulebook and outranks this file if they ever disagree.
 
 ---
 
-## 2. The hard rules — verbatim from `CLAUDE.md` and `api-samples.md`
+## 1. What Torren Relay is
 
-> **Rule: never guess field names, enums, or formats — check here or capture a new sample.**
-> — `api-samples.md`
+A Chrome MV3 extension for **freight dispatchers** working Amazon Relay's load board. One
+dispatcher watches loads for several drivers at once. The extension:
+
+- **watches the board** and detects newly-appeared loads (`loadParser` → `loadDetector`)
+- **alerts** — sound, tab flash, card highlight
+- **auto-opens** the highest-paying new load
+- **filters the board per origin city**, so a five-city search can be worked one driver at a time
+- **renders its own inline panel** under a load: per-leg stops, times, distances, payout
+- **Post-a-Truck (PAT)** — posts truck availability
+
+**It never books.** Booking is Amazon's. The one exception is Fast Book, which clicks Amazon's own
+Book button on explicit dispatcher action — see §2, closed topics.
+
+### Working model
+
+| role | who | does |
+|---|---|---|
+| **Project manager** | Claude Desktop | writes the prompts, decides sequencing, tracks the project. **Does not write production code.** |
+| **Executor** | Claude Code | applies the prompts, writes the files, reports back |
+| **Product owner** | **Ihor** | a dispatcher with years on this board. Product decisions are his. He is also **the only one who can verify anything live** — see §5. |
+
+The executor has **no browser**. Nothing can be confirmed on a real board from inside the tooling.
+
+---
+
+## 2. The hard rules
+
+### Verbatim from `docs/CLAUDE.md`
 
 > **PROOF BEFORE REPORT.** Never report "done" for any UI-affecting change without actually
 > exercising the changed flow (open the page/popup, perform the user scenario, observe the
@@ -29,146 +45,246 @@ Claude Code has **no browser**, so every UI-affecting claim must be confirmed by
 > and list exactly what the user must test manually — never imply it was verified.
 
 > **SMOKE CHECKLIST** — after any UI-affecting change, run all six and report pass/fail per item:
-> - (a) popup opens without console errors
-> - (b) logged-out popup shows only the login block
-> - (c) full login flow works (email → code → features appear)
-> - (d) sidebar/panel activates on the load board
-> - (e) PAT modal opens and Confirm enables with valid data
-> - (f) no errors in the page console
+>
+> * (a) popup opens without console errors
+> * (b) logged-out popup shows only the login block
+> * (c) full login flow works (email → code → features appear)
+> * (d) sidebar/panel activates on the load board
+> * (e) PAT modal opens and Confirm enables with valid data
+> * (f) no errors in the page console
 
-**Code rules (verbatim):** never jQuery; never inline event handlers; every UI element MUST have
-a `data-testid`; every function MUST have `logger.log()` at entry; every catch MUST have
-`logger.error()` with context; never `innerHTML` with page data — use `textContent`.
-**Safety:** unsure about booking safety → **ASK**.
+> ## Code rules
+>
+> 1. NEVER use jQuery
+> 2. NEVER use inline event handlers
+> 3. Every UI element MUST have data-testid
+> 4. Every function MUST have logger.log() at entry
+> 5. Every catch MUST have logger.error() with context
+> 6. NEVER use innerHTML with page data — use textContent
 
-**Also standing:** never hardcode `css-<hash>` class names (they rotate on every Amazon deploy;
-this repo has been bitten repeatedly). Colours come from `--ext-*` design tokens.
+> ## Safety rules
+>
+> 1. Unsure about booking safety → ASK
 
-### CLOSED TOPICS — do not re-audit, do not "fix", do not flag
-- **Fast Book behaviour** and the **empty `FORBIDDEN_SELECTORS`** — conscious product decisions.
-- **The city→driver rename code** in `originCities.js` — intentionally retained though
-  disconnected from the click. It is not dead code.
-- Anything behind a flag that is off by default but wired correctly.
+### NEVER GUESS
 
----
+Do not invent a field path, an enum value, a label, or a date format. **Read it out of
+`samples/`.** If it is not in a capture, it is not known — say so and ask for a capture. This rule
+exists because guesses have cost this project multiple rebuilds. Two concrete precedents:
 
-## 3. Where we are right now
+- equipment labels are built **only** from enum values observed on disk; anything else renders an
+  em dash (`docs/api-samples.md` §5.8)
+- `loads[]` ordering was *assumed* to be segment order for a whole stage before anyone checked it;
+  it was then verified four independent ways across all 71 multi-load records
 
-**Feature in flight: Single-Tab Multi-Driver Monitor** (`PRODUCT.md`) — one Relay tab monitoring
-several drivers in different regions, up to five origin cities, results split per driver. The
-prerequisite being built now is **per-city load splitting**: deciding which origin city each
-on-screen load belongs to.
+### CLOSED TOPICS — do not re-audit, do not re-open
 
-**DONE and Ihor-verified on a live board:**
-- **The id join.** A card's inner `div[id]`'s `.id` == `workOpportunities[].id`. Confirmed
-  **20/20**. Recorded permanently in `api-samples.md` §6.6.
-- **The 0/N root cause.** The board renders **two** `div.load-list` elements — main results and
-  "Similar matches". The reader was taking the first one and collecting both: a "9 of 9 results"
-  board yielded **13** cards. The 4 extras never appear in `/search`, so they could never join.
-  Recorded in `AMAZON_SELECTORS.md`.
-- **Both accumulator reset signals are wrong.** `searchAuditId` changes per **request**;
-  `originCities` fires during the **normal staged load of the same search** (chips arrive one,
-  then all five), which wiped 51 ids mid-fill.
-- **There is no pagination to solve.** The main list renders all N at once ("10 of 10"). The
-  earlier "paginates at 5" belief came from misreading the Similar-matches block.
+- **Fast Book.** Its behaviour is settled. It reads the card for the load id and Amazon's **live**
+  sheet for the Book button; it does not depend on any scrape. Do not redesign it.
+- **The empty `FORBIDDEN_SELECTORS`.** Settled. Do not re-audit.
+- **The retained-but-disconnected rename-city code.** Settled.
 
-**AWAITING Ihor's manual test:** the main-list scoping fix and the per-cycle rewrite — see §4.
+Re-opening these has wasted whole sessions. If something looks wrong in them, ask Ihor rather than
+investigating.
 
-**BLOCKED, and on exactly what:** moving `cityAssign` from log-only to **actually filtering
-cards** is blocked on §4's test returning `MATCH: YES` with a non-zero intersection. Nothing may
-consume the per-city counts until then.
+### Other standing constraints
 
-**Other open blockers:**
-- **🚫 PRE-LAUNCH BLOCKER — cross-tab rate limiting** is implemented but never verified in a real
-  multi-tab browser session. Highest-priority open item before distributing to more than one
-  dispatcher. See `BACKLOG.md` and `TEST_CASES.md` TC-RATELIMIT-1.
-- **Five harness suites are RED — 43 assertions.** All 43 name functionality deleted in §4; core
-  behaviour is green. `cityaccum-harness` tests deleted code end to end and should be retired.
-  **Deliberately left red rather than edited.** Needs a decision before the next code change, or
-  the next run's signal is unreadable.
-- **`content/loadParser.js:124` is unaudited** and makes the same "first `div.load-list` is main"
-  assumption that caused the 0/N bug. It feeds **highlighting and alerts** — things the
-  dispatcher sees. Needs its own task.
-- **⚠ The build is NOT shippable as it stands.** All five debug flags are **ON**:
-  `DEBUG_LEVEL = 3`, `CAPTURE_RESPONSES` and `CITY_ASSIGN_DEBUG` `true` in **both** worlds
-  (`utils/constants.js` and `content/networkObserver.js`). While `CITY_ASSIGN_DEBUG` is on the
-  **raw response body is transported** across `postMessage`. All five must return to `1`/`false`.
+- **Do not edit `content/nightMode.js`.** (This currently blocks one item — see §6.)
+- Never select on `css-<hash>` class names. They change on every Amazon deploy and have broken
+  this project three times.
+- Colours come from existing `--ext-*` tokens only. No new hardcoded literals.
+- Do not anchor on the text "Recently added" (not always rendered) or "Similar matches"
+  (localised across 11 domains).
+- If a test failure looks like a real product defect, **stop and report** — never "fix" the
+  product to make a test pass.
 
 ---
 
-## 4. The most recent unverified change
+## 3. Where we are now
 
-**`content/cityAssign.js` — per-cycle rewrite (2026-08-12). 1103 → 996 lines.**
+**Pre-launch.** Not submitted to the Chrome Web Store.
 
-The id accumulator, its 3000-entry cap, `mergeIntoAccumulator()`, `resetAccumulator()`, **both**
-reset paths and every reset log line (`CITY DIAG RESET`, `CITY DIAG 5/5`) were removed. Each
-cycle is now self-contained: current main-list card ids → the buffered `/search` response sharing
-the most ids with the board → nearest active city by haversine → log. **No state crosses cycles.**
+**Shipped and live-verified:**
+- board watching, new-load detection, alert, tab flash, highlight
+- auto-open of the top new load, with the refresh loop stopping *before* it opens (PLAN 7b)
+- **per-city filtering** — the core of this phase
 
-Unchanged: the join read, the main-list scoping, haversine, the 150 mi threshold, reading active
-origin cities, and all `CITY_ASSIGN_DEBUG` gating.
+**Built, awaiting Ihor's live test** (see §5): everything from 2026-08-13 onward, including the
+auto-switch, the per-page working set, the merged coordinate map, and the entire inline-panel
+rebuild.
 
-### ⚠ `cityAssign` is still LOG-ONLY
+### The inline panel rebuild — status, corrected
 
-It **does not hide, filter, reorder, restyle or badge a single card**. It mutates no DOM and
-clicks nothing. Its entire output is console lines. Nothing the dispatcher sees is affected by
-any of this work yet.
+`docs/PLAN.md` §29 stages it. **A/B are done. C is NOT.**
 
-### What Ihor must do to confirm it
-
-Flags are already on. **Reload the extension, then close and reopen the Relay tab** — content
-scripts only inject at page load, so an open tab keeps running the old code.
-
-Run a multi-city search and read the console (filter `EXT`):
-
-1. **`CITY DIAG 0/5`** → must read **`MATCH: YES`**, i.e. collected card count **equals** the
-   board's "of N results" number. This is the tell that Similar-matches cards are excluded.
-2. **`CITY DIAG 3/4`** → intersection **non-zero on the FIRST cycle** (no scrolling needed).
-3. **Zero `CITY DIAG RESET` lines** — the string no longer exists in the build.
-4. Let auto-refresh tick several times → **no RESET spam, counts stay stable**.
-5. Sanity-check `CITY ASSIGN` per-city counts against what he sees on the board.
-6. **Then set all five flags back to `false`/`1`.**
-
-Also confirm nothing user-facing moved: sidebar activates, START/STOP works, highlighting fires,
-the origin-cities panel renders and follows.
-
-**If `MATCH: NO — collected MORE`:** the panel token is matching something that still contains the
-Similar block — capture the panel's class/id. **If `MATCH: unknown`:** the "Showing…" copy differs
-from what the parser expects — capture the exact text.
-
----
-
-## 5. The pending cleanup
-
-A two-phase **audit-then-delete** task was run through **Phase 1 (inventory) only**. Findings:
-
-- **Bucket C (orphans) was EMPTY** — zero unreferenced declarations across 404. The codebase is in
-  better shape than a "clean up the cruft" brief assumes. **Do not commission a blind sweep.**
-- **Already actioned** (they went with the §4 deletion): the write-only `_cityAccumAuditId`, a
-  stale contradictory comment block, and the whole accumulator.
-- **STILL PENDING, not yet approved:**
-  - **Stale doc claims in `api-samples.md`** — §6.5 "page size 50" and §6.7 "paginates at 5" are
-    both wrong; §6.7's two-tab fix-direction is moot. Docs only, but actively misleading.
-  - **Debug-scaffolding consolidation (optional).** ~400 of `cityAssign.js`'s 996 lines are
-    flag-gated `CITY DIAG` / `CITY RAW` diagnostics. They **stay** — proposal is only to move them
-    to a `content/cityAssignDebug.js` so the live logic reads clean. Ergonomics, not cleanup.
-
----
-
-## 6. File map — what each doc is for
-
-| File | What it is for |
+| stage | status |
 |---|---|
-| **`STATE.md`** | The live status board: current phase / done / in progress / next / blockers. **Read after this file.** Rewritten at the end of every task. |
-| **`BACKLOG.md`** | Planned features and engineering work, with a status key (UI-BUILT / PLANNED / PARTIAL). Holds the 🚫 PRE-LAUNCH BLOCKER section. |
-| **`PRODUCT.md`** | Product-level record — what the extension is for and what differentiates it. Home of the Single-Tab Multi-Driver Monitor concept. |
-| **`CLAUDE.md`** | The rules of engagement: working roles, token economy, code rules, safety rules, verification rules, and the end-of-task doc routine. **Binding.** |
-| **`TEST_CASES.md`** | Manual test cases Ihor runs, with an "OUTSTANDING — run these first" section at the top. |
-| **`UI_ELEMENTS.md`** | Registry of every UI element and its mandatory `data-testid`. |
-| **`AMAZON_SELECTORS.md`** | Every selector we depend on in Amazon's DOM, with verification dates and known fragilities. **Check here before writing any selector.** |
-| **`api-samples.md`** | Real captured API payloads and the field paths proven from them. Carries the never-guess rule and the confirmed id join (§6.6). |
-| **`GLOSSARY.md`** | Short term definitions (Load, Layout A, and similar) for shared vocabulary. |
+| A — remove the scrape path | **done** 2026-08-14 |
+| B — render from the captured record | **done** 2026-08-14 |
+| **C — wire into auto-open** | **NOT DONE — `blocked`** |
+| D — measure detection→visible | blocked on C |
+| E — derived segment duration | done, inside B |
+| F — extra fields (cost items, layover, …) | next |
 
-Also present: `SPEC.md` (MVP specification), `SAFETY.md` (booking-safety rules),
-`CHANGELOG.md` (dated record of every change — append, never rewrite),
-`BUG_REPORT_TEMPLATE.md`.
+⚠ **Do not assume C is done.** `content/content.js` contains **zero** calls to
+`showInlinePanel(` — verified today. Clicking a card manually shows the panel; **auto-open opens
+the card but shows no panel of ours.** A test asserts this absence deliberately, so the suite is
+green either way.
+
+The panel now renders from captured API data with **no DOM scraping of any kind**. The old
+click-then-scrape path (338 lines, every `.css-<hash>` selector, the 800 ms settle) is gone.
+
+---
+
+## 4. Settled architecture — do not re-litigate
+
+Each of these was established the hard way. Re-deriving them costs days.
+
+**1. Response bodies are captured by piggybacking Amazon's own `Response.prototype.json` read.**
+`clone().text()` **cannot work**: the SPA aborts its own in-flight search after a 200, and
+`AbortController.abort()` errors **both** tee branches regardless of buffering. The wrapper returns
+the *original* promise object so identity is preserved. See `api-samples.md` §6.8.
+
+**2. Captured endpoints — exactly three:**
+`/api/loadboard/search`, `/api/loadboard/similar`, `/api/loadboard/recommendations/get`.
+The last is **the source of the "Recently added" cards** — it was being seen and discarded for
+weeks, which is why the newest loads were the ones showing as unassigned.
+`WATCH_PATH` (rate-limit reporting) is **search-only and must stay that way** — widening it would
+feed unrelated failures into the backoff.
+
+**3. Ids from ALL buffered responses merge into ONE persistent `id -> {lat,lng}` map.**
+Never pick one response. The old `pickBuffer()` chose the single highest-overlap response and
+discarded the rest, which broke on pagination, on aborted requests, and across saved-search tabs.
+Merging is safe because the work-opportunity id is globally unique — **measured: 13 ids appear in
+more than one capture, 13 with identical coordinates, 0 conflicts.** The map persists across
+cycles and is bounded at 4000, evicted oldest-first.
+
+**4. The main results list:**
+`getElementById('search-results-summary-panel')` → walk **following siblings** → first
+`div.load-list`.
+**The panel is a SIBLING of the results, never an ancestor.** A second `div.load-list` on the page
+is the *Similar matches* block and must never be read.
+
+**5. Card ids:** `div.load-card > div[id="<uuid>"]` — **bare UUIDs only.** Filter by UUID shape,
+not by card class: a measured 9-result board found 8 by class and 9 by id, because the
+recently-added card carries a different class. Cards also contain `div[id="STARTING_SOON"]`, which
+the shape filter excludes.
+
+**6. The "Showing" line carries TWO numbers.** `Showing 1 - 50 of 230 results` is a **rendered
+range** *and* a **grand total**. They are equal only on a single-page board. Compare the collected
+card count against the **RENDERED** count. Comparing against the total made every paginated board
+skip its cycle and filtering appear dead.
+
+**7. City membership = every active origin city within `CITY_ASSIGN_MAX_MILES` (150).**
+**Not nearest-wins.** A load in range of two cities appears under both — that is how a dispatcher
+decides which driver takes it. Per-city counts can therefore sum to more than the card count.
+
+**8. We work only with the currently RENDERED page.** Ihor's rule. `Showing 1 - 50 of 145` means
+we assign and filter those 50 and nothing else. A page change **replaces** the assignment map; an
+ordinary re-render merges. Page changes are detected from the rendered range plus the first/last
+card ids — **never from the pagination controls, which we never touch.**
+
+**9. Unassigned loads stay VISIBLE and are counted on the "All" button.** Never hide what could
+not be placed. The count is clickable and filters to just those loads. This exists because a
+silently-broken assignment once looked exactly like a working filter — two city tabs showed
+identical plausible lists and nothing on screen contradicted it.
+
+**10. Deadhead is replaced with our per-city distance ONLY on multi-city loads.** Amazon's
+deadhead is one value for the whole search — the distance to the *nearest* of the selected cities.
+On a load belonging to exactly one city it is already correct, so it is left alone.
+
+**11. `CITY_FILTER_ENABLED` is a PRODUCT flag and must stay `true`.** It is not a debug switch. The
+five debug flags ship **off**.
+
+**12. One `/search` response = ONE page.** Never several. See §7 for the page-size correction.
+
+---
+
+## 5. Verified live vs awaiting Ihor
+
+**The executor has no browser. Nothing dated 2026-08-13 or later has been seen on a real board.**
+
+### Verified live (Ihor confirmed)
+
+| what | evidence |
+|---|---|
+| Main-list vs Similar-matches structure | live DOM capture, 2026-08-13 |
+| `findMainResultsList` on the real board | live-verified under PLAN 3 |
+| Per-cycle city assignment | `CITY DIAG 0/5` MATCH: YES every cycle; intersection **30/30 and 28/28**, zero unmatched |
+| Body capture via `Response.json()` | board rendered normally with the wrapper installed |
+| The recently-added card carries `wo-card-header--highlighted` | live 10-of-10 capture — this **disproved** a suspected silent alert-miss |
+
+### Built but NOT verified live — the whole current phase
+
+Auto-switch (7c) · merged coordinate map (7e) · per-page working set (7f) ·
+`/recommendations/get` capture · inline panel Stages A and B · equipment labels · date format ·
+the three panel visual fixes · the merged top bar and drag · the unmatched-loads counter.
+
+**1345 automated checks pass across 20 suites.** That is not the same as working. A recent,
+instructive failure: **1220 checks were green while clicking a card did nothing at all**, because
+Stage A removed the render call and Stage B never restored it — and one of those green checks
+asserted the missing call was missing. `wiring-suite` now exists precisely to dispatch a real click
+and assert a panel appears.
+
+**Ask Ihor to run the six-item smoke checklist before anything else.** It has been NOT RUN for
+every change in this phase.
+
+---
+
+## 6. Open blockers — what each is waiting on
+
+| # | item | blocked on |
+|---|---|---|
+| **10** | **Cross-tab rate limiting, live multi-tab test** | 🚫 **pre-launch blocker.** Needs Ihor with 4 tabs open: aggregate request rate must equal the global interval, not 4×; a forced 503 must pause and resume all tabs together. |
+| **12** | Debug flags off, final build check | ⚠ **`DEBUG_LEVEL` is currently `3` in `utils/constants.js` and must return to `1` before shipping.** The other four flags are already off. |
+| 6, 7 | Per-city filtering / button wiring marked done | **Only Ihor's eyes can close these.** Built and believed working; not confirmed. |
+| 8 | PAT R-type (own-trailer) support | needs one **captured manual R upsert payload**. Cannot be guessed. |
+| 11 | Full manual smoke pass + `TEST_CASES.md` | blocked on 6–8 |
+| 13 | Store submission package | icons, privacy policy, listing copy, data disclosure, version bump, zip |
+| 29c | Inline panel Stage C — wire auto-open | ready to start; nothing blocking but sequencing |
+| 20 | Price-increase payout selector | needs a capture of a price-increased card |
+| 21 | Non-US locale handling | needs a capture from a non-`.com` domain |
+| 19 | Collapse Amazon's filters panel on START | no reliable read of open vs collapsed |
+| — | **Night mode still zebra-stripes** the panel | `nightMode.js` holds a dark counterpart to a rule removed in light mode. **Blocked by the "do not edit nightMode.js" constraint** — one rule, removable the moment Ihor lifts it. |
+
+---
+
+## 7. Corrections to earlier documentation
+
+Two claims that were in the docs and are **wrong**:
+
+- ~~"`/search` paginates at page size 50"~~
+- ~~"the live board now paginates at 5"~~
+
+**Measured across every capture on disk today:**
+
+| capture | records | `nextItemToken` | `totalResultsSize` |
+|---|---|---|---|
+| `paired-search` | 50 | 50 | 338 |
+| `similar-1` | 50 | 50 | 232 |
+| `search-5cities-active` | 50 | 50 | 104 |
+| `search-5cities-other` | **5** | 5 | 11 |
+| `search-2` | **4** | null | 4 |
+
+**The page size is NOT fixed.** 4, 5 and 50 have all been observed. What is stable: a response
+carries **at most 50** records, `nextItemToken` is a cursor equal to the records delivered so far,
+and `totalResultsSize` is the grand total. **Never hardcode a page size — read the rendered range
+from the Showing line.**
+
+---
+
+## 8. Where things live
+
+| path | what |
+|---|---|
+| `content/networkObserver.js` | **MAIN world.** The only one. Wraps fetch/XHR + `Response.prototype`. Cannot see isolated-world globals (no `logger`) — it reports via `reportDrop()` and `postMessage`. |
+| `content/cityAssign.js` | city assignment, the filter, the merged coord + record stores, deadhead substitution |
+| `content/originCities.js` | the city buttons row, now inside the top bar |
+| `content/inlinePanel.js` | the panel: record → render, Fast Book, PAT entry |
+| `content/content.js` | the pipeline: detect → surge → highlight → alert → auto-open |
+| `content/sidebar.js` | the top bar, and its drag behaviour |
+| `samples/` | **the captures. ⚠ gitignored — they do not survive a clone.** |
+| scratchpad `*-suite.mjs` | 20 Node suites, 1345 checks, run against the real source files |
+
+**`samples/` being gitignored is a real risk:** every "measured from disk" fact in this repo
+depends on files a fresh clone will not have. Ask Ihor for them before trusting any re-measurement.

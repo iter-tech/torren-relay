@@ -2,6 +2,1400 @@
 
 ## [Unreleased]
 
+### 2026-08-20 — PLAN 10 CLOSED by product decision: shared limit ships OFF, auto-stop + calm message
+
+**Files:** `content/content.js`, `content/sidebar.js`, `popup/popup.html`, `popup/popup.js`.
+⚠ **No rate-limiting behaviour changed** — not the interval, the backoff curve,
+`RATE_LIMIT_STATUSES`, or `WATCH_PATH` (still search-only). Asserted.
+
+#### D1 — the "Shared refresh limit" toggle is REMOVED and the feature ships OFF
+
+**IHOR'S REASONING, recorded so this is not quietly reversed:** silently slowing refreshes while
+the dispatcher is looking at "Refresh every 2.5s" would read as the extension being **broken, not
+as protection**. Dispatchers already know Amazon throttles and they manage their own tab count.
+**Honesty about what the extension does outranks the extra safety margin here.**
+
+The toggle markup is gone from `popup.html`; `popup.js`'s wiring is **retained and null-guarded**,
+so restoring the markup restores the feature. `content.js` gains one constant,
+`SHARED_LIMIT_SHIPS_ENABLED = false`, which clamps both the seed and the cross-tab sync so no
+stored value can switch it on. **The machinery in `background.js` is untouched and unreachable —
+deferred, not deleted** (BACKLOG).
+
+The sidebar label now reads the honest per-tab **"Refresh every 2.0s"**, and the "Active tabs: N"
+row never shows, because we deliberately no longer count tabs or slow anyone down.
+
+⚠ **THIS DOES NOT DISABLE BACKOFF.** `grantOrDenyPermit()` checks `backoffUntil` **before** it
+looks at `sharedLimitEnabled` — read from the source and asserted by an index comparison in the
+suite, not assumed. A 429/502/503/504 still pauses every tab with the shared limit off.
+
+#### D2 — the loop STOPS on throttling, in every tab, and does not auto-restart
+
+`background.js` writes the limiter state on every reported result and `chrome.storage.onChanged`
+fires in **every** tab, so one rate-limit response anywhere stops the loop everywhere — no polling,
+no second timer. It calls `tabState.set('running', false)`, the same stop the play/pause button
+performs, so the button reflects reality immediately.
+
+🔴 **There is deliberately NO "backoff cleared" branch.** When the pause lifts the loop stays
+stopped until the dispatcher presses play, so he stays in control and always knows whether he is
+scanning. The suite asserts no branch sets running back to true.
+
+#### D3 — a calm message in the TOP BAR
+
+> **Amazon is taking a short technical pause**
+> The server has paused new loads because of frequent requests. Pause auto-refresh for 5-10
+> minutes and it will return to normal on its own.
+
+In the bar, not the popup: the dispatcher is already looking there for the refresh interval, and a
+message he must open a popup to find is one he will not see when it matters.
+
+⚠ **TONE IS A REQUIREMENT, NOT A DETAIL.** Ihor's dispatchers hit this repeatedly — Amazon
+throttles the IP for 10-15 minutes and then everything works again. **Nobody's account is at
+risk.** No "error", "blocked", "banned" or "violation"; **no warning icon, no red styling, no
+sound**; a neutral surface from existing `--ext-n100/n200/n700/n900` tokens with **no new colour
+literals**. All asserted, including the exact wording, so it cannot drift.
+
+It has its own visibility flag rather than reusing `isRateLimitPaused()`: background keeps
+`rateLimited` true until a 2xx is actually observed, which cannot happen until the loop runs
+again — so the message must clear on **restart**, which is a different question.
+
+#### PLAN 10 is CLOSED
+
+**The four-tab aggregate-rate test is no longer required.** With the shared limit shipping off
+there is no aggregate-rate behaviour left to test across tabs — every tab paces itself, which is
+exactly what the decision intends. What remains testable is the pause/resume half, and that is now
+covered by TC-RATE-PAUSE using the existing `simulateRateLimit` hook in a single tab.
+
+The RATEDIAG diagnostics from the previous task are **kept** — they now serve D2 rather than the
+aggregate measurement.
+
+**Tests.** New `plan10-suite`, **49 checks**. **1860 green**; the one failure is the standing true
+positive that `DEBUG_LEVEL` is `3` and `CITY_ASSIGN_DEBUG` is `true` in the working tree — Ihor
+turned them on for the RATEDIAG run and **both must go back before shipping**.
+
+**Verification.** Nothing exercised on a real board — no browser here.
+
+### 2026-08-20 — SMOKE CHECKLIST COMPLETE · PAT closed · PLAN 10 instrumented
+
+#### ✅ All six smoke items PASS — the first complete run this phase
+
+Ihor confirmed **(e) PASS on 2026-08-20**, on both a **P** and an **R** load. a/b/c/d/e/f all pass.
+
+**PAT is closed.** It is fully record-sourced and verified field by field against real Amazon
+upsert payloads: driver type (SOLO/TEAM), equipment (including the five-element 53' array), city
+resolution with the state-code table, stop count, the −30 min / +3 h window, the ×1.10 markup, and
+`loadingTypeList`. Trailer ownership works on both P and R loads. **PLAN 8 and the PAT regression
+are closed.** The one remaining caveat is unchanged and recorded in BACKLOG 0p: trailer ownership
+is an authorised INTERIM DOM DEPENDENCY, to be replaced when the record-based rule is found.
+
+#### ✅ BACKLOG 0q CLOSED — the loading-type pairing was a sampling artefact
+
+Power only + **"Live or Drop & Hook"** produces `loadingTypeList: ["LIVE"]`, captured from the
+live form. The earlier observation that `AMAZON_PROVIDED` always paired with `["DROP"]` was **not
+a rule** — Ihor had simply left the Load control on "Drop & Hook" throughout those eleven captures.
+**Our `AMAZON_PROVIDED` + `["LIVE"]` pairing is legitimate and needs no change.** Recorded so the
+"7/7 and 4/4" correlation is not resurrected as evidence.
+
+#### PLAN 10 — instrumented, not changed
+
+⚠ **No rate-limiting behaviour was touched**: not the interval, not the backoff curve, not
+`RATE_LIMIT_STATUSES`, not `WATCH_PATH` (still `/api/loadboard/search`, verified).
+
+**First, the question that had to be answered before instrumenting: CAN the aggregate rate hold
+across tabs as built? YES.** `background.js` keeps one `lastGrantedAt` in
+`chrome.storage.local` and refuses any permit until `lastGrantedAt + floorMs`, serialised FIFO
+through `permitQueueTail` and re-read after every wait. Backoff is checked **first and always**,
+before the `sharedLimitEnabled` toggle, so a rate-limit response pauses every tab regardless of
+the shared-budget setting. There is no product defect to report.
+
+🔑 **THERE IS NO TOKEN, LEASE OR TURN.** It is a **permit** with a single global floor,
+first-come-first-served — no tab ever "holds" anything. The diagnostics say so explicitly rather
+than inventing a holder, because the brief's wording invited one.
+
+**Part 1 — measurement.** Grants are recorded in the service worker (the only context that sees
+every tab) so **any one console** shows the aggregate. Per tab: a short stable id, each request
+with a timestamp, the permit wait, and the interval since that tab's previous request. Aggregate:
+requests across all tabs in the last 60 s, the mean interval, and the configured global interval
+side by side with an explicit AGREES / DISAGREES verdict.
+
+**Part 2 — the 503.** The pause is triggered **only** by an HTTP **status** in
+`RATE_LIMIT_STATUSES = [429, 502, 503, 504]`, inside `reportResult(ok, status)`. Not a body, not
+a thrown error, not a timeout — every other outcome returns **without** `setState`, a deliberate
+no-op since the 2026-07-31 fix.
+
+🔴 **DevTools request blocking would NOT trigger it.** Blocking produces a failed request with no
+HTTP status, which is not in `RATE_LIMIT_STATUSES`, so `reportResult` takes the no-op branch —
+**a different code path entirely**. Worse, aborted requests are no longer reported at all by
+`networkObserver.js`, so blocking is doubly inert. **There was no existing hook** to simulate a
+rate limit, so the smallest one was added: a `RATE_DIAG` message that calls **the real
+`reportResult()`** with a real status. It proves everything downstream of the status — pause,
+backoff step, cross-tab propagation, resume on 2xx. **It does not prove that a genuine Amazon 503
+arrives here as status 503**; that is the networkObserver → content.js relay, which only a real 503
+exercises.
+
+**Verification.** Nothing exercised on a real board — no browser here, and four tabs cannot be
+opened. 1812 checks green, zero failures.
+
+### 2026-08-20 — FIX: trailer ownership from the P/R badge (interim) + label collection
+
+**Files:** `content/patModal.js`, `content/patApi.js`, `content/cityAssign.js`,
+`content/loadParser.js`.
+
+#### PART 1 — PAT posts the real trailer ownership
+
+`P → AMAZON_PROVIDED`, `R → CARRIER_OWNED`, and **anything else — an unexpected letter, no
+letter, no parsed card — leaves Confirm DISABLED with the raw value named and a `logger.error`.
+Never defaulted.** `providedTrailerType` and `visibleProvidedTrailerType` both read the same
+`formState` value; the hardcoded `AMAZON_PROVIDED` literal is gone. The modal summary now reads
+**(Provided)** or **(Required)** instead of a hardcoded "(Provided)".
+
+⚠⚠ **THIS IS THE ONLY DOM-SOURCED FIELD IN THE PAYLOAD, and it breaks the standing "one id plus
+one API record" directive.** Ihor authorised it as a deliberate, temporary exception. It is marked
+in three places so it cannot be mistaken for the design: a block comment at the read site naming it
+an INTERIM DOM DEPENDENCY with the two conditions for deleting it, a BACKLOG entry, and a line in
+STATE.md. **It was not extended to any other field.**
+
+⚠ **`"R"` HAS NEVER BEEN OBSERVED IN A CAPTURED CARD** — only `"P"`. The R branch is unverified
+until Ihor posts one; the modal emits a `logger.warn` saying exactly that when it fires.
+
+Note the summary separator is **U+2003 EM SPACE**, not a normal space — found by byte-inspecting
+the line after two anchor misses, and preserved exactly so the layout is unchanged.
+
+#### PART 2 — label collection, so the rule can be found
+
+The reason four hypotheses died unconfirmed was **one label on disk**. Now, whenever a card is
+parsed, its badge letter is filed beside the captured record **under the same work-opportunity
+id**, in `cityAssign.js` next to `_cityRecordById` — **same id, same eviction list, same
+teardown**, so a label can never outlive or predecease the record it describes.
+
+In-memory only: no disk write, no network, no storage API, nothing leaves the tab — asserted. No
+new capture, no new request, and **no extra DOM traversal**: it files the letter
+`loadParser.js:84` already reads.
+
+**The dump command, for the PM:**
+
+```
+__EXT_DEBUG.dumpTrailerLabels()
+```
+
+It reports how many P and how many R have been collected, warns when R is still zero, and prints
+the pairs between copy markers. It deliberately uses `console.*` rather than `logger.*` so it
+**works at the shipped `DEBUG_LEVEL`** with no reconfiguration.
+
+#### How many labels are needed
+
+83 fields vary across the 146 records. A candidate rule survives only while it agrees with every
+label. **R labels are worth roughly twelve times a P label**: the R-side groups are only 10–20% of
+the board, so most candidates predict "P" for most loads — a P label eliminates ~15% of them, an R
+label eliminates ~85%. Expected survivors ≈ 83 × 0.15^(number of R labels): **2 R → ~1.9, 3 R →
+~0.3, 5 R → ~0.006.** So **3 R labels make it conclusive and 5 give margin**; P labels accumulate
+for free and are not the constraint.
+
+#### Everything else is unchanged
+
+Asserted: ×1.10, −30 min, +3 h, ±25 miles, `stopCount`, city resolution, driver type, loading
+type, the five-element 53' array.
+
+**Tests.** New `pattrailer-suite`, **58 checks**, end to end. Ten assertions across four suites
+described the pre-fix world (no letter → Confirm disabled; P/R "untouched"; the payload constant)
+and were updated — the harnesses now supply a badge letter, as a real card does. **1812 checks
+green, zero failures** — and `capture-suite` passes again because Ihor has returned
+`DEBUG_LEVEL` to `1` and `CITY_ASSIGN_DEBUG` to `false`. **Both ship blockers are now clear.**
+
+**Verification.** Nothing exercised on a real board — no browser here. Re-test **(e) only**, on a
+P load and an R load.
+
+### 2026-08-19 — DIAGNOSIS (final): the P/R badge cannot be determined from the response bodies
+
+No code changed. Recorded in `api-samples.md` §11.
+
+**Two more hypotheses refuted by Ihor's board, both recorded so neither is re-derived:**
+**C1** "any stop LIVE means R" — three **P** cards showed *Live/Drop*. **C5** "any DROP means P,
+all-LIVE means R" — two **R** cards showed *Live/Drop* (COLUMBUS,IN → GROVEPORT,OH and
+TOTOWA,NJ → HAZLETON,PA). **Loading type does not determine the badge in either direction, and no
+further loading-type rule will be proposed.**
+
+**E1 — the request side is not captured at all.** `networkObserver.js` reads `arguments[1]` only
+for `.signal`; it never touches `init.body` or `init.method`. And the response does not echo the
+request: every top-level key was enumerated, and `metadata` is a CARB warning while
+`carrierDetails` is account-level scoring identical across all seven captures.
+
+**🔑 E1 corollary — the record cannot encode the variant.** Amazon's filter chips read "53' Trailer
+**(R)**", so the marker sits on the *filter option*; but every record serialises both variants to
+the same `loads[].equipmentType` (`FIFTY_THREE_FOOT_TRUCK` 215 / `FIFTY_THREE_FOOT_CONTAINER`
+15). A (P) and an (R) load of the same equipment are **indistinguishable** there.
+
+**E2 — the labelled set inside the captures is 1 P and 0 R.** Only one captured card file exists,
+so only `72e5184e` has a known badge. **With no labelled R, no field can be confirmed — only
+refuted.** That is precisely how every hypothesis has died so far. Measured vacuity: **83 fields
+vary across the 146 records and 63 are consistent with the single labelled P.** Enumerating more
+fields is not a path to an answer, so none was proposed — as instructed, no third correlation-only
+hypothesis.
+
+**✅ THE HONEST FINDING: the captured response bodies cannot answer this.** It is structural, not a
+gap in effort.
+
+**The interim route, costed, not implemented.** What Amazon marks is in the DOM and the extension
+**already reads it**: `div.trailer-type-circle > p` (a stable class, not a hash) →
+`loadParser.js:84` → `trailerLetter` → `loadStore`. PAT could reach it today via
+`loadStore.getLoadUnit(loadId).trailerLetter` — roughly a ten-line change plus tests. ⚠ It would be
+**the only DOM-sourced field in the payload**, against the standing "one id plus one API record"
+directive, so it must be flagged in code as an interim dependency to delete when Ihor's own backend
+supplies trailer ownership. ⚠ Also: `"R"` has **never been captured in a card**, so the R branch
+would itself be unverified until one is.
+
+**Verification.** Nothing exercised on a real board — no browser here. Nothing to re-test.
+
+### 2026-08-19 — DIAGNOSIS: the P/R badge — assetOwner REFUTED, one hypothesis now ranked first
+
+No code changed. Labelled evidence saved to
+`samples/pr-badge-labelled-records-2026-08-19.json`, recorded in `api-samples.md` §10.
+
+**A. FROM THE RENDERED PAGE.** The badge is
+`<div class="trailer-type-circle"><p>P</p></div>` — a **stable semantic class**, not a
+`css-<hash>`. **`content/loadParser.js:84` has been reading it into `trailerLetter` all along.**
+Evidence only: PAT still posts from one id plus one API record and will not read the badge from the
+DOM.
+
+**🔑 That gave us a SECOND labelled record for free.** `samples/paired-card.html` renders badge
+**P**, and that card's div id is work opportunity `72e5184e…`, which we hold in full. So there are
+two known-P records, not one.
+
+**❌ `assetOwner` is REFUTED, and recorded as tested-and-ruled-out.** The two known-P records carry
+**different** values — `72e5184e` = `"AZNG"`, `4c0565e4` = `"NCSL"`. A non-null or non-Amazon
+`assetOwner` does not mean carrier-owned in either direction. BACKLOG 0p's assetOwner line is
+closed as REFUTED so nobody re-derives it.
+
+**❌ Also refuted:** `containerOwner == "EMPTY_CONTAINER_ID"` — `4c0565e4` (P) carries it,
+`72e5184e` (also P) does not. **❌ Cannot discriminate:** `stopRequirementType` is `"CONTAINER"`
+in 146/146.
+
+**B. FROM THE CAPTURED BODIES.** Every field that varies across work opportunities was enumerated
+(top level, `loads[]`, `stops[]`), each with its distinct values, group sizes and where the
+known-P record sits. Four hypotheses survive both known-P records: **C1** any stop
+`loadingType: "LIVE"` (15/146), **C2** `existingSubCarrierName` not purely AZNG (29/146),
+**C3** any load `isExternalLoad: true` (24/146), **C4** container equipment (15/146).
+
+**🟡 C1 is ranked first — the only one with a mechanism, not just a correlation.** PRELOADED means
+the trailer is already loaded and waiting (Amazon supplied it); LIVE means it is loaded while the
+driver waits, which is what a carrier bringing its own trailer does. It also matches §8a exactly:
+the eleven captured upserts tie `AMAZON_PROVIDED` → `["DROP"]` (7/7) and `CARRIER_OWNED` →
+`["LIVE"]` (4/4). **And half of it is already confirmed** — the §10b card reads *Drop* and its
+badge is **P**.
+
+⚠ **All four are HYPOTHESES until a known badge confirms one.** Nothing was implemented.
+
+**Verification.** Nothing exercised on a real board — no browser here. This task changed no
+behaviour, so there is nothing to re-test.
+
+### 2026-08-19 — 53' Trailer array fully captured: the existing constant is CONFIRMED, no code change
+
+Ihor expanded the array in DevTools and captured it **twice**, once per order type. Saved to
+`samples/pat-upsert-53ft-expanded-2026-08-19.json`, recorded in `api-samples.md` §8b.
+
+```
+FIFTY_THREE_FOOT_TRUCK · SKIRTED_FIFTY_THREE_FOOT_TRUCK · FIFTY_THREE_FOOT_DRY_VAN
+FIFTY_THREE_FOOT_A5_AIR_TRAILER · FORTY_FIVE_FOOT_TRUCK
+```
+
+**NO CODE CHANGE WAS NEEDED — and that is the finding.** `PAT_EQUIPMENT_TYPES_53` in
+`content/patApi.js`, captured 2026-07-14, is **byte-identical**: five elements, same order,
+verified programmatically rather than by eye. `visibleEquipmentTypes` is `array[0]`, which is what
+the code already sends. `FIFTY_THREE_FOOT_TRUCK` was already in `PAT_EQUIPMENT_BY_ENUM`, so 53'
+Trailer has been mapping correctly all along.
+
+This resolves the doubt raised in BACKLOG 0r, which flagged that the July five-value list had never
+been checked against the truncated one. **It matches.** BACKLOG 0r is closed.
+
+**Both order types send the SAME array for 53' Trailer** — only `providedTrailerType` /
+`visibleProvidedTrailerType` differ. So trailer ownership does not affect the equipment array,
+which keeps BACKLOG 0p (P/R detection) cleanly separable from equipment work.
+
+⚠ **Shape confirmed:** one UI choice expands to several enum values, so `equipmentTypes` is not a
+one-to-one mapping from the record's equipment field. `PAT_EQUIPMENT_BY_ENUM` returns the array
+itself and already supports multi-element results — asserted.
+
+⚠ **`FIFTY_THREE_FOOT_REEFER_TRUCK` remains UNCONFIRMED** and stays on the ask-for-a-capture path:
+it is in no capture, is not mapped, and a record carrying it is logged verbatim and refused.
+
+**Tests.** `patalign-suite` section 9, 11 new checks: the array is pinned element-by-element to the
+capture so a future "tidy-up" cannot silently change what goes to the marketplace; a 53' Trailer
+record posts all five end to end; and the reefer is asserted still unmapped. **1753 checks green**;
+the one failure is the standing `CITY_ASSIGN_DEBUG` true positive.
+
+**Verification.** Nothing exercised on a real board — no browser here. No behaviour changed, so
+there is nothing for Ihor to re-test.
+
+### 2026-08-19 — DIAGNOSIS: trailer ownership (P/R) is NOT in the captured record (no code change)
+
+**Eleven real upsert captures saved** to `samples/pat-upsert-eleven-2026-08-19.json` and recorded
+in `api-samples.md` §8 (samples/ is gitignored, so the doc is the durable copy). No behaviour
+changed in this task.
+
+**R1 — the answer is negative, and it is measured, not assumed.** Across **159 work opportunities /
+506 stops**: **no path anywhere** in a search response carries `AMAZON_PROVIDED`/`CARRIER_OWNED`,
+and **no path** carries a bare `"P"`/`"R"`.
+
+The PLAN 29f candidate `loads[].stops[].trailerDetails[].assetOwner` was verified rather than
+assumed. It exists — an array on each stop, 253 entries across 506 stops, with every sibling
+(`assetId`, `assetType`, `assetSource`, `dropTrailerETA`, `trailerLoadingStatus`) **null in all
+253**. `assetOwner` holds `AZNG` ×164, `NCSL` ×68, null ×17, `HUBG` ×3, `AZNU` ×1.
+
+🔴 **It is DISQUALIFIED: 42 of 159 work opportunities carry more than one distinct `assetOwner`
+across their own stops.** A post has exactly one trailer ownership; a field that varies *within* a
+load cannot be its source, and there is no non-arbitrary rule for which stop wins. It is also the
+wrong kind of value — carrier/owner codes, not a provision flag. Mapping them by prefix would be an
+inference applied to every post. **Not done.**
+
+**R3 — a conflict that needs Ihor's decision, and a mismatch worth knowing about now.** The
+captures tie ownership to loading type: `AMAZON_PROVIDED` → `["DROP"]` (7/7),
+`CARRIER_OWNED` → `["LIVE"]` (4/4). The UI finding explains it: the Load control exists **only**
+under "Power only", so `LIVE` is not chosen for carrier-owned posts — it is simply what the form
+sends. ⚠ **PAT currently sends `AMAZON_PROVIDED` + `["LIVE"]`, a combination that appears in
+none of the eleven captures.** Presented as a decision, not resolved.
+
+**R4 — equipment.** Newly confirmed upsert enums: `TWENTY_FOOT_CONTAINER`,
+`FORTY_FOOT_CONTAINER`, `FORTY_FIVE_FOOT_CONTAINER`, `FORTY_FOOT_HIGHCUBE_CONTAINER`,
+`FORTY_FIVE_FOOT_HIGHCUBE_CONTAINER`, `CUBE_TRUCK` (plus `TWENTY_SIX_FOOT_BOX_TRUCK` and
+`FIFTY_THREE_FOOT_CONTAINER`, already mapped). ⚠ **`FIFTY_THREE_FOOT_TRUCK` stays unmapped — its
+array is TRUNCATED in both captures** and it is the most common equipment on the board.
+`FIFTY_THREE_FOOT_REEFER_TRUCK` appeared in Ihor's unsupported-equipment modal and is in **no**
+capture — it stays on the ask-for-a-capture path.
+
+**Verification.** Nothing exercised on a real board — no browser here. This task changed no code,
+so there is nothing for Ihor to re-test.
+
+### 2026-08-19 — FIX: align the PAT payload with a REAL captured upsert (four values)
+
+**Files:** `content/patApi.js`, `content/patModal.js`, plus two capture artefacts saved to
+`samples/` and recorded in `api-samples.md` §7 (samples/ is gitignored, so the doc is the
+durable copy).
+
+**L1 — loading type. THE EXTENSION WAS SENDING A SHAPE THAT HAS NEVER EXISTED.**
+It sent `loadingTypeList: ["LIVE","DROP"]`, from an inference that "accepts both" must mean both
+tokens — flagged at the time as the one unverified value in a live post. Ihor's Load-control
+capture settles it: **`["LIVE"]` IS the wider "Live or Drop & Hook" option**, and `["DROP"]` is
+drop-only. Corrected to `["LIVE"]`. **Ihor's product rule is unchanged** — always the wider
+option, every load, never derived.
+
+**L2 — TEAM is unblocked.** `driverTypes: ["TEAM"]` is now capture-backed, so
+`TEAM_DRIVER → ["TEAM"]` and `SINGLE_DRIVER → ["SOLO"]`, strictly one to one. A team load now
+**posts correctly and Confirm is enabled** — it was detected-and-blocked since this morning
+precisely because this token was unknown. Any other or missing `transitOperatorType` still leaves
+Confirm disabled with the raw value named.
+
+**L3 — 26' Box Truck mapped.** `TWENTY_SIX_FOOT_BOX_TRUCK` is confirmed against a real payload, so
+it maps to `PAT_EQUIPMENT_TYPES_26_TRUCK` and shows "26' Truck". ⚠ **`FORTY_FOOT_CONTAINER`
+stays UNMAPPED** — no capture — and keeps the ask-for-a-capture path.
+`equipmentTypes` (ARRAY) and `visibleEquipmentTypes` (STRING, same value) are both sent, which
+the code already did.
+
+**L4 — Provided vs Required: the constants are settled, the DETECTION is not.**
+`PAT_TRAILER_CARRIER_OWNED = 'CARRIER_OWNED'` is now recorded from this capture, and
+`PAT_TRAILER_AMAZON_PROVIDED = 'AMAZON_PROVIDED'` **was already capture-backed** by §3's real
+payload — so, contrary to what the brief anticipated, **no P capture is needed**. What is missing
+is different: **nothing in the work-opportunity record identifies trailer ownership.** Every
+trailer/owner/carrier/asset field across all 159 captures was enumerated and none distinguishes
+carrier-owned from Amazon-provided. So an R load still posts as Provided. **P/R was NOT wired** —
+that is BACKLOG 0n, blocked on detection, not on values.
+
+⚠ **This capture contradicts `api-samples.md` §3's "do not send" list**, which called
+`visibleEquipmentTypes`, `visibleProvidedTrailerType`, `distanceOrDuration` and `payoutType`
+UI-only. The capture IS the outgoing body and contains all four. The newer capture wins; §3's note
+is stale on those four and §7b says so.
+
+#### Provenance of every value PAT now sends
+
+| field | value | backed by a capture? |
+|---|---|---|
+| `driverTypes` solo | `["SOLO"]` | ✅ §3 |
+| `driverTypes` team | `["TEAM"]` | ✅ §7 |
+| `loadingTypeList` | `["LIVE"]` | ✅ §7a |
+| `equipmentTypes` 53' Trailer | 5-value array | ✅ §3 |
+| `equipmentTypes` 53' Container | `["FIFTY_THREE_FOOT_CONTAINER"]` | ✅ §5 |
+| `equipmentTypes` 26' Truck | `["TWENTY_SIX_FOOT_BOX_TRUCK"]` | ✅ §7 |
+| `visibleEquipmentTypes` | first element, STRING | ✅ §7 |
+| `providedTrailerType` | `"AMAZON_PROVIDED"` | ✅ §3 |
+| `runType` | `"ONE_WAY"` | ✅ §3, §7 |
+| `excludeSpecialServices` | `["SWING_DOOR"]` | ✅ §3, §7 |
+| `equipmentTypes` 40' Container | — | ❌ **unmapped, refuses to post** |
+| `providedTrailerType` for an R load | — | ❌ **not wired — no detection** |
+
+**🔴 STILL ASSUMED, NAMED IN FULL:** `PAT_EQUIPMENT_TYPES_40_CONTAINER` (never captured, and
+deliberately unreachable), and the **P/R detection** that does not exist. **Every value PAT
+actually sends today is capture-backed.**
+
+**Nothing else moved** — ×1.10, −30 min, +3 h, ±25 miles, `stopCount`, city resolution: asserted
+unchanged.
+
+**Tests.** New `patalign-suite`, 54 checks. Twenty assertions across four existing suites encoded
+`["LIVE","DROP"]` or the TEAM block — both disproven by the capture — and were updated to the
+captured truth. **1742 checks green**; the one failure is the standing `CITY_ASSIGN_DEBUG` true
+positive.
+
+### 2026-08-19 — FIX: the posted driver type is derived from the load (Team no longer posts as Solo)
+
+**Files:** `content/patApi.js`, `content/patModal.js`.
+
+⚠ **THE HARDCODED `['SOLO']` WAS A LONG-STANDING DEFECT, NOT A REGRESSION FROM THE STAGE A
+RE-SOURCING.** `git log -S"driverTypes" -- content/patApi.js` returns exactly one commit —
+`512381d` — which introduced the literal. It has never held another value and was never
+load-derived. **Do not blame Stage A for it later.**
+
+**Measured live by Ihor with the PATDIAG DRIVER line:**
+`743eaba0` → `transitOperatorType: "SINGLE_DRIVER"` → posted `["SOLO"]`;
+`d075a306` → `transitOperatorType: "TEAM_DRIVER"` → **also** posted `["SOLO"]`. Nothing blocked
+it and nothing warned the dispatcher.
+
+**Ihor's product rule, implemented exactly:** the driver type is a property of the LOAD, not a
+choice — a solo driver cannot run a team load. Strictly one to one, no default, no fallback, **no
+control, toggle or override of any kind.** The modal shows the derived value read-only.
+
+**Required measurement, before implementing.** `transitOperatorType` across every capture on
+disk: **`"SINGLE_DRIVER"` × 159, field absent 0 — one value only.** No third value exists, so
+none was mapped. `TEAM_DRIVER` is known solely from Ihor's live line.
+
+| record value | modal shows | posts | Confirm |
+|---|---|---|---|
+| `SINGLE_DRIVER` | Solo | `PAT_DRIVER_TYPES_SOLO` = `["SOLO"]` | enabled |
+| `TEAM_DRIVER` | **Team** | **nothing — blocked** | **disabled** |
+| anything else / null / absent | the raw value | nothing — blocked | disabled |
+
+🔴 **I COULD NOT COMPLETE THE TEAM MAPPING, AND DID NOT INVENT IT.** The brief said to read both
+PAT constants from `patApi.js`. **There were none** — only the inline literal `['SOLO']`. The
+upsert's team value appears in **no capture, no sample and no doc**: `api-samples.md` records only
+`["SOLO"]`. The board's `TEAM_DRIVER` is a *different API's* vocabulary and cannot be carried
+across. Typing `'TEAM'` would be inventing an enum bound for the live marketplace, against this
+task's own rule that a value not on disk gets no mapping.
+
+**So a team load is DETECTED, DISPLAYED as "Team", and BLOCKED** with a message naming what is
+needed. That is strictly better than before in the way that matters: **a team load can no longer
+post silently as solo.** It converts an invisible wrong post into a visible block — Ihor's own
+stated preference, "a wrong post is worse than a blocked one".
+
+🔴 **NEEDED TO FINISH: one capture — a manual Post-a-Truck upsert made with Team selected.** Read
+its `driverTypes` array verbatim, add the constant to `patApi.js`, put it in the `types` slot of
+`PAT_DRIVER_BY_TRANSIT_OPERATOR.TEAM_DRIVER`. One line.
+
+**Also cleaned up:** `buildPatPayload()` now reads `formState.driverTypes` instead of a literal,
+and `PAT_DRIVER_TYPES_SOLO` is a named constant.
+
+**Nothing else on the posted path moved** — asserted: ×1.10, −30 min, +3 h, ±25 miles,
+`stopCount`, equipment mapping, state normalisation, "Live or Drop & Hook", and
+Provided/Required (next task).
+
+**Tests.** New `patdriver-suite`, **57 checks**, end to end. Three existing suites reimplement
+`projectRecord()` locally and their copies had drifted — they were updated to carry
+`transitOperatorType`, matching the real projection. **1689 checks green**; the one failure is the
+standing true positive that `CITY_ASSIGN_DEBUG` is `true` in the tree.
+
+**Verification.** Nothing exercised on a real board — no browser here. Re-test **(e) only**, on
+both a team load and a solo load.
+
+### 2026-08-19 — DIAGNOSIS: how the posted Driver type is chosen (no fix)
+
+**Answer: it is not chosen at all. It is hardcoded in two places.**
+`patApi.js:387` `driverTypes: ['SOLO']` (a literal, not from `formState`) and
+`patModal.js:1129` `driverVal.textContent = 'Solo'` (a literal in a static div with no control).
+Nothing reads the record, the card, or any input.
+
+**This is a LONG-STANDING DEFECT, not a regression.** `git log -S"driverTypes"` returns exactly one
+commit — `512381d` — which introduced the literal. It has never held another value. **STATE.md and
+BACKLOG have been corrected: the re-sourcing did not cause it.**
+
+⚠ **Severity note.** The city defect BLOCKED the post and Ihor saw it. This one blocks nothing — a
+team load posts as Solo, silently and wrongly, to the live marketplace.
+
+**What the captures carry.** Every key path in all 159 work opportunities was scanned.
+`transitOperatorType` exists at the top level in 159/159 records — and reads **`"SINGLE_DRIVER"`
+in all 159**. No path anywhere has a value of `TEAM` or `SOLO`. **Every capture on disk is a solo
+load, so the team value is unknown and is not guessed.**
+
+**Two captures are needed before this can be fixed** — recorded in BACKLOG 0m:
+1. a known **TEAM** load's `/api/loadboard/search` response, to learn what `transitOperatorType`
+   reads (to DETECT a team load);
+2. a manual **Post-a-Truck upsert with Team selected**, to learn what `driverTypes` must contain
+   (to SEND it). `api-samples.md` records only `["SOLO"]`.
+
+**One code change, and only to make the measurement possible:** `transitOperatorType` was added to
+`projectRecord()`'s allow-list — without it the record does not carry the field and the requested
+line could report nothing. It is an operational enum, not PII, and **nothing reads it to decide
+anything**; the posted `driverTypes` is untouched.
+
+**`PATDIAG DRIVER`** (behind `CITY_ASSIGN_DEBUG`) logs on every modal open: the record's raw
+`transitOperatorType`, the value PAT will post, and whether they agree — flagging **** NO ****
+for anything that is not `SINGLE_DRIVER`. Exercised against all three cases (solo, non-solo,
+field absent).
+
+**No posted value changed.** 1632 checks green; the one failure is the standing true positive that
+`CITY_ASSIGN_DEBUG` is `true` in the tree.
+
+### 2026-08-19 — FIX: PAT city resolution — full state names now normalise to codes
+
+**File:** `content/patModal.js` only. City resolution only; driver type and Provided/Required
+deliberately untouched.
+
+**MEASURED FIRST, as instructed.** `resolvePATCity()` matches Amazon's cities API on its
+two-letter `stateCode`. Across **506 captured stops**, `stops[].location.state` carries **both
+forms in the same field**:
+
+| form | count | examples |
+|---|---|---|
+| two-letter CODE | **454 / 506** | IL, OH, IN, KY, TN, TX, AR, NC, VA, FL, PA, NJ, OK, MI, DE, NE, WI, IA, SC, MO, MD, GA, KS, MS |
+| full state NAME | **52 / 506** | Ohio, Florida, Indiana, Missouri, Maryland, KENTUCKY, Pennsylvania, TEXAS, Kentucky, Virginia, West Virginia, New York |
+
+**There is no field that reliably holds the code.** Every key on all 506 stop `location` objects
+was enumerated: `state` is the only state field, and `country` — the only always-two-letter
+field — is the country. **So option (a) from the brief was not available; this is option (b).**
+
+**The fix.** `PAT_STATE_CODE_BY_NAME`: an exhaustive, hardcoded table — **50 US states + DC + all
+13 Canadian provinces and territories**. Lookup is case-insensitive (the captures contain both
+"KENTUCKY" and "Kentucky"); a value that is already two letters passes through, which is safe
+because no US state or Canadian province has a two-letter name.
+
+⚠ **No fuzzy matching, no prefix matching, and explicitly no "first two letters"** — that
+heuristic is actively wrong here: **"New York" would become NE, which is NEBRASKA**, and "West
+Virginia" would become WE, which is nothing. Both are asserted in the suite. (Note `patApi.js`'s
+older `normalizeState()` still carries that `slice(0, 2)` fallback, but it is reachable only from
+the board-string branch of `resolvePATCity`, which PAT no longer uses — left alone as out of
+scope, recorded in BACKLOG.)
+
+**The failure path is unchanged.** An unrecognised state returns `null`, the RAW value is kept so
+the existing on-screen message names it, `logger.error` records the raw value so the table can be
+extended, and **Confirm stays disabled**. Nothing is ever guessed.
+
+**Nothing else on the posted path moved** — asserted: ×1.10 markup, −30 min, +3 h, ±25 miles,
+`stopCount`, equipment mapping, and the fixed "Live or Drop & Hook" loading type.
+
+**Tests.** New `patstate-suite`, **48 checks**, invoking `openPostModal()` end to end:
+**52/52** full-name stops on disk normalise, **154/154** captured records open a modal with no
+unrecognised state, and Ihor's four failing values all resolve. **1632 checks green**; the one
+failure is the standing true positive that `CITY_ASSIGN_DEBUG` is `true` in the tree.
+
+⚠ **Three harness defects were found and fixed while writing that suite, and they matter:** the
+first version never flushed microtasks, the second lacked `isConnected` (so the whole
+city-resolution block bailed at `if (!overlay.isConnected) return`), and the third parsed the
+cities URL as a query parameter when it is a path segment. **All three made the key assertions pass
+VACUOUSLY.** They were caught by deliberately asserting the failing case as well as the passing one
+— a test that only checks success cannot tell "it works" from "it never ran".
+
+**Verification.** Nothing exercised on a real board — no browser here. Ihor re-tests **(e) only**.
+
+### 2026-08-19 (final) — FIX: PAT modal crash, the silence that hid it, and a fixed loading type
+
+**Files:** `content/patModal.js`, `content/patApi.js`, `content/inlinePanel.js`. Three changes,
+nothing else.
+
+**F1 — the crash.** `patModal.js:1008` (`summaryEl.textContent = "Equipment: " + equipment + …`)
+threw `ReferenceError: equipment is not defined`: the same-day re-sourcing removed the
+declaration and this one line still read it. `equipment` is now derived from the **record** via
+`PAT_EQUIPMENT_LABEL_BY_ENUM`, like everything else — never from `loadUnit` or the card. It is
+**display text only**; the posted equipment still comes from `PAT_EQUIPMENT_BY_ENUM`.
+
+**F2 — the silence, which mattered more.** `openPostModal` is `async`, and its caller invoked it
+with no `await` and no `.catch()`, so a throw anywhere in ~600 lines of modal building became an
+unhandled promise rejection: **zero `logger.error` calls, no modal, and smoke item (f) "no console
+errors" kept passing while (e) failed.** Three parts:
+
+- the whole body moved into `openPostModalInner()`, wrapped by a top-level try/catch that logs
+  `openPostModal FAILED` with **message, stack and loadId**;
+- on failure the dispatcher now SEES a dialog — *"Post a Truck could not be opened for this load.
+  Nothing was sent."* — because a dead button reads as "no loads matched", not as "broken". Its own
+  render failure is caught separately so a broken DOM cannot turn a visible error back into silence;
+- the caller (`inlinePanel.js`) now attaches a `.catch` that logs with context, as a backstop.
+
+**F3 — the posted loading type is now FIXED. THIS IS A PRODUCT DECISION BY IHOR, 2026-08-19.**
+PAT posts **"Live or Drop & Hook"** for **every** load, unconditionally. Not a mapping, not derived
+from the record, not derived from the card.
+
+> **Reason, recorded so nobody "fixes" it back to being load-dependent:** the wider option accepts
+> BOTH Live and Drop, which is the same tolerance logic already applied to time (−30 min / +3 h) and
+> payout (×1.10). A post is not a copy of the load.
+
+Consequences Ihor accepted explicitly: a load labelled **"Drop"** now posts as "Live or Drop &
+Hook"; a load labelled **"LTL/Live/Drop"**, which PAT previously **refused** to post, now posts.
+`resolveLoadingType()` was **deleted** from `patApi.js` rather than left dead — a mapper sitting
+next to a live payload field reads as though it still decides something.
+
+⚠ **Provenance, stated plainly because one value is not on disk:** the label *"Live or Drop &
+Hook"* is Amazon's own UI wording and appears in **no** capture — it is summary text only. The
+payload `["LIVE","DROP"]` is this codebase's existing representation of "accepts both", inherited
+from the deleted `resolveLoadingType('Live/Drop')`; the captured upserts in `api-samples.md` show
+only `["LIVE"]` and `["DROP"]`, **never the pair**. If Amazon rejects a post or silently narrows
+the option, that is the first thing to check — **a capture of a manual "Live or Drop & Hook" post
+would settle it.**
+
+**Nothing else on the posted path moved** — asserted: ×1.10 markup, −30 min, +3 h, ±25 miles,
+`stopCount`, the equipment payload map, and "no DOM read for field values" all unchanged.
+
+**Tests.** New `patmodal-suite`, **54 checks**, which **invokes `openPostModal()` end to end and
+asserts a modal node exists** — including **154/154 captured records opening a modal with zero
+errors** — plus a forced mid-build throw proving it is logged AND visible. `patsource-suite`
+section 8 was rewritten: its four checks encoded the old derived loading type and now document the
+fixed one. **1584 checks green**; the one failure is the standing true positive that
+`CITY_ASSIGN_DEBUG` is `true` in the tree.
+
+**Verification.** Nothing exercised on a real board — no browser here. Ihor re-tests **(e) only**;
+a/b/c/d/f were run in full on 2026-08-19 and are recorded in STATE.md.
+
+### 2026-08-19 — DIAGNOSIS: the PAT modal does not appear (no fix applied)
+
+**Cause, reproduced by running the real `openPostModal()` against a real sample record:**
+`ReferenceError: equipment is not defined` at `content/patModal.js:1008` —
+`summaryEl.textContent = "Equipment: " + equipment + …`. The same-day re-sourcing removed the
+`var equipment` declaration and one downstream line still reads it. It is a **display string
+only**; no posted value depends on it. Everything upstream works — PATDIAG SOURCE reports
+`missing: none`.
+
+**A second, separate defect: the failure is SILENT.** `openPostModal` is `async` with no
+top-level try/catch and its caller neither awaits nor catches, so the throw is an unhandled
+promise rejection — **0 `logger.error` calls, modal absent from the DOM**, console clean. That is
+why smoke (f) passes while (e) fails. Code rule 5 is not met on this path.
+
+**How the test suite missed it:** `patsource-suite` exercised `patSourceFromRecord()` in
+isolation and never invoked `openPostModal()`. The same gap as the Stage B panel wiring.
+
+**M1 — origin/destination is CORRECT, no defect.** Destination is the last stop of the **last**
+element of `loads[]`. Verified on **71** multi-segment records: in the **63** where it differs from
+`loads[0]`'s last stop, PAT matched the last load **63/63**. `origin === dest` happens
+legitimately in 5 of 71 (round trips). Ihor's 7-stop case cannot be checked from disk — the
+largest sample is 2+2 — so a capture is requested.
+
+**M2 — loadingType changed what PAT posts, and it needs Ihor's decision.** The record value is the
+last load's last stop `unloadingType`. `"Live/Drop"` used to post `["LIVE","DROP"]` and now
+posts `["DROP"]`; `"LTL/Live/Drop"` used to be a blocking error and now posts `["DROP"]`. Not
+changed — see BACKLOG 0k.
+
+**Smoke checklist recorded in STATE.md** from Ihor's full run: a/b/c/d/f PASS, (e) FAIL. It will not
+be re-requested in full.
+
+### 2026-08-19 (final) — FIX: Post-a-Truck re-sourced from the captured record ONLY
+
+**Files:** `content/patModal.js` only. Fixes the PLAN 29a regression that made smoke item (e) FAIL.
+
+**ARCHITECTURAL DIRECTIVE (Ihor).** One work opportunity = one id + one block of API data. PAT
+builds a post from **that block alone** — no card DOM, no detail sheet, no page element for any
+field value. These loads will later be served from Ihor's own site through his own server, where
+no Amazon DOM exists; any DOM dependency left in PAT is one that breaks there. **This supersedes
+the earlier guidance to leave payout and distance on the card**: both are now record-sourced. The
+**×1.10 payout markup and the ±25-mile window are unchanged** — only the base values' source moved.
+
+**Product decisions implemented exactly:**
+
+| | |
+|---|---|
+| D1 | start = first stop `checkIn` **− 30 min** (`PAT_START_LEAD_MINUTES`) |
+| D2 | end = last stop `checkOut` **+ 3 h** (`PAT_END_TRAIL_HOURS`) |
+| D3 | stop count = `record.stopCount` — the field that was empty |
+| D4 | real ISO instant + the stop's own IANA zone; year-guessing and the fixed offset table are gone |
+
+A post is not a copy of the load: it sits as close to the real load as possible while carrying a
+tolerance window, the same way the payout carries its margin.
+
+**Both concrete breakages are gone by construction, not by patching.** Nothing is re-parsed from a
+rendered string any more, so `detail.header.stopsCount` and `parsePatStopTime()`'s `M/D` regex
+are simply not on the path. `parsePatStopTime`, `parseBoardStop` and `parseDetailAddress` are
+no longer called by `patModal.js` at all.
+
+**D4 is a real correctness gain, not just a re-plumb.** `patZoneAt()` resolves the offset **at the
+load's own instant**, so a January load gets −5 and a July load −4 for `America/New_York`. The old
+fixed `TZ_OFFSET_HOURS` table could not do that, and the old parser guessed the year outright.
+
+**EQUIPMENT — mapped by enum, never by label.** `PAT_EQUIPMENT_BY_ENUM` maps
+`FIFTY_THREE_FOOT_TRUCK` and `FIFTY_THREE_FOOT_CONTAINER` directly to their PAT constants. A
+display round-trip would have sent `"53' Container"` against a map keyed
+`"53' Container and Chassis"` and pushed a **supported** load into the unsupported modal. ⚠ Only
+those two enums exist on disk: `FORTY_FOOT_CONTAINER` and `TWENTY_SIX_FOOT_BOX_TRUCK` are in
+`patApi.js` but in no capture, so **no mapping is invented** — the raw enum is logged at error
+level and the existing unsupported path handles it. PLAN 8 untouched.
+
+**LOADING TYPE — an identity mapping, and here is the evidence.** `samples/paired-card.html` shows
+`.loading-type` = **"Drop"**, and that card's record carries last-stop `unloadingType` =
+**`DROP`**. The upsert's own observed vocabulary is `["LIVE"]`/`["DROP"]`, so record enum →
+payload value is the same vocabulary, not a translation. Across all captures only
+`PRELOADED → DROP` (149) and `PRELOADED → LIVE` (5) occur. Any other value is **not mapped** —
+it becomes a blocking error naming the raw enum.
+
+**SAFETY.** Nothing is fabricated: `patSourceFromRecord()` returns a `missing` list, every
+unresolved field leaves its input empty and Confirm disabled, and the modal names the field. **154
+of 154 captured work opportunities resolve with nothing missing.**
+
+**PATDIAG SOURCE** (behind `CITY_ASSIGN_DEBUG`): one line per modal open showing record and card
+values side by side, so a disagreement surfaces during Ihor's manual test. ⚠ **The card values are
+diagnostic only and are never used** — asserted by a check that every `getLoadUnit` reference in
+the file lives inside that diagnostic function.
+
+**Tests.** New `patsource-suite`, 62 checks, run against real sample records. **1523 checks green**;
+the one failure is the standing true positive that `CITY_ASSIGN_DEBUG` is `true` in the tree.
+
+**Verification.** Nothing exercised on a real board — no browser here. **Smoke item (e) stays FAIL
+until Ihor re-tests it.** See TC-PAT-RECORD.
+
+### 2026-08-19 (last) — FIX: ignore clicks that land on the card container itself
+
+**File:** `content/inlinePanel.js`, one guard in the manual click handler. Nothing else changed:
+not the four binding rules, not the anchor logic, not auto-open, not the stop-the-loop behaviour,
+not Fast Book, not the panel's rendering. CLICKDIAG stays in place.
+
+**Measured, six clicks, 2026-08-19.** Target a DESCENDANT of the card → Amazon highlights
+(`load-card__selected`), our panel renders, **ids match** (offsets top+14, top+19, top+31,
+bottom+42). Target **`div.load-card` itself** → Amazon does **not** highlight, our panel renders
+anyway, and all three logged `*** MISMATCH — the highlighted load and the panel's load are
+DIFFERENT ***` (offsets top+4, bottom+6, bottom+7 on a 72 px card).
+
+**The change.** When `ev.target === card`, return immediately — before the auth gate, before the
+toggle-off, before the stop-the-loop, before any id resolution or render. One `logger.log` line
+records the ignore. Nothing is intercepted: still no `preventDefault`, no `stopPropagation`, so
+Amazon's own behaviour is untouched in every case including this one.
+
+**⚠ THE RULE IS TARGET IDENTITY, NOT GEOMETRY.** The pixel offsets above were how the problem was
+MEASURED, deliberately not how it is decided. No threshold, no bounding box, no offset — asserted
+in the suite, which checks the handler contains no `getBoundingClientRect`/`clientX`/`clientY`
+and no threshold constant. A descendant clicked at top+4 still opens the panel; the container
+clicked dead centre is still ignored.
+
+**We do not detect Amazon's listener.** Amazon is React and its synthetic handlers cannot be
+enumerated from a content script. The rule never asks what Amazon bound to — only whether the
+click landed on anything at all inside the card.
+
+**A test was dispatching a click shape that does not occur.** `wiring-suite` dispatched with the
+CONTAINER as `event.target` and its 15 checks went red. That is the harness, not the product: a
+real working click lands on a descendant, which is exactly what Ihor measured. `clickCard()` now
+dispatches at the id-bearing div, and `clickCardContainer()` was added for the ignored shape.
+**The product was not changed to make a test pass.**
+
+**Tests.** New `container-suite`, 39 checks: no panel / no id resolution / no loop stop / no state
+change on a container click; descendant clicks unchanged at any depth; identity-not-geometry both
+ways; toggle-off not triggered by a container click; card switching still works; guard ordering
+verified. **1461 checks green**, the one failure being the standing true positive that
+`CITY_ASSIGN_DEBUG` is `true` in the working tree.
+
+**Verification.** Nothing exercised on a real board — no browser here. See TC-CLICK-CONTAINER.
+SMOKE CHECKLIST: all six **NOT RUN**.
+
+### 2026-08-19 (later still) — CLICKDIAG: measuring the click-zone mismatch (diagnostic only)
+
+**File:** `content/inlinePanel.js`. A passive, flag-gated click observer. **The click handler,
+the binding rules, the anchor logic and when the panel renders are all unchanged.**
+
+**Why.** Clicking a card's centre works; clicking its top or bottom edge expands only our
+accordion, leaving Amazon's highlight and sheet on a different load. A dispatcher can then read
+one load's data believing it belongs to another.
+
+**How it stays passive.** Registered on `document` in the **capture** phase so it reads the DOM
+as it was at the click, before our own handler renders anything. It never calls
+`preventDefault`, `stopPropagation` or `stopImmediatePropagation` — asserted in the suite —
+so it is invisible to every other handler. It is registered **only when `CITY_ASSIGN_DEBUG` is
+on**: a shipped build carries no extra listener at all. No new flag was added.
+
+**What it logs, per click inside the main results list:**
+
+| | |
+|---|---|
+| **C1 TARGET** | the clicked element and its DOM path up to the card, one line per ancestor |
+| **C2 OURS** | which ancestor `closest()` matched, and whether that was **the card container itself**; the resolved load id, and whether it is a bare UUID |
+| **C3 ZONE** | every ancestor carrying an anchor/button/role/tabindex, plus the click's distance from each card edge and whether it fell inside the innermost interactive element's box |
+| **C4 OUTCOME** | at +300 ms: classes the card gained, whether the sheet's id changed, whether our panel rendered — plus the highlighted card's id and the panel's id side by side |
+
+**⚠ What is NOT claimed.** Amazon is React; its click handlers are synthetic and **cannot be
+enumerated from a content script** (`getEventListeners` is DevTools-only). C3 therefore reports
+what the DOM itself marks plus geometry, and says so in its own output rather than asserting a
+listener it cannot see. Likewise C4 reads the highlight by **diffing the card's class list**
+rather than assuming which class means "selected", and reports the sheet id as unreadable when no
+bare-UUID id is found — there is no sheet capture on disk.
+
+**What the source already shows** (hypothesis, not a conclusion): `initManualToggle()` matches
+`ev.target.closest('div.load-card, div.load-card__selected')` — the container — so it fires for
+clicks anywhere in its box including its own padding, while `samples/paired-card.html` has 0
+anchors and 0 buttons and only 2 `tabindex="0"` spans, i.e. whatever Amazon binds is an inner
+element. **Not fixed, and not to be fixed from this alone.**
+
+**Also noted:** `showInlinePanel()` resolves the load id as `cardElement.querySelector('div[id]')`
+— the **first** `div[id]`, with **no UUID-shape filter**, while cards also contain
+`div[id="STARTING_SOON"]`. C2 reports when the resolved id is not a bare UUID. Recorded, not
+changed.
+
+**Tests.** New `clickdiag-suite`, 39 checks: no interception in the source, capture-phase
+registration, no new flag, flag-off registers zero listeners, flag-on still renders the panel
+bound to the clicked load with nothing prevented or stopped, all of C1..C4 producing output, the
+container case and the inner-element case both named correctly, and out-of-list clicks ignored.
+**1461 checks green**; the one failure is the standing true positive that `CITY_ASSIGN_DEBUG` is
+`true` in the working tree.
+
+**Verification.** Nothing exercised on a real board — no browser here. SMOKE CHECKLIST: all six
+**NOT RUN**.
+
+### 2026-08-19 (later) — FIX: the deadhead substitution is now idempotent; the filter loop is closed
+
+**File:** `content/cityAssign.js` only. One change: `applyCityDeadheads()` reconciles instead of
+tearing down and rebuilding. **No observer change, no re-entrancy flag, no debounce, no loop
+counter** — as specified.
+
+**What was happening.** `applyCityFilter()` called `restoreDeadheads()` (removing our node from
+every substituted card) and then `applyCityDeadheads()` (re-inserting an identical one). Measured
+on Ihor's board, HEBRON KY: **24 removeChild + 24 insertBefore per apply**, 48 of the 106 writes.
+Those are childList mutations inside the subtree the board observer watches
+(`{childList:true, subtree:true}`), so every apply woke it, and `onBoardRerender` →
+`reapplyCityFilter` → `applyCityFilter` closed the circle. **21 applies / 20 wakes in 741 ms.**
+
+**The change.** `applyCityDeadheads()` now runs three passes:
+
+1. **Desired state** — read-only. Which cards should carry a substitution and with what text.
+   Keyed on the value **element**, not the load id, because a duplicate id means two real
+   elements and both are substituted today; keying on the id would silently drop one.
+2. **Judge what is there** — a card already showing the desired text, with the desired title and
+   Amazon's value already hidden, is **skipped with zero DOM writes**. A card whose value is
+   merely wrong (a city switch) is **updated in place** via `textContent`/`setAttribute` — not
+   childList, so it cannot wake the observer. A card no longer eligible, or whose node Amazon
+   replaced, is undone.
+3. **Insert what is missing.**
+
+`applyCityFilter()` no longer tears deadheads down before a reconciling apply — only the paths
+that will not substitute (All, unmatched view, city without coordinates) still call
+`restoreDeadheads()`. `restoreDeadheads()` itself now skips a card that is already restored.
+
+**Rendered result is unchanged by construction** — this is write avoidance, not behaviour change.
+Asserted directly: the suite renders the deadhead area to text before and after and compares.
+
+**Stale comment corrected.** `onBoardRerender`'s header claimed the filter "cannot retrigger
+itself" because it "only writes style.display". True when written, false once the deadhead
+substitution landed. It now states what actually holds: a repeated apply over an unchanged board
+emits no childList mutation, while a first apply or a genuine change still does — and waking on
+that is correct.
+
+**Tests.** New `idempotent-suite`, 26 checks, including the loop: the rAF queue now drains in one
+frame instead of refilling to the cap. Two existing suites were updated rather than the code:
+`deadhead-suite` pinned the literal pre-refactor expression `ours.textContent = formatMiles(miles)`
+and now tests the intent plus the new in-place update; `citydiag3-suite` asserted the loop EXISTS
+and now asserts it is gone. **1422 checks green.** The one failure is the standing true positive
+that `CITY_ASSIGN_DEBUG` is `true` in the working tree.
+
+**Verification.** Nothing exercised on a real board — no browser here. See TC-CITY-IDEMPOTENT for
+exactly what Ihor must run. SMOKE CHECKLIST: all six **NOT RUN**.
+
+### 2026-08-19 — Diagnostics round 3: the filter feedback loop, NAMED and reproduced (no fix)
+
+**File:** `content/cityAssign.js`. Q5 (what we write) + Q6 (what wakes us), read-only, behind
+`CITY_ASSIGN_DEBUG`, rate-limited to 20 applies/wakes per selection then one summary line.
+**No loop guard, no observer suspension, no idempotence check** — the fix is the next task and
+must be chosen from this measurement.
+
+**THE LOOP, named from the source and reproduced against it:**
+
+1. `applyCityFilter(<city>)` calls `restoreDeadheads()` then `applyCityDeadheads()`.
+2. `applyCityDeadheads()` runs `valueEl.parentNode.insertBefore(ours, valueEl)` — a **childList
+   mutation inside the observed subtree**. `restoreDeadheads()` runs the matching
+   `removeChild`.
+3. The board observer is `observe(target, { childList: true, subtree: true })`. childList is
+   exactly what it watches.
+4. It wakes → `onBoardRerender()` → filter is active, so it passes the
+   `_cityFilterActive === null` guard → `reapplyCityFilter()` → back to step 1.
+
+**Why only with a city selected.** On ALL, `applyCityFilter` returns before any deadhead work
+*and* `onBoardRerender` returns at the null guard. Both ends of the loop are closed. Every log
+taken before this round was on ALL, which is why it had never been seen.
+
+**Why it needs a multi-city load.** The deadhead substitution only touches loads belonging to 2+
+active cities (Ihor's rule). With zero such loads nothing is inserted and there is no loop —
+confirmed by a control case.
+
+⚠ **The code comment asserting this could not happen is now false.** `onBoardRerender`'s header
+says the filter "cannot retrigger itself" because it "only writes style.display, an attribute
+change". That was true when written; the per-city deadhead substitution (which inserts and removes
+nodes) landed afterwards and invalidated it. **The comment was not updated and is actively
+misleading.**
+
+**Q0 — provenance, established from the repo.** `onBoardRerender` and its `reapplyCityFilter()`
+call were introduced by **commit 869cfc2** (Ihor Politylo, 2026-08-15, "chore: remove
+data-gathering click and bind inline panel to load id, close PLAN task 7e"). `git blame` on the
+line, plus a per-commit check showing the function absent in 47af74a / e55f8c0 / 75b8c0b. The
+round-2 diagnostic diff **adds and removes no `reapplyCityFilter` call**. **The loop is
+pre-existing, not diagnostic-induced. Nothing needs reverting.** Independently confirmed: the
+reproduction still loops with `CITY_ASSIGN_DEBUG = false`.
+
+**Two defects in my own round-3 code, caught by the existing suites and fixed:** Q5 label strings
+like `'removeChild(deadhead)'` read as call expressions to the source scanners guarding "never
+remove or reorder an Amazon node" — labels renamed rather than the guard weakened; and three
+catches lacked `logger.error` (code rule 5) — added.
+
+**Verification.** Nothing exercised on a real board — no browser here. 1393 checks green; the one
+failure is the true positive that `CITY_ASSIGN_DEBUG` is currently `true` in the working tree.
+SMOKE CHECKLIST: all six **NOT RUN**.
+
+### 2026-08-18 (later) — Diagnostics round 2: Q1 orphans, Q2 excess, Q3 re-render, Q4 read synchrony
+
+**File:** `content/cityAssign.js`. Read-only, all behind `CITY_ASSIGN_DEBUG`. No change to
+assignment, filtering or page detection. 1375 checks green; the one failure is a **true positive**
+— `CITY_ASSIGN_DEBUG` is currently `true` in the working tree so the diagnostics can run.
+
+**TWO PREMISES FROM THE BRIEF WERE WRONG, and the correction matters more than the instrumentation.**
+
+1. **"`reapplyCityFilter` is called only from `runCityAssignCycle`, never from the re-render
+   path."** It *is* called from `onBoardRerender` — but behind
+   `if (_cityFilterActive === null) return;`. **Every log taken so far was on filter = ALL, so
+   that path returned before doing anything at all.** The re-render path has therefore never been
+   observed in the state that matters. This is the single biggest gap and is why Q3 exists.
+
+2. **"One card is lost between collection and assignment (61 collected, map holds 60)."** Nothing
+   is lost. `cards.length` counts ELEMENTS; `countKeys(_cityAssignByCard)` counts DISTINCT ids.
+   `readMainCardElements()` has **no dedupe**, while `parseLoads()` does
+   (`loadParser.js:197`, outermost-match via `contains()`). A card carrying a nested
+   `div[id]` with the same UUID is collected twice and assigned once. 61 vs 60 is one duplicate.
+
+**A THEORY FORMED THIS ROUND WAS TESTED AND DISPROVED.** That a partial re-render (the 0 → 50 → 61
+→ 0 → 44 → 52 tracker) replaces the assignment map against a half-rendered list, stranding the
+late arrivals as permanently-visible orphans. It does replace — but the next re-render re-derives
+every card from the **persistent merged coords map** and the map self-heals. Task 7e's persistence
+is what makes it harmless. Recorded so it is not re-proposed.
+
+**Still standing from round 1:** `outOfRange` loads are shown under every tab and are absent from
+the All badge, because both `publishUnassignedCount()` call sites pass `result.unresolved` only.
+
+**What Q2 settled:** collected > rendered is **expected, not a fault**. The "Showing" line counts
+`/search` results only, while the main list ALSO holds `/recommendations` cards — measured in
+the fixture at 4 above and 7 below the `/search` block. `currentPageKey()` mixes the two
+(`range | count | firstId | lastId`), so a recommendations re-render alone flips the key and
+reads as a PAGE CHANGE.
+
+**What Q4 settled:** "Showing 51 - 100 of 94" is arithmetically impossible for a settled board
+(`to` > `total`) and is now flagged as such, with both readings timestamped side by side so the
+stale one is identifiable.
+
+**Verification.** Nothing exercised on a real board — no browser here. The sample lines in the
+report are generated by running the real `content/cityAssign.js` in a sandbox. SMOKE CHECKLIST:
+all six **NOT RUN**.
+
+### 2026-08-18 — Diagnostic: why per-city filtering degrades past 50 results (instrumentation only)
+
+**File:** `content/cityAssign.js`. One flag-gated diagnostic section plus three one-line gated
+capture points. **No assignment, filtering or page-detection behaviour was changed** — the section
+reads the DOM and module state and prints. 1345 existing checks still green; 11 new.
+
+**THE CAUSE, found before the instrumentation was needed and provable from `samples/` alone.**
+`computeAssignment()` produces TWO kinds of unassigned load and they are not treated alike:
+
+| kind | in `assignByCard` | hidden by the filter | on the All badge |
+|---|---|---|---|
+| `unresolved` — id in no captured response | no | **no, shown anyway** | **yes** |
+| `outOfRange` — captured, but >150 mi from every chip | no | **no, shown anyway** | **NO** |
+
+Both `publishUnassignedCount()` call sites pass `result.unresolved`; `result.outOfRange` is
+printed in one DEBUG-only line and **published nowhere**. So an out-of-range load is visible under
+every city tab while the badge reads zero — which is precisely what Ihor reported.
+
+**Why it tracks board size.** Amazon's own `deadhead` is the distance to the NEAREST searched
+city, so it bounds our range test directly. Measured across every capture on disk:
+
+| capture | totalResultsSize | max deadhead | loads >150 mi |
+|---|---|---|---|
+| `search-2` | 4 | 68.8 mi | **0** |
+| `search-5cities-other` | 11 | 14.3 mi | **0** |
+| `search-5cities-active` | 104 | 24.8 mi | **0** |
+| `similar-1` | 232 | 183.8 mi | 5 of 50 |
+| `paired-search` | **338** | **245.6 mi** | **21 of 50 (42%)** |
+
+Tight boards produce none; the big board produces 42%. `CITY_ASSIGN_MAX_MILES` is a fixed 150
+while Amazon's search radius is Ihor's to choose — nothing reconciles the two.
+
+**Reproduced** against the real source in `citydiag-suite`: a 50-of-90 board, five chips, ten
+pickups in MD/VA/MI/OH/NY. With JACKSONVILLE selected the block prints `visible 18/50 = 8 assigned
+to it + 10 unassigned/too-far shown anyway` while the badge count reads `unassigned: 0`.
+
+**NOT FIXED — diagnostic task, and the fix is a product decision** (raise the threshold, derive it
+from Amazon's deadhead, publish `outOfRange` to the badge, or hide out-of-range loads). See
+BACKLOG.
+
+**Verification.** Nothing was exercised on a real board — there is no browser here. The seven
+output lines quoted in the report are generated by running the real `content/cityAssign.js` in a
+sandbox, not written by hand. SMOKE CHECKLIST: all six **NOT RUN**.
+
+### 2026-08-18 — Docs sync: a new PM can now onboard from files alone (docs only, no code)
+
+**Files:** `docs/HANDOFF.md` (rewritten), `STATE.md` (rewritten), `docs/PLAN.md`,
+`docs/BACKLOG.md`, `docs/api-samples.md`, `docs/AMAZON_SELECTORS.md`. **No production file was
+touched.**
+
+**⚠ The task premise was wrong and the docs now say so.** The brief described PLAN §29 stages
+"A/B/C done". Stage C is **not** done: `PLAN.md` reads `29c … blocked (on 29b)` and
+`grep -c "showInlinePanel(" content/content.js` returns **0**. The manual click renders the
+panel; **auto-open renders nothing.** Written into HANDOFF §5, STATE, PLAN 29c and BACKLOG.
+
+**PLAN.md** — 6 statuses corrected against the code (6, 7, 9, 11, 12, 7d). Lines 7 and 7d were
+then rewritten whole: the status splice had left them self-contradictory (7d announced itself
+SUPERSEDED and then described itself as current).
+
+**Two stale pagination claims corrected — they contradicted each other, which is how they were
+caught.** §6.5 claimed "page size 50"; §6.7 claimed "the live board now paginates at 5". Measured
+across every capture on disk: `paired-search` 50, `similar-1` 50, `search-5cities-active` 50,
+`search-5cities-other` **5**, `search-2` **4**. **The page size is not fixed — never hardcode
+it.** What is stable: one response = one page, at most 50; `nextItemToken` is a cursor, not a
+total; `totalResultsSize` is the grand total. §6.7 also now records that the real fix was a
+**merged persistent id → coords map**, not an accumulator.
+
+**BACKLOG.md** — the per-city phase and the panel rebuild marked shipped (flagged
+built-but-unverified), plus 8 items that emerged and are written nowhere else: auto-open shows no
+panel; night mode still zebra-stripes; the surge branch has no filter awareness; payload fields
+not yet rendered; **the trailer id does not exist in the payload** (null in all 253 entries — stop
+looking for it); the equipment-label question for Ihor; `samples/` is gitignored; and the testing
+gap that let 1220 green checks coexist with a panel that never rendered.
+
+**Verification.** Docs only — nothing on screen changed, so the SMOKE CHECKLIST was **NOT RUN** and
+does not apply. Claims in the rewritten docs were re-derived from the repo and the captures, not
+from memory.
+
+### 2026-08-17 — Inline panel: three visual fixes (styling only)
+
+**File:** `content/inlinePanel.js`. No data, no logic. **`nightMode.js` is byte-identical to HEAD**
+— see the caveat at the end.
+
+**1. SEGMENT HEADERS — the diagnosis was not contrast.** The old `#1F3A45` on
+`--ext-leg-header-bg` (`#F5F5F5`) already measured **11.01:1**, comfortably past AA. The header
+read as a caption because of **size**: it was `12px/600` while the rows it heads are `13px` — a
+heading smaller than its own content.
+
+Worse, the header's actual text — the `MDT4 → LEWISTOWN, PA` route in `.ext-route-origin` /
+`.ext-route-dest` — was **11px**, smaller still. Raising only `.ext-seg-header` would have left a
+15px container holding 11px content, so both were raised.
+
+| | before | after |
+|---|---|---|
+| `.ext-seg-header` | 12px / 600 / `#1F3A45` | **15px / 700 / `var(--ext-n900)`** |
+| `.ext-route-origin` / `-dest` | 11px / 600 / `#1F3A45` | **13px / 700 / `var(--ext-n900)`** |
+
+**MEASURED CONTRAST: 15.79:1** (`#0e1c2b` on `#F5F5F5`) — AAA, not just AA. Both hex literals are
+now tokens. **The background token is untouched**, as specified. The ellipsis guard on the route
+codes is intact, so a long city name still truncates rather than breaking the grid track.
+
+**2. THE SIDE INSET — `.ext-seg-body{padding:0 16px 12px}`** was the whole cause; now
+`padding:0 0 12px`. Reported before changing, as asked: that selector **is** shared with
+`nightMode.js`, but only for `background-color`, so padding does not collide. And the element
+contains **nothing but the stop table** — `segBody.appendChild(buildSegmentTable(segment))` is its
+only child, asserted in the suite — so this moves the table and nothing else. The bottom `12px`
+stays; that is the card's rounded edge, not the inset.
+
+**3. ZEBRA STRIPING — deleted, not overridden.**
+`.ext-inline-panel__table tbody tr:nth-child(even) td{background:var(--ext-n100)}` is gone from the
+source, not commented out and not shadowed by a second rule. Rows now take `.ext-seg-body`'s white
+background. **Row separators survive** — they come from `td{border-bottom}`, which is not part of
+the fill.
+
+**⚠ ONE THING LEFT UNDONE, DELIBERATELY — night mode still stripes.** `nightMode.js` carries a dark
+counterpart (`html.ext-night #ext-inline-panel tbody tr:nth-child(even) td`) that exists *only* to
+keep the light rule visible under its own blanket `tbody td` override. With the light rule gone,
+that counterpart is now the one place striping survives.
+
+**I did not remove it, because "do not touch `nightMode.js`" is a standing constraint on this
+project** and this task's brief did not lift it. It is one rule, and I will remove it the moment
+you say so. **In the meantime: light mode has no stripes, night mode does.**
+
+I also have to report that I damaged `nightMode.js` mid-task attempting that removal — an
+index-based cut spliced the file's own header into its middle. It is restored **byte-for-byte from
+HEAD and verified identical**, and `git status` shows it unmodified.
+
+**Tests.** New `panelstyle-suite` (47 checks). It runs the real `injectPanelStyle()` and inspects
+the stylesheet **the browser would receive**, so a rule that never reaches the page cannot pass,
+and it computes the contrast ratio rather than trusting a comment. **1345 green, 0 red.**
+
+Two of my own assertions failed first by reading the concatenated source instead of the emitted
+CSS — which is precisely what this suite exists to avoid.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-17 — Two panel data defects: "undefined" equipment, and time-only stamps
+
+**File:** `content/inlinePanel.js`. Formatting and one missing field. **The record projection was
+not touched**, as instructed.
+
+**DEFECT 1 — every stop printed the literal string "undefined".** The renderer has always read
+`stop.equipmentText` ([inlinePanel.js:448](content/inlinePanel.js#L448)) and **nothing ever set
+it**, so `createTextNode(undefined)` stringified it onto the screen. `recordToPanelData()` now
+supplies it, and that line coalesces to an em dash so no future caller can resurrect the string.
+
+**Labels come from observed values only** — enumerated across all six captures, **159 records /
+506 stops**, recorded in `api-samples.md` §5.8:
+
+| `equipmentType` | count | label |
+|---|---|---|
+| `FIFTY_THREE_FOOT_TRUCK` | 235 | `53' Trailer` |
+| `FIFTY_THREE_FOOT_CONTAINER` | 16 | `53' Container` |
+
+`loadingType` is `PRELOADED` (236) / `LIVE` (17) / null; `unloadingType` is `DROP` (226) / `LIVE`
+(27) / null. Rendered as `53' Trailer · Preloaded`. **Anything not on those lists renders an em
+dash** — a wrong equipment label on a booking screen is worse than none.
+
+**⚠ `trailerDetails[]` cannot be used, and it is worth knowing why.** 253 stops carry an entry and
+in **every single one** `.assetId`, `.assetType`, `.assetSource`, `.trailerLoadingStatus` and
+`.dropTrailerETA` are `null`. Only `.assetOwner` is populated (AZNG/NCSL/HUBG/AZNU) — a carrier
+code, not a trailer number — and it is not in the projection, which this task must not change.
+**The board does not send a trailer id.**
+
+**Amazon's "53' Trailer P" is now ESTABLISHED, not guessed.** `samples/paired-card.html` and
+`paired-search.json` turned out to be a genuine pair — the card's `div id` is in the response — so
+comparing them directly: `53' Trailer` comes from `equipmentType`, and the circle `P` is the
+initial of `stops[0].loadingType = PRELOADED`. Our equipment half is character-identical to
+Amazon's.
+
+**One judgement call for Ihor:** the circle letter is confirmed for `PRELOADED` on that one
+pairing. `LIVE` and `DROP` have no captured card, so inventing `L` and `D` would be exactly the
+guess this task forbids — the full word is used for all three instead. **Say so and I will switch
+to initials for the tighter match.**
+
+**DEFECT 2 — dates.** Stamps read `17:30 EDT`; they now read **`Mon Aug 17 17:30 EDT`**, matching
+Amazon's sheet. Stage B's per-stop timezone conversion is untouched: each stop still uses its own
+`location.timeZone`, and a cross-zone load still renders CDT and EDT separately. A stop with no
+zone still says UTC, now with the date.
+
+Parts are assembled in a **fixed order** by `assembleStopTime()` rather than trusting the locale's
+own ordering, so the output cannot drift with the browser's locale. Midnight is normalised — some
+ICU versions yield hour `24`, which would have read `Mon Aug 17 24:00`.
+
+**The date was load-bearing, not cosmetic:** a test asserts the two sides of local midnight render
+**different dates** (`Mon Aug 17 23:00 EDT` / `Tue Aug 18 01:00 EDT`). Most records span a calendar
+day, so time alone was genuinely ambiguous.
+
+**Tests.** New `paneldata-suite` (52 checks), green on first run, including the exact target
+strings. It derives the value sets from disk rather than from a list I typed, and asserts no label
+exists for a value that is not on disk. **1298 green, 0 red.**
+
+Two `stageb-suite` assertions pinned the old time-only format and were updated. Its sandbox also
+needed `formatEquipment` and `assembleStopTime` — without them `recordToPanelData` threw, was
+caught, and returned null, which read exactly like a product defect and was a harness gap.
+
+**Layout untouched** — no padding, font or colour edit, asserted at source.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-14 — The Stage B panel never rendered: nothing called it
+
+**File:** `content/inlinePanel.js`. Three lines of wiring, plus a gate trace and the test class
+that was missing.
+
+**THE CAUSE.** `showInlinePanel()` had **no production caller**. The only reference outside its
+own definition was `window.__EXT_DEBUG.showPanel`, marked *"NOT called automatically"*.
+
+Stage A removed the manual handler's `waitForSheet(...) → showInlinePanel(card)` and left a note
+saying Stage B would replace it. **Stage B rebuilt the function and never re-added the call.** The
+function was correct and unreachable, so clicking a card opened Amazon's sheet and nothing of
+ours — with no error anywhere, because nothing ran.
+
+**⚠ 1220 tests were green throughout, and one of them asserted the missing call was missing:**
+
+    R.ok('auto-open is NOT wired to the panel yet — that is Stage C',
+         !/showInlinePanel\(/.test(cj));
+
+Every part was tested in isolation; nothing tested that the parts connect. That is the real defect
+here — the missing line was a symptom.
+
+**THE FIX.** `showInlinePanel(card)` restored at the end of the manual click handler, after the
+existing loop-stop. No poll, no sleep — the record is already in memory, which is the point of
+rendering from the capture. Wrapped in a try/catch that logs at error level: this handler is
+registered on `document` and is not the only listener on a card click, so an uncaught throw would
+break the click for whatever else is bound, silently from the dispatcher's side.
+
+**Stage A's guarantee is intact.** Still no `preventDefault`, no `stopPropagation` — the click
+reaches Amazon and its own sheet opens, including for a load whose record we never captured, where
+`showInlinePanel()` declines and we add nothing.
+
+**NEW: the `PANEL GATE` trace**, one line per decision point at DEBUG_LEVEL 3, naming the gate and
+the id. **Gate 0 is the important one** — `PANEL GATE 0 — reached` fires on entry, so its
+**absence** reports "nothing called this", which is precisely what no gate-only trace could have
+told us. Gate 2 separates *"getLoadRecord is not defined"* (cityAssign never loaded) from
+*"returned null"* (this id is in no capture); gate 4 separates *hidden by the filter* from *not in
+the DOM at all*.
+
+**NEW: `wiring-suite` (22 checks)** — the class of test whose absence cost this release. It does
+not read source: it loads the real `inlinePanel.js`, **dispatches a real click at a card**, and
+asks whether a panel node exists afterwards. It covers no-record, hidden-by-filter, multi-leg,
+panel-moves-between-cards, toggle-off, and a throwing renderer.
+
+**It found a second defect on its first run** that no source-regex test could have: the render
+threw `document.createTextNode is not a function`. That one was a **fixture gap**, not a product
+bug — `makeDocument` never implemented `createTextNode`, which `inlinePanel.js:448` uses. Added to
+the shared fixture, so every suite gains it.
+
+**The stageb assertion is narrowed, not deleted:** auto-open genuinely is still Stage C, so it now
+asserts `content.js` has no caller **and** that the manual path does.
+
+**1246 green, 0 red.**
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-14 — Stage B (PLAN §29b): the panel renders from the captured record
+
+**Files:** `content/networkObserver.js` (the projection), `content/cityAssign.js` (the store),
+`content/inlinePanel.js` (the mapping and the binding). **No DOM scraping of any kind.**
+
+**THE ASSUMPTION I FLAGGED IS NOW VERIFIED — `loads[]` IS segment order.** Four independent
+checks, all 71 multi-load records on disk, zero failures:
+
+| check | result |
+|---|---|
+| load *i* ends where load *i+1* begins (`stopCode`) | 71/71 |
+| first `CHECKIN` never goes backwards | 71/71 |
+| last `CHECKOUT` never goes backwards | 71/71 |
+| `stopSequenceNumber` keeps rising across the seam | 71/71 |
+| `startLocation`/`endLocation` match `loads[0]`.first / `loads[n]`.last | 154/154 |
+
+**My first attempt at this check was wrong and said all 71 were backwards.** It compared load
+*i*'s last CHECKOUT against load *i+1*'s first CHECKIN — but consecutive loads chain through a
+**shared stop**, where the check-IN naturally precedes the check-OUT. The comparison straddled the
+seam and measured nothing. Corrected to comparisons that do not.
+
+**TIMES RENDER IN STOP-LOCAL TIME.** The payload carries UTC plus a `timeZone` on every stop
+(484/484 have one). **31% of records have stops in more than one zone**, so converting a whole
+load with a single zone would be wrong on nearly a third of them. Each stop is formatted in its
+own zone via `Intl.DateTimeFormat`, with the abbreviation appended because two bare times a few
+hours apart on a two-zone load are ambiguous. Verified end to end: `2026-08-03T23:15:00Z` at
+`America/Chicago` renders **`18:15 CDT`**, and a cross-zone record renders **CDT and EDT together**.
+A stop with no zone falls back to UTC **and says so** rather than silently using the browser's.
+
+**THE PROJECTION IS CURATED — the raw body still never crosses.** `projectRecord()` names every
+field explicitly. Measured: **772 bytes per record, 41.6 KB for a 50-record page against a
+299.8 KB raw body — 13.9%.** Eight field groups are asserted absent: contacts, pickup/delivery
+instructions, purchase orders, shipper references, carrier accounts, and both cost-item arrays.
+
+**Binding, in order, each returning false:** no id on the card → no panel; **no record → no panel
+AND no interception** (Amazon's own sheet opens, exactly as Stage A guarantees); id not in the
+rendered main list, or hidden by the city filter → no panel; otherwise render, bound to that id.
+
+**Segment duration is DERIVED** (last CHECKOUT − first CHECKIN) — the one field with no path in
+the payload. **This closes Stage E**, which is now marked done inside Stage B.
+
+**The renderer was reused, not rewritten.** `recordToPanelData()` maps the record onto the shape
+`buildPanelElement()` already consumes. That markup is textContent-only, carries its data-testids
+and `--ext-*` tokens, and has been through several review rounds — feeding it a new source is a far
+smaller change than rewriting it, and keeps Stage B to what it claims to be. Stage A's parked
+`showInlinePanelStageB_UNUSED` is now live as `renderPanelFromData()`.
+
+**Extra fields deliberately NOT added** — cost items, special services, layover, instructions,
+equipment, trailer owner. Recorded as PLAN §29f so they are added on purpose. `equipmentType` is
+already in the projection but not yet rendered.
+
+**Tests.** New `stageb-suite` (83 checks), driving the real `projectRecord()` against the real
+captures and the real mapping functions. Covers 1, 2 and 3 `loads[]`, a 4-stop segment, the
+timezone matrix and the projection budget. **1220 green, 0 red.**
+
+Seven assertions in `stagea-suite` and `panelanchor-suite` described Stage A's interim scaffold —
+the "no panel rendered" log and the parked function name. Stage B ends that state by design, so
+each was re-pointed at what replaced it.
+
+**Auto-open is NOT wired to the new panel — that is Stage C**, and a test asserts `content.js`
+still contains no `showInlinePanel(` call.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-14 — Stage A (PLAN §29a): the scrape path is removed
+
+**Files:** `content/inlinePanel.js` (−338 lines), `content/content.js`. Removal only — the
+data-driven panel is Stage B.
+
+**Removed, all from `inlinePanel.js`:** `waitForSheet()` (72 lines), `cancelSheetPoll()` (13),
+`sheetFingerprint()` (11), `readSheetData()` (173), `parseStopBlock()` (69), the three poller
+state variables, and **every `.css-<hash>` selector in the file** — they lived entirely inside
+those functions, and `grep` now finds none.
+
+**From `content.js`:** `await sleep(800)` on both branches and the two `showInlinePanel()` calls
+it protected. The settle existed for one reason — to let Amazon's sheet finish opening so the
+scrape could read it. With no scrape there is nothing to wait for.
+
+**Call sites updated:** `removeInlinePanel()` no longer calls `cancelSheetPoll()`; the manual
+handler no longer starts a poll; `showInlinePanel()` no longer calls `readSheetData()`.
+**Nothing outside `inlinePanel.js` ever referenced any of them** — verified across all six
+content files.
+
+**⚠ TWO THINGS I DID NOT DO, AND WHY**
+
+**1. `SHEET_SELECTOR` was KEPT, against the brief.** `executeFastBook()` reads Amazon's **live**
+sheet through it to find the Book button — removing it would have broken Fast Book, which the
+brief named as a dependency to preserve. It is a stable id selector (`#selected-work-sheet`), not
+one of the hashed classes.
+
+**2. There was no "data-gathering click" to remove.** PLAN §29a named one "in
+`initManualToggle()`", and that was my own imprecision when I wrote the plan: the handler is a
+pure listener with no `.click()` in it. The only programmatic click on this path is
+`detailOpener.js`'s `target.click()`, which is **auto-open itself** — what the dispatcher sees.
+Removing it would have deleted auto-open, so it stays.
+
+**FAST BOOK — how it kept working: it never read the scrape.** Two dependencies, traced:
+
+| what Fast Book needs | where it comes from | affected? |
+|---|---|---|
+| the load id | `cardElement.querySelector('div[id]').id` — **the CARD** | no |
+| Amazon's Book button | `document.querySelector(SHEET_SELECTOR)` — **the live sheet** | no |
+
+The variable is named `sheetLoadId`, which is why it looked like a scrape dependency. It is not,
+and never was. The id resolution still runs in Stage A — Stage B needs exactly that value.
+
+**NO DEAD CLICK, and no fallback branch needed.** Ihor's rule was that a card with no captured
+record must open Amazon's own sheet unimpeded. That already holds: the manual handler contains no
+`preventDefault`, no `stopPropagation` and no `stopImmediatePropagation`, so the click always
+reached Amazon and always will. The handler still stops the refresh loop so the board does not
+move while he reads. **The guarantee is structural, not a branch anyone has to keep correct.**
+
+**⚠ This stage deliberately leaves no panel.** `showInlinePanel()` returns `false` and logs why.
+The render body is parked as `showInlinePanelStageB_UNUSED` — unreachable, and asserted so —
+because Stage B re-points it at the captured record rather than rewriting the markup.
+
+**Newly orphaned:** `gateStillOpen()` in `content.js` lost both call sites with the checkpoints
+they guarded. **Marked, not deleted** — it is PLAN 7b's companion fix, and Stage C should decide
+its fate deliberately rather than let it vanish by drift.
+
+**PLAN 7b now holds in its strongest form:** there is no `await` left after the stop on the
+auto-open path at all, so "the loop stops before any await" is trivially true rather than
+maintained.
+
+**Tests.** New `stagea-suite` (56 checks). **1134 green, 0 red.** Nineteen assertions across
+`autoopen`, `panelanchor` and `autoswitch` described the removed path and were rewritten to the
+property that replaces it. Three of my own new assertions were wrong on the first run: one had no
+condition at all, one used `require()` inside an ESM module, and one flagged Fast Book restoring
+its **own** saved button markup as a page-data `innerHTML` write.
+
+**Not live-verified.** No browser in this environment; the smoke checklist is NOT RUN.
+
+### 2026-08-14 — Field-coverage report + staged plan: inline panel from captured API data
+
+**Docs only. No code changed.** Plan written to `docs/PLAN.md` §29 (stages 29a–29f, risks 29.2).
+
+**Measured against the captures on disk — 154 records, 484 stops** across `paired-search`,
+`similar-1`, `search-5cities-active` and `search-2`. Nothing below is assumed.
+
+**The decisive finding: per-stop arrival and departure ARE in the payload**, which was the field
+most likely to force keeping the click. They are not a top-level stop property, which is why they
+look absent — they live in `stops[].actions[]`:
+
+    arrival   = stops[j].actions[type=CHECKIN].plannedTime
+    departure = stops[j].actions[type=CHECKOUT].plannedTime
+
+**484 of 484 stops carry both, with zero null `plannedTime`.**
+
+**Coverage: 12 of the 13 fields the panel shows today are 100% covered.** The one gap is
+**per-segment duration** — `loads[]` carries `layoverDuration` but no duration. It is derivable
+(last CHECKOUT − first CHECKIN), so **nothing is worth keeping the click for**.
+
+**Multi-leg is real:** up to **3** `loads[]` per record and **4** `stops[]` per load were measured,
+so segments map to `loads[]` and not to a fixed two-stop shape. A plan built on the two-stop case
+would have broken on 6 of 50 records in the very first capture.
+
+**Present and unused today** — the payload carries considerably more than the panel shows:
+`aggregatedCostItems[]` (Base Rate / Fuel Surcharge / Toll Charge, all 154 records), `deadhead`,
+`equipmentType`, `trailerDetails[].assetOwner`, `specialServices[]` (`SWING_DOOR`,
+`SLIDE_TANDEMS`, `STRAPS`, `LUMPER` all observed), `totalLayover` (non-zero on 21 of 154),
+`firstPickupTime`, `lastDeliveryTime`, `workOpportunityArrivalWindows[]`, per-stop `weight`,
+`stopCategory`, `pickupInstructions` / `deliveryInstructions`, `transitOperatorType`.
+
+**Stage A is removal first**, deliberately: `waitForSheet`, `cancelSheetPoll`, `sheetFingerprint`,
+`readSheetData`, `parseStopBlock`, `SHEET_SELECTOR` and every `.css-<hash>` selector they carry,
+plus the data-gathering click and `sleep(800)`. Leaving the old path in place while the new one
+lands is how two sources of truth get created.
+
+**⚠ One real regression is named in the plan rather than buried:** after Stage A, a card whose
+record is in no captured buffer will open **nothing** — today the dispatcher can still click it
+and get Amazon's own sheet. Ihor should confirm he accepts that before Stage A runs.
+
+**Also flagged for Stage A, not assumed:** Fast Book reads `sheetLoadId` from the scrape path, so
+that dependency must be re-checked rather than presumed independent.
+
+**No implementation started, as instructed.**
+
 ### 2026-08-14 — Cosmetic pass: one merged bar, draggable, reserved badge slots, active-only highlight
 
 **Files:** `content/originCities.js`, `content/sidebar.js`, `content/content.js` (teardown only).

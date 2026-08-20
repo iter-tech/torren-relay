@@ -26,6 +26,32 @@ var PAT_EQUIPMENT_TYPES_40_CONTAINER = [
   'FORTY_FOOT_CONTAINER',
 ];
 
+// DRIVER TYPES for the upsert (2026-08-19).
+//
+// SOLO is the only value ever captured: api-samples.md 3 records "driverTypes": ["SOLO"] from a
+// live upsert, and it is what this file has always sent.
+var PAT_DRIVER_TYPES_SOLO = ['SOLO'];
+
+// TEAM — CONFIRMED 2026-08-19 from a real captured upsert
+// (samples/pat-upsert-team-26ft-carrier-owned.json, api-samples.md 7): driverTypes: ["TEAM"].
+//
+// It was deliberately left undefined until this capture existed, because the load-board's own
+// vocabulary is NOT the upsert's — the board says transitOperatorType "TEAM_DRIVER", a different
+// field on a different API, and one cannot be derived from the other. The capture supplied the
+// upsert token directly, so nothing is inferred.
+var PAT_DRIVER_TYPES_TEAM = ['TEAM'];
+
+// TRAILER OWNERSHIP. Both values are backed by a real captured upsert body.
+//   AMAZON_PROVIDED — api-samples.md 3, the 53' Trailer capture (2026-07-14)
+//   CARRIER_OWNED   — samples/pat-upsert-team-26ft-carrier-owned.json (2026-08-19), the value the
+//                     form sends for a carrier-owned (R) trailer
+// Each is paired with visibleProvidedTrailerType carrying the SAME value.
+//
+// ⚠ Knowing both values is NOT enough to switch between them: nothing in the work-opportunity
+// record identifies trailer ownership. See BACKLOG 0n.
+var PAT_TRAILER_AMAZON_PROVIDED = 'AMAZON_PROVIDED';
+var PAT_TRAILER_CARRIER_OWNED   = 'CARRIER_OWNED';
+
 // Equipment types for 26' Truck — confirmed from Amazon API data 2026-07-14.
 var PAT_EQUIPMENT_TYPES_26_TRUCK = [
   'TWENTY_SIX_FOOT_BOX_TRUCK',
@@ -345,25 +371,15 @@ async function resolvePATCity(input) {
   }
 }
 
-// Map loadingType string → loadingTypeList array.
-// Returns null for unrecognized values — caller must surface error.
-// Combined case is order-insensitive: "Live/Drop" and "Drop/Live" both confirmed on the live board.
-// Output order is always ["LIVE","DROP"] to match the captured upsert payload.
-function resolveLoadingType(str) {
-  logger.log('patApi', 'resolveLoadingType called', { str: str });
-  if (str === 'Drop') return ['DROP'];
-  if (str === 'Live') return ['LIVE'];
-  var tokens = str.split('/').map(function (t) { return t.trim(); });
-  var hasLive = false;
-  var hasDrop = false;
-  for (var i = 0; i < tokens.length; i++) {
-    if      (tokens[i] === 'Live') { hasLive = true; }
-    else if (tokens[i] === 'Drop') { hasDrop = true; }
-    else { return null; }
-  }
-  if (hasLive && hasDrop) return ['LIVE', 'DROP'];
-  return null;
-}
+// resolveLoadingType() WAS REMOVED 2026-08-19 (F3).
+//
+// It mapped the board's label ("Drop" / "Live" / "Live/Drop") to the posted loadingTypeList, and
+// returned null for anything else — which is why a load labelled "LTL/Live/Drop" could not be
+// posted at all. The posted value is now the FIXED PAT_LOADING_TYPE_LIST in patModal.js, by Ihor's
+// product decision, so nothing derives it from a label any more.
+//
+// Deleted rather than left in place: a dead mapper next to a live payload field reads as though it
+// still decides something, and the next person would wire it back in.
 
 // Build the PAT upsert POST body — structure reconciled against live cURL capture (MEMPHIS→LEBANON).
 // formState: { originCity, destCity (from resolvePATCity),
@@ -394,11 +410,25 @@ function buildPatPayload(formState) {
     maxDurationInMinutes:        null,
     loadingTypeList:             formState.loadingTypeList,
     excludeSpecialServices:      formState.excludeSpecialServices,
-    driverTypes:                 ['SOLO'],
+    // DERIVED from the load since 2026-08-19 — see PAT_DRIVER_BY_TRANSIT_OPERATOR. This was a
+    // hardcoded ['SOLO'] literal from the very first commit that introduced it (512381d), so a
+    // team load posted silently as solo. It is a long-standing defect, NOT a regression from the
+    // Stage A re-sourcing.
+    driverTypes:                 formState.driverTypes,
     visibleEquipmentTypes:       formState.equipmentTypes[0],
     equipmentTypes:              formState.equipmentTypes,
-    visibleProvidedTrailerType:  'AMAZON_PROVIDED',
-    providedTrailerType:         'AMAZON_PROVIDED',
+    // ⚠ STILL HARDCODED TO AMAZON-PROVIDED. Both constants are capture-backed —
+    // PAT_TRAILER_AMAZON_PROVIDED from api-samples.md 3, PAT_TRAILER_CARRIER_OWNED from the
+    // 2026-08-19 capture — but NOTHING IN THE RECORD SAYS WHICH ONE A LOAD IS. Every trailer
+    // ownership field on the work opportunity was enumerated across all 159 captures and none
+    // distinguishes carrier-owned from Amazon-provided. So an R load still posts as Provided.
+    // That is BACKLOG 0n and it is blocked on DETECTION, not on these values.
+    // DERIVED since 2026-08-20 from the card's P/R badge letter — an INTERIM DOM DEPENDENCY,
+    // the only field in this payload not sourced from the API record. See the block above
+    // PAT_TRAILER_BY_LETTER in patModal.js for why it exists and when to delete it.
+    // Both keys always carry the SAME value (api-samples.md 8a, eleven captures).
+    visibleProvidedTrailerType:  formState.providedTrailerType,
+    providedTrailerType:         formState.providedTrailerType,
     originCityInfo:              {
       name:                o.name,
       stateCode:           o.stateCode,

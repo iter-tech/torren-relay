@@ -1,6 +1,9 @@
 // PAT Modal — extension-owned dialog for creating a truck post (carrier offer).
 // Opens when dispatcher clicks ext-action-post.
-// Pre-fills from loadStore.getLoadUnit(loadId); cities resolved via API call.
+// Pre-fills from the CAPTURED RECORD ONLY — getLoadRecord(loadId), the same store the inline
+// panel renders from (2026-08-19). It reads NO page DOM for any field value: one work
+// opportunity = one id + one block of API data, so this module keeps working when the loads are
+// later served from Ihor own site where no Amazon DOM exists. Cities resolved via API call.
 // Dispatcher reviews, edits numeric fields, clicks Confirm.
 // Confirm POSTs via submitOrder() from patApi.js.
 // NO .click() on any Amazon DOM element.
@@ -396,42 +399,559 @@ function makeSelect(testid, options, defaultVal) {
   return sel;
 }
 
+// ── PAT SOURCE: THE CAPTURED RECORD, AND NOTHING ELSE (2026-08-19) ────────────────────────
+//
+// ARCHITECTURAL DIRECTIVE (Ihor). One work opportunity = one id + one block of data returned by
+// Amazon's API. PAT builds a post from THAT BLOCK ALONE. It does not read the card DOM, Amazon's
+// detail sheet, or any other page element for any field value. These loads will later be served
+// from Ihor's own site through his own server, where no Amazon DOM exists — any DOM dependency
+// left here is a dependency that breaks there.
+//
+// THIS REPLACED A REGRESSION. PLAN 29a removed the detail-sheet scrape; PAT still read
+// detail.header.stopsCount (a path that no longer exists) and re-parsed rendered time strings
+// with a M/D regex that cannot match what Stage B emits. Both failure modes are gone because
+// nothing is re-parsed from a rendered string any more — the ISO instant is consumed directly.
+//
+// The record shape is projectRecord() in networkObserver.js. Field paths used here, all measured
+// present across 154 captured work opportunities: stopCount, payout, totalDistance,
+// loads[].equipmentType, loads[].stops[].{city,state,tz,checkIn,checkOut,unloadingType}.
+
+// D1/D2 (Ihor, 2026-08-19). A post is NOT a copy of the load: it sits as close to the real load
+// as possible while carrying a tolerance window, the same way the payout carries its margin.
+var PAT_START_LEAD_MINUTES = 30;   // start = first CHECKIN  − 30 min
+var PAT_END_TRAIL_HOURS    = 3;    // end   = last  CHECKOUT + 3 h
+
+// EQUIPMENT: enum -> PAT constant, DIRECTLY. Never via the display label — PAT_EQUIPMENT_MAP is
+// keyed "53' Container and Chassis" while the panel's label for the same enum is "53' Container",
+// so a display round-trip would push a SUPPORTED load into the unsupported-equipment modal.
+//
+// ⚠ ONLY these two enum values have ever been observed in a capture. FORTY_FOOT_CONTAINER and
+// TWENTY_SIX_FOOT_BOX_TRUCK exist in patApi.js but appear in no sample, so no mapping is invented
+// for them: an unlisted enum is logged verbatim and routed to the existing unsupported path.
+var PAT_EQUIPMENT_BY_ENUM = {
+  FIFTY_THREE_FOOT_TRUCK:     PAT_EQUIPMENT_TYPES_53,
+  FIFTY_THREE_FOOT_CONTAINER: PAT_EQUIPMENT_TYPES_CONTAINER,
+  // L3, added 2026-08-19: TWENTY_SIX_FOOT_BOX_TRUCK is confirmed against a real captured upsert
+  // (equipmentTypes: ["TWENTY_SIX_FOOT_BOX_TRUCK"]). The record side uses the same token as the
+  // upsert array's first element — the pattern the 53' cases already demonstrate, where the
+  // record's FIFTY_THREE_FOOT_TRUCK is PAT_EQUIPMENT_TYPES_53[0].
+  TWENTY_SIX_FOOT_BOX_TRUCK:  PAT_EQUIPMENT_TYPES_26_TRUCK,
+  // ⚠ FORTY_FOOT_CONTAINER STAYS UNMAPPED. It is in patApi.js but appears in NO captured upsert
+  // and no board record, so it keeps the "ask for a capture" path: logged verbatim, routed to the
+  // unsupported-equipment modal.
+};
+
+// F1 (2026-08-19). DISPLAY ONLY — the modal summary line. Keyed on the same two enums as the map
+// above, using PAT's own supported-equipment vocabulary, so the summary says what PAT means. It
+// feeds NO posted value; the payload comes from PAT_EQUIPMENT_BY_ENUM. Unreachable for an unmapped
+// enum, because the equipment gate returns before the summary is built.
+var PAT_EQUIPMENT_LABEL_BY_ENUM = {
+  FIFTY_THREE_FOOT_TRUCK:     "53' Trailer",
+  FIFTY_THREE_FOOT_CONTAINER: "53' Container and Chassis",
+  TWENTY_SIX_FOOT_BOX_TRUCK:  "26' Truck",
+};
+
+// ── F3: THE POSTED LOADING TYPE IS FIXED (Ihor's product decision, 2026-08-19) ────────────
+//
+// ALWAYS "Live or Drop & Hook", for EVERY load, unconditionally. It is NOT a mapping, NOT derived
+// from the record, NOT derived from the card. The board's own label no longer influences it.
+//
+// WHY, so nobody "fixes" this back to being load-dependent: the wider option accepts BOTH Live and
+// Drop, which is the same tolerance logic already applied to time (-30 min / +3 h) and payout
+// (x1.10). A post is not a copy of the load.
+//
+// CONSEQUENCES IHOR HAS EXPLICITLY ACCEPTED:
+//   - a load the board labels "Drop" now posts as "Live or Drop & Hook";
+//   - a load labelled "LTL/Live/Drop", which PAT previously REFUSED to post
+//     (resolveLoadingType returned null -> blocking error), now posts.
+//
+// ⚠ PROVENANCE OF THESE TWO VALUES, stated plainly because one of them is not on disk:
+//   - the LABEL "Live or Drop & Hook" is Amazon's own UI wording. It appears in NO capture in
+//     samples/ and in no doc; it is used here purely as summary text.
+//   - the PAYLOAD ["LIVE","DROP"] is this codebase's existing representation of "accepts both",
+//     inherited from resolveLoadingType('Live/Drop'). The captured upserts in api-samples.md show
+//     only ["LIVE"] and ["DROP"] — the PAIR has never been captured. If Amazon rejects a post or
+//     silently narrows the option, THIS is the first thing to check, and a capture of a manual
+//     "Live or Drop & Hook" post would settle it.
+// ⚠ CORRECTED 2026-08-19 FROM A REAL CAPTURE. This was ['LIVE', 'DROP'] — a shape that has NEVER
+// been observed in any captured upsert. It came from an inference that "accepts both" must mean
+// both tokens, and that inference was flagged at the time as the one unverified value in a live
+// post. The capture settled it:
+//     form "Live or Drop & Hook"  ->  loadingTypeList: ["LIVE"]
+//     form "Drop & Hook"          ->  loadingTypeList: ["DROP"]
+// In THIS API ["LIVE"] IS the wider option. See samples/pat-upsert-loading-type-control.json.
+// Ihor's product rule is unchanged: always the wider option, for every load, never derived.
+var PAT_LOADING_TYPE_LIST  = ['LIVE'];
+var PAT_LOADING_TYPE_LABEL = 'Live or Drop & Hook';
+
+
+// ── TRAILER OWNERSHIP — ⚠ INTERIM DOM DEPENDENCY (2026-08-20) ─────────────────────────────
+//
+// ⚠⚠ THIS IS THE ONLY FIELD IN THE PAYLOAD NOT SOURCED FROM THE API RECORD, AND IT BREAKS THE
+// STANDING DIRECTIVE that one id plus one API record is the only source. Ihor authorised it as a
+// deliberate, temporary exception. DELETE IT when either of these happens:
+//   1. the record-based rule is found (the label collection in cityAssign.js exists to find it), or
+//   2. Ihor's own backend supplies trailer ownership directly.
+// Do NOT extend this pattern to any other field. Everything else stays record-sourced.
+//
+// WHY IT EXISTS. The P/R marker cannot be read from the captured /search bodies, and that is
+// structural, not a gap in effort: the marker sits on the equipment FILTER option, request bodies
+// are never captured, and BOTH variants collapse onto the same loads[].equipmentType. Four
+// hypotheses were tested and refuted — assetOwner, containerOwner, C1 ("any stop LIVE means R")
+// and C5 ("any DROP means P"). See api-samples.md 11 and BACKLOG 0p.
+//
+// WHAT IT READS. The letter Amazon itself renders in div.trailer-type-circle > p, which
+// loadParser.js:84 already parses into trailerLetter. No new DOM traversal is introduced here —
+// this reads an in-memory map that loadParser fills.
+//
+// ⚠ "R" HAS NEVER BEEN OBSERVED IN A CAPTURED CARD — only "P". The R branch is UNVERIFIED until
+// Ihor tests it on a real R load. The modal diagnostics say so out loud.
+//
+// providedTrailerType and visibleProvidedTrailerType always carry the SAME value — confirmed
+// across all eleven captured upserts (api-samples.md 8a).
+var PAT_TRAILER_BY_LETTER = {
+  P: PAT_TRAILER_AMAZON_PROVIDED,   // Provided — Amazon supplies the trailer
+  R: PAT_TRAILER_CARRIER_OWNED,     // Required — the carrier must supply it
+};
+var PAT_TRAILER_LABEL_BY_LETTER = { P: 'Provided', R: 'Required' };
+
+// The badge letter for a load. Prefers cityAssign's label map, which shares the record's id,
+// eviction and teardown; falls back to loadStore for the case where cityAssign has not loaded.
+// Both hold the SAME value from the SAME parse — loadParser writes to each.
+function patTrailerLetter(loadId) {
+  logger.log('patModal', 'patTrailerLetter called', { loadId: !!loadId });
+  try {
+    if (typeof getTrailerLabel === 'function') {
+      var viaLabel = getTrailerLabel(loadId);
+      if (viaLabel) return String(viaLabel);
+    }
+    if (typeof loadStore !== 'undefined' && loadStore.getLoadUnit) {
+      var unit = loadStore.getLoadUnit(loadId);
+      if (unit && unit.trailerLetter) return String(unit.trailerLetter);
+    }
+    return null;
+  } catch (e) {
+    logger.error('patModal', 'patTrailerLetter failed — treating the trailer type as unresolved',
+      { error: e, loadId: !!loadId });
+    return null;
+  }
+}
+
+// ── DRIVER TYPE, DERIVED FROM THE LOAD (2026-08-19) ───────────────────────────────────────
+//
+// IHOR'S PRODUCT RULE: the driver type is a property of the LOAD, not a choice. A solo load is
+// for a solo driver and a team load is for a team — a solo driver CANNOT run a team load. The
+// mapping is strictly one to one, with no default, no fallback and no dispatcher override.
+// There is deliberately NO control, toggle or "change it here" affordance.
+//
+// MEASURED. transitOperatorType across every capture on disk: "SINGLE_DRIVER" x159, field absent
+// 0 — one value only. "TEAM_DRIVER" is known from Ihor's live PATDIAG DRIVER line on load
+// d075a306, not from disk.
+//
+// EACH ENTRY CARRIES TWO SEPARATE THINGS, and they are not the same fact:
+//   label - what the modal SHOWS. Known for both values.
+//   types - what gets POSTED. Known only for solo.
+//
+// BOTH VALUES ARE NOW CAPTURE-BACKED (2026-08-19). TEAM_DRIVER was blocked from posting until a
+// real upsert containing driverTypes: ["TEAM"] existed; Ihor captured one, so the types slot is
+// filled and a team load posts correctly. An unlisted or missing transitOperatorType still gets
+// NO mapping and NO default — Confirm stays disabled with the raw value named.
+var PAT_DRIVER_BY_TRANSIT_OPERATOR = {
+  SINGLE_DRIVER: { label: 'Solo', types: PAT_DRIVER_TYPES_SOLO },
+  TEAM_DRIVER:   { label: 'Team', types: PAT_DRIVER_TYPES_TEAM },
+};
+
+// ── STATE CODE NORMALISATION (2026-08-19) ─────────────────────────────────────────────────
+//
+// THE DEFECT THIS FIXES. resolvePATCity() matches Amazon's cities API on its two-letter
+// stateCode: "results[i].stateCode === state". The record's stops[].location.state carries BOTH
+// forms in the SAME field. Measured across 506 captured stops:
+//     two-letter CODE : 454 / 506   (IL, OH, IN, KY, TN, TX, AR, NC, VA, FL, PA, NJ, OK, MI,
+//                                    DE, NE, WI, IA, SC, MO, MD, GA, KS, MS)
+//     full state NAME :  52 / 506   (Ohio, Florida, Indiana, Missouri, Maryland, KENTUCKY,
+//                                    Pennsylvania, TEXAS, Kentucky, Virginia, West Virginia,
+//                                    New York)
+// Every full-name stop failed on every match path, which is exactly Ihor's «MONROE, Ohio».
+//
+// WHY A TABLE AND NOT A FIELD. There is no field that reliably holds the code: "state" is the
+// only state field on "location", and both forms appear in it. "country" is always two letters
+// but is the COUNTRY. Measured over every key on all 506 stop locations — nothing else carries
+// the state. So option (a) from the brief is not available and this is option (b).
+//
+// ⚠ EXHAUSTIVE AND EXACT, BY REQUIREMENT. No fuzzy matching, no prefix matching, and above all no
+// "first two letters" — that heuristic is actively wrong here: "New York" would become NE, which
+// is NEBRASKA, and "West Virginia" would become WE, which is nothing. An unrecognised value
+// returns null and the city then fails to resolve exactly as it does today, leaving Confirm
+// disabled with the value named on screen. Nothing is ever guessed.
+//
+// Casing varies in the captures ("KENTUCKY" and "Kentucky" both occur), so lookup is
+// case-insensitive. Keys are lower case; a value already two letters is accepted as a code —
+// safe because no US state or Canadian province has a two-letter name.
+//
+// NOT INCLUDED: US overseas territories (PR, VI, GU, AS, MP). None appears in any capture, and an
+// entry nobody has seen Amazon send is a guess. If one ever appears it fails loudly and the log
+// names it, which is the signal to add it.
+var PAT_STATE_CODE_BY_NAME = {
+  // United States — 50 states plus the District of Columbia
+  'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+  'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+  'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+  'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+  'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS',
+  'missouri': 'MO', 'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
+  'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
+  'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH', 'oklahoma': 'OK',
+  'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+  'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+  'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV', 'wisconsin': 'WI',
+  'wyoming': 'WY', 'district of columbia': 'DC',
+  // Canada — 10 provinces and 3 territories
+  'alberta': 'AB', 'british columbia': 'BC', 'manitoba': 'MB', 'new brunswick': 'NB',
+  'newfoundland and labrador': 'NL', 'northwest territories': 'NT', 'nova scotia': 'NS',
+  'nunavut': 'NU', 'ontario': 'ON', 'prince edward island': 'PE', 'quebec': 'QC',
+  'quebec (quebec)': 'QC', 'saskatchewan': 'SK', 'yukon': 'YT',
+};
+
+// Returns the two-letter code, or null when the value is not recognised. Null is a real answer —
+// the caller keeps the raw value so the on-screen failure names it.
+function patStateCode(raw) {
+  logger.log('patModal', 'patStateCode called', { hasValue: !!raw });
+  try {
+    var v = String(raw === null || raw === undefined ? '' : raw).trim();
+    if (!v) return null;
+    if (/^[A-Za-z]{2}$/.test(v)) return v.toUpperCase();
+    var hit = PAT_STATE_CODE_BY_NAME[v.toLowerCase()];
+    return hit || null;
+  } catch (e) {
+    logger.error('patModal', 'patStateCode failed — treating the state as unrecognised', {
+      error: e, rawState: raw
+    });
+    return null;
+  }
+}
+
+// { city, state } for a stop, with the state normalised to a code. On an unrecognised state the
+// RAW value is kept so resolvePATCity fails and the existing message names it — the failure path
+// is deliberately unchanged.
+function patStopPlace(stop, which, loadId) {
+  logger.log('patModal', 'patStopPlace called', { which: which });
+  try {
+    if (!stop || !stop.city) return null;
+    var code = patStateCode(stop.state);
+    if (code === null) {
+      // The raw STATE is logged deliberately: without it nobody can extend the table. The city
+      // is not, per this file's PII convention.
+      logger.error('patModal', 'patStateCode: UNRECOGNISED state value — not guessing. The city ' +
+        'will fail to resolve and Confirm will stay disabled. Add this value to ' +
+        'PAT_STATE_CODE_BY_NAME once confirmed.', {
+        loadId: loadId, which: which, rawState: stop.state
+      });
+      return { city: stop.city, state: String(stop.state || '') };
+    }
+    return { city: stop.city, state: code };
+  } catch (e) {
+    logger.error('patModal', 'patStopPlace failed', { error: e, which: which, loadId: loadId });
+    return null;
+  }
+}
+
+// The UTC offset and short zone name in force at a given instant, from the stop's own IANA zone.
+// D4: this replaces the old fixed TZ_OFFSET_HOURS table and the year guessing in
+// parsePatStopTime() — the record carries a real instant, so nothing has to be inferred.
+// Because the offset is resolved AT THAT INSTANT, a load either side of a DST change gets the
+// offset that actually applies to it, which the fixed table could not do.
+function patZoneAt(date, zone) {
+  logger.log('patModal', 'patZoneAt called', { zone: zone });
+  try {
+    if (!zone) return null;
+    var dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    var p = {};
+    dtf.formatToParts(date).forEach(function (x) { p[x.type] = x.value; });
+    // hour12:false yields '24' for midnight in some engines; normalise before arithmetic.
+    var hour = parseInt(p.hour, 10) % 24;
+    var asIfUtc = Date.UTC(parseInt(p.year, 10), parseInt(p.month, 10) - 1, parseInt(p.day, 10),
+                           hour, parseInt(p.minute, 10), parseInt(p.second, 10));
+    var offset = (asIfUtc - date.getTime()) / 3600000;
+
+    var name = '';
+    try {
+      var nf = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'short' });
+      nf.formatToParts(date).forEach(function (x) { if (x.type === 'timeZoneName') name = x.value; });
+    } catch (e1) {
+      logger.error('patModal', 'patZoneAt: short zone name unavailable — using the offset alone',
+        { error: e1, zone: zone });
+    }
+    return { offset: offset, name: name };
+  } catch (e) {
+    logger.error('patModal', 'patZoneAt failed — time will be reported as unresolvable', {
+      error: e, zone: zone
+    });
+    return null;
+  }
+}
+
+// An ISO instant + IANA zone + a shift, in the { date, tzName, tzOffset } shape the modal's
+// stepper and formatters already consume. Returns null when anything is missing — never a
+// fabricated time (no-silent-fallback rule).
+function patTimeFrom(iso, zone, shiftMs) {
+  logger.log('patModal', 'patTimeFrom called', { hasIso: !!iso, zone: zone, shiftMs: shiftMs });
+  try {
+    if (!iso) return null;
+    var base = new Date(iso);
+    if (isNaN(base.getTime())) {
+      logger.error('patModal', 'patTimeFrom: unparseable ISO instant from the record', { iso: iso });
+      return null;
+    }
+    var shifted = new Date(base.getTime() + (shiftMs || 0));
+    var z = patZoneAt(shifted, zone);
+    if (!z) return null;
+    return { date: shifted, tzName: z.name, tzOffset: z.offset };
+  } catch (e) {
+    logger.error('patModal', 'patTimeFrom failed', { error: e, iso: iso, zone: zone });
+    return null;
+  }
+}
+
+// Everything PAT needs, derived from the record alone. Pure: no DOM, no network, no state.
+// "missing" names every required field that could not be resolved, so Confirm can stay disabled
+// and the dispatcher is told WHICH field is missing rather than being shown a guessed value.
+function patSourceFromRecord(record) {
+  logger.log('patModal', 'patSourceFromRecord called', { loadId: record && record.id });
+  var out = {
+    loadId: record && record.id, equipmentEnum: null, equipmentTypes: null,
+    transitOperatorType: null,
+    driverLabel: null, driverTypes: null,
+    payout: null, distance: null, stopCount: null,
+    origin: null, dest: null, startTime: null, endTime: null,
+    loadingTypeList: null, unloadingEnum: null, missing: []
+  };
+  try {
+    if (!record) { out.missing.push('record'); return out; }
+    var loads = record.loads || [];
+    var firstLoad = loads[0] || null;
+    var lastLoad  = loads.length ? loads[loads.length - 1] : null;
+    var firstStop = (firstLoad && firstLoad.stops && firstLoad.stops[0]) || null;
+    var lastStop  = (lastLoad && lastLoad.stops && lastLoad.stops.length)
+      ? lastLoad.stops[lastLoad.stops.length - 1] : null;
+
+    out.transitOperatorType = (typeof record.transitOperatorType === 'string')
+      ? record.transitOperatorType : null;
+    // Strictly one to one. An unlisted or missing value gets NO mapping and NO default.
+    var driver = (out.transitOperatorType &&
+        Object.prototype.hasOwnProperty.call(PAT_DRIVER_BY_TRANSIT_OPERATOR, out.transitOperatorType))
+      ? PAT_DRIVER_BY_TRANSIT_OPERATOR[out.transitOperatorType] : null;
+    out.driverLabel = driver ? driver.label : null;
+    out.driverTypes = driver ? driver.types : null;
+
+    // Equipment — the load's, not the stop's.
+    out.equipmentEnum = (firstLoad && firstLoad.equipmentType) || null;
+    if (out.equipmentEnum &&
+        Object.prototype.hasOwnProperty.call(PAT_EQUIPMENT_BY_ENUM, out.equipmentEnum)) {
+      out.equipmentTypes = PAT_EQUIPMENT_BY_ENUM[out.equipmentEnum];
+    }
+
+    // Money and distance — from the record, per the directive. The x1.10 markup is applied by
+    // the caller and is NOT changed here; only the base value's source moved.
+    out.payout   = (typeof record.payout === 'number') ? record.payout : null;
+    out.distance = (typeof record.totalDistance === 'number') ? record.totalDistance : null;
+
+    // D3: stop count is the record's own, which is the number the card shows.
+    out.stopCount = (typeof record.stopCount === 'number' && record.stopCount >= 1)
+      ? record.stopCount : null;
+
+    // Cities come as discrete fields — nothing is parsed out of an address string. The state is
+    // normalised to the two-letter code resolvePATCity matches on; see PAT_STATE_CODE_BY_NAME.
+    out.origin = patStopPlace(firstStop, 'origin', out.loadId);
+    out.dest   = patStopPlace(lastStop, 'destination', out.loadId);
+
+    // D1 / D2 / D4.
+    out.startTime = firstStop
+      ? patTimeFrom(firstStop.checkIn, firstStop.tz, -PAT_START_LEAD_MINUTES * 60000) : null;
+    out.endTime = lastStop
+      ? patTimeFrom(lastStop.checkOut, lastStop.tz, PAT_END_TRAIL_HOURS * 3600000) : null;
+
+    // F3 (2026-08-19): THE RECORD NO LONGER DECIDES THE LOADING TYPE. The posted value is the
+    // fixed PAT_LOADING_TYPE_LIST for every load — see the constant for the reasoning. The stop's
+    // own enum is still READ, but only so PATDIAG SOURCE can show what the load actually says
+    // beside what we post. It influences nothing.
+    out.unloadingEnum = (lastStop && lastStop.unloadingType) || null;
+    out.loadingTypeList = PAT_LOADING_TYPE_LIST;
+
+    // Unpostable for either reason: an unknown operator type, or a known one (TEAM_DRIVER) whose
+    // upsert enum has never been captured. Both must block — never post a guessed driver type.
+    if (!out.driverTypes)      out.missing.push('driver type');
+    if (!out.equipmentTypes)   out.missing.push('equipment');
+    if (out.payout === null)   out.missing.push('payout');
+    if (out.distance === null) out.missing.push('distance');
+    if (out.stopCount === null) out.missing.push('stopCount');
+    if (!out.origin)           out.missing.push('origin city');
+    if (!out.dest)             out.missing.push('destination city');
+    if (!out.startTime)        out.missing.push('start time');
+    if (!out.endTime)          out.missing.push('end time');
+    // Loading type is never "missing" any more — it is a constant (F3).
+    return out;
+  } catch (e) {
+    logger.error('patModal', 'patSourceFromRecord failed — nothing is guessed, the modal will ' +
+      'report the fields as missing', { error: e, loadId: record && record.id });
+    out.missing.push('record (threw)');
+    return out;
+  }
+}
+
+// PATDIAG SOURCE — VERIFICATION AID ONLY (2026-08-19), behind CITY_ASSIGN_DEBUG.
+//
+// ⚠ THE CARD VALUES PRINTED HERE ARE NEVER USED. They are read solely so a disagreement between
+// the API record and what the board shows is visible during Ihor's manual test — payout and
+// distance above all. If this line ever became a fallback, the whole point of the directive would
+// be lost.
+// PATDIAG DRIVER — VERIFICATION AID ONLY (2026-08-19), behind CITY_ASSIGN_DEBUG.
+//
+// THE DEFECT IT MEASURES. The posted driver type is HARDCODED in two places and is read from
+// nothing at all:
+//   patApi.js  buildPatPayload()  driverTypes: ['SOLO']   <- a literal, NOT taken from formState
+//   patModal.js                   driverVal.textContent = 'Solo'  <- a literal, in a static div
+//                                                                    with no listener and no control
+// A team load therefore posts as Solo. Unlike the city defect NOTHING BLOCKS IT: a wrong city
+// stopped the post and was visible, a wrong driver type posts silently and wrongly.
+//
+// WHAT THE RECORD CARRIES. transitOperatorType is the ONLY field in the whole work opportunity
+// whose name or value could distinguish team from solo — established by scanning every key path
+// in all 159 captured records, and by finding no path anywhere whose value is ever TEAM or SOLO.
+// It reads "SINGLE_DRIVER" in 159/159: every capture on disk is a solo load, so THE TEAM VALUE IS
+// UNKNOWN. This line exists to learn it. Nothing is inferred from it and nothing posted depends
+// on it.
+function patDiagDriver(loadId, src) {
+  logger.log('patModal', 'patDiagDriver called', { loadId: loadId });
+  try {
+    if (typeof CITY_ASSIGN_DEBUG === 'undefined' || !CITY_ASSIGN_DEBUG) return;
+    var raw = src.transitOperatorType;
+    var isKnownSolo = (raw === 'SINGLE_DRIVER');
+    logger.log('patModal', 'PATDIAG DRIVER  ' + loadId +
+      '  ||  record transitOperatorType = ' +
+      (raw === null || raw === undefined ? 'NOT PRESENT IN THE RECORD' : JSON.stringify(raw)) +
+      '  ||  PAT will post driverTypes = ["SOLO"]  (HARDCODED in patApi.js buildPatPayload — not ' +
+      'read from the record, not from the card, not from any control)' +
+      '  ||  the modal shows Driver = "Solo"  (HARDCODED, a static div)' +
+      '  ||  AGREE: ' + (isKnownSolo
+        ? 'yes — the record says SINGLE_DRIVER and we post SOLO'
+        : '** NO — the record does NOT say SINGLE_DRIVER, so this load is very likely NOT solo ' +
+          'and the post would be WRONG. Send this line to the PM verbatim. **'));
+  } catch (e) {
+    logger.error('patModal', 'patDiagDriver failed — diagnostics only', { error: e, loadId: loadId });
+  }
+}
+
+function patDiagSource(loadId, src) {
+  logger.log('patModal', 'patDiagSource called', { loadId: loadId });
+  try {
+    if (typeof CITY_ASSIGN_DEBUG === 'undefined' || !CITY_ASSIGN_DEBUG) return;
+    var card = (typeof loadStore !== 'undefined' && loadStore.getLoadUnit)
+      ? (loadStore.getLoadUnit(loadId) || {}) : {};
+    var pair = function (label, rec, crd) {
+      return label + ': record=' + (rec === null || rec === undefined ? '—' : rec) +
+             ' card=' + (crd === null || crd === undefined || crd === '' ? '—' : crd);
+    };
+    var iso = function (t) { return t && t.date ? t.date.toISOString() : '—'; };
+    logger.log('patModal', 'PATDIAG SOURCE  ' + loadId + '  ||  ' + [
+      pair('equipment', src.equipmentEnum, card.equipment),
+      pair('payout', src.payout, card.payout),
+      pair('distance', src.distance, card.distance),
+      pair('stopCount', src.stopCount, '(card has none — this is the field that was empty)'),
+      pair('loadingType', src.unloadingEnum, card.loadingType),
+      pair('origin', src.origin ? src.origin.city + ', ' + src.origin.state : null,
+           (card.boardStops && card.boardStops[0]) || null),
+      pair('dest', src.dest ? src.dest.city + ', ' + src.dest.state : null,
+           (card.boardStops && card.boardStops.length) ? card.boardStops[card.boardStops.length - 1] : null)
+    ].join('  |  ') +
+      '  ||  start(CHECKIN−' + PAT_START_LEAD_MINUTES + 'min)=' + iso(src.startTime) +
+      '  end(CHECKOUT+' + PAT_END_TRAIL_HOURS + 'h)=' + iso(src.endTime) +
+      '  ||  missing: ' + (src.missing.length ? src.missing.join(', ') : 'none') +
+      '  ||  ⚠ card values are DIAGNOSTIC ONLY and are never used');
+  } catch (e) {
+    logger.error('patModal', 'patDiagSource failed — diagnostics only, the modal is unaffected',
+      { error: e, loadId: loadId });
+  }
+}
+
+// F2 (2026-08-19). THE WHOLE BODY IS WRAPPED. openPostModal is async and its caller cannot see a
+// synchronous throw, so before this wrapper a ReferenceError anywhere in ~600 lines of modal
+// building became an unhandled promise rejection: no logger.error, no modal, nothing on screen,
+// and smoke item (f) "no console errors" kept passing while (e) failed. That is exactly how
+// «equipment is not defined» survived a live test.
+//
+// Two rules this enforces, and they are the point of the fix rather than the crash it caught:
+//   1. NOTHING on this path fails silently — every escape is logged with context.
+//   2. The dispatcher SEES the failure. A plain "could not be built" dialog beats a button that
+//      does nothing, because a dead button reads as "no loads matched" rather than "broken".
 async function openPostModal(loadId) {
   logger.log('patModal', 'openPostModal called', { loadId: loadId });
+  try {
+    return await openPostModalInner(loadId);
+  } catch (e) {
+    logger.error('patModal', 'openPostModal FAILED — the modal was not built', {
+      error: e,
+      message: e && e.message,
+      stack: e && e.stack,
+      loadId: loadId
+    });
+    // The dispatcher must not be left staring at a dead button. Its own failure is caught
+    // separately so a broken DOM cannot turn a visible error back into a silent one.
+    try {
+      showSimplePatModal(
+        'Post a Truck could not be opened for this load.\n' +
+        'Nothing was sent. Please report this load to the PM — the console has the details.',
+        'pat-open-failed'
+      );
+    } catch (e2) {
+      logger.error('patModal', 'openPostModal: the failure dialog ALSO failed to render — the ' +
+        'dispatcher has no on-screen signal, only this line', { error: e2, loadId: loadId });
+    }
+    return;
+  }
+}
+
+async function openPostModalInner(loadId) {
+  logger.log('patModal', 'openPostModalInner called', { loadId: loadId });
 
   if (!loadId) { logger.error('patModal', 'openPostModal: no loadId'); return; }
 
-  var loadUnit = loadStore.getLoadUnit(loadId);
-  if (!loadUnit) {
-    logger.warn('patModal', 'openPostModal: loadUnit not in store', { loadId: loadId });
-    showSimplePatModal('Load data not found — try reopening the load card.', 'pat-no-loadunit');
+  // THE RECORD IS THE ONLY SOURCE. getLoadRecord() is cityAssign's store — the same one the
+  // inline panel renders from. PAT is reachable only from the panel's action bar, and the panel
+  // only renders when this call already returned a record, so it is present by construction;
+  // the guard exists because "by construction" is not "checked".
+  var record = (typeof getLoadRecord === 'function') ? getLoadRecord(loadId) : null;
+  if (!record) {
+    logger.warn('patModal', 'openPostModal: no captured record for this load', { loadId: loadId });
+    showSimplePatModal('Load data not captured — reopen the load card.', 'pat-no-loadunit');
     return;
   }
 
+  var src = patSourceFromRecord(record);
+  patDiagSource(loadId, src);
+  patDiagDriver(loadId, src);
+
   // --- Equipment gate ---
-  // Map board label → equipmentTypes array for the upsert. To add a new type: capture a live
-  // upsert, add the enum constant in patApi.js, add the mapping here, update api-samples.md.
-  var PAT_EQUIPMENT_MAP = {
-    "53' Trailer":               PAT_EQUIPMENT_TYPES_53,
-    "53' Container and Chassis": PAT_EQUIPMENT_TYPES_CONTAINER,
-    "40' Container":             PAT_EQUIPMENT_TYPES_40_CONTAINER,
-    "26' Truck":                 PAT_EQUIPMENT_TYPES_26_TRUCK,
-  };
-  var equipment = loadUnit.equipment || '';
-  var patEquipmentTypes = PAT_EQUIPMENT_MAP[equipment] || null;
+  // Enum -> PAT constant, never via a display label. An enum with no mapping is logged VERBATIM
+  // at error level so Ihor knows exactly which capture to send, and is then handed to the
+  // existing unsupported-equipment path unchanged (PLAN 8 — out of scope here).
+  var patEquipmentTypes = src.equipmentTypes;
   if (!patEquipmentTypes) {
-    if (!equipment) {
-      // Empty equipment means Phase 1 data could not be read from the card DOM at all
-      // (on-demand parse in inlinePanel.js already logged outerHTML length + loadId).
-      logger.error('patModal', 'openPostModal: empty equipment — card Phase 1 data not available', { loadId: loadId });
+    if (!src.equipmentEnum) {
+      logger.error('patModal', 'openPostModal: the record carries no equipmentType', { loadId: loadId });
       showSimplePatModal(
         "Could not read load data from this card — start the refresh loop once, or report this card layout to the PM.",
         'pat-no-equipment'
       );
     } else {
-      logger.warn('patModal', 'openPostModal: unsupported equipment', { equipment: equipment });
+      logger.error('patModal', 'openPostModal: UNMAPPED equipment enum — no mapping is invented. ' +
+        'Send the PM a capture of a board containing this equipment type.',
+        { loadId: loadId, equipmentType: src.equipmentEnum });
       showSimplePatModal(
-        "Post creation for this equipment type is not supported yet: «" + equipment + "».\n" +
+        "Post creation for this equipment type is not supported yet: «" + src.equipmentEnum + "».\n" +
         "To add it, capture a manual Post-a-Truck upsert for this type and send it to the PM.",
         'pat-unsupported-equipment'
       );
@@ -439,186 +959,128 @@ async function openPostModal(loadId) {
     return;
   }
 
-  // --- Detail check ---
-  var detail = loadUnit.detail;
-  if (!detail || !detail.segments || detail.segments.length === 0) {
-    showSimplePatModal('Load detail not captured — reopen the load card.', 'pat-no-detail');
-    return;
-  }
+  // --- Cities: discrete fields from the record. Nothing is parsed out of an address string. ---
+  var originParsed = src.origin || { city: '', state: '' };
+  var destParsed   = src.dest   || { city: '', state: '' };
+  var originInput  = originParsed;      // resolvePATCity accepts { city, state }
+  var destInput    = destParsed;
 
-  // --- Sync data extraction ---
-  var boardStops  = loadUnit.boardStops || [];
-  var originStop  = boardStops[0]                              || '';
-  var destStop    = boardStops[boardStops.length - 1]          || '';
-
-  // Detail-panel stop objects — used for city resolution, time parsing, and stop count.
-  // Declared here (not duplicated below) so both uses share the same references.
-  var firstSeg  = detail.segments[0];
-  var lastSeg   = detail.segments[detail.segments.length - 1];
-  var firstStop = (firstSeg.stops && firstSeg.stops[0]) || null;
-  var lastStop  = (lastSeg.stops  && lastSeg.stops[lastSeg.stops.length - 1]) || null;
-
-  // Prefer city from the detail-panel stop address — the same clean "City, ST" text that is
-  // displayed in the pick-up/drop-off view. Board card summary stops may carry a 2-letter
-  // state-code prefix ("NC CONCORD, NC") that parseBoardStop does not strip (it only handles
-  // full-name prefixes like "Illinois AURORA"). Log both side by side to confirm the source.
-  var detailOriginParsed = firstStop ? parseDetailAddress(firstStop.address) : null;
-  var detailDestParsed   = lastStop  ? parseDetailAddress(lastStop.address)  : null;
-
-  // PII (2026-07-30): this used to emit FULL STREET ADDRESSES for both stops (boardOrigin,
-  // detailOriginAddress, boardDest, detailDestAddress) plus the parsed city/state objects —
-  // the largest remaining location leak in the codebase.
-  //
-  // Its diagnostic purpose is preserved without the values. Per the comment above, the log
-  // exists to confirm WHICH source supplied the city, because board stops can carry an
-  // unstripped state-code prefix that parseBoardStop mishandles. That question is answered by
-  // (1) whether the detail source parsed at all, and (2) whether the two sources agree — the
-  // board string containing the detail-parsed city is exactly the agreement test, and it is a
-  // boolean. Lengths are included as the task asked.
-  //
-  // agree() is a pure local helper that exists ONLY to build this payload: no new parse call
-  // (parseBoardStop is deliberately not invoked here — it would run its own log and extra
-  // work), no control-flow effect, nothing outside this object reads it.
-  var _srcAgree = function (boardStr, detailParsed) {
-    if (!boardStr || !detailParsed || !detailParsed.city) return null; // not comparable
-    return String(boardStr).toUpperCase().indexOf(String(detailParsed.city).toUpperCase()) !== -1;
-  };
-  logger.log('patModal', 'openPostModal: city source comparison', {
-    originBoardLength:   originStop.length,
-    originDetailLength:  (firstStop && firstStop.address) ? String(firstStop.address).length : 0,
-    originDetailParsed:  !!(detailOriginParsed && detailOriginParsed.city),
-    originSourcesAgree:  _srcAgree(originStop, detailOriginParsed),
-    destBoardLength:     destStop.length,
-    destDetailLength:    (lastStop && lastStop.address) ? String(lastStop.address).length : 0,
-    destDetailParsed:    !!(detailDestParsed && detailDestParsed.city),
-    destSourcesAgree:    _srcAgree(destStop, detailDestParsed),
-  });
-
-  var originParsed, originInput;
-  if (detailOriginParsed && detailOriginParsed.city) {
-    originParsed = detailOriginParsed;
-    originInput  = detailOriginParsed; // resolvePATCity accepts { city, state }
-  } else {
-    // PII (2026-07-30): was `{ originStop: originStop }` — the raw board stop string.
-    logger.warn('patModal', 'openPostModal: detail origin address unparseable — falling back to boardStop', { originStopLength: originStop.length });
-    originParsed = parseBoardStop(originStop);
-    originInput  = originStop;
-  }
-
-  var destParsed, destInput;
-  if (detailDestParsed && detailDestParsed.city) {
-    destParsed = detailDestParsed;
-    destInput  = detailDestParsed;
-  } else {
-    // PII (2026-07-30): was `{ destStop: destStop }`.
-    logger.warn('patModal', 'openPostModal: detail dest address unparseable — falling back to boardStop', { destStopLength: destStop.length });
-    destParsed = parseBoardStop(destStop);
-    destInput  = destStop;
-  }
-
-  // payoutNum is pre-parsed by _parsePayoutNum (strips $, commas) — same as parseNumStr.
-  // Falls back to parsing the raw payout string directly when payoutNum is null
-  // (happens when .wo-total_payout was absent from the card at parse time).
-  var boardPayout = loadUnit.payoutNum != null
-    ? loadUnit.payoutNum
-    : parseNumStr(loadUnit.payout);
-  if (loadUnit.payoutNum === null || loadUnit.payoutNum === undefined) {
-    logger.warn('patModal', 'openPostModal: payoutNum is null — parseNumStr fallback on raw payout string', {
-      loadId: loadId, payout: loadUnit.payout, resolvedTo: boardPayout,
-    });
-  }
-
-  // EDGE CASE: board payout missing/unparseable (parseNumStr falls back to 0 rather than
-  // null, so 0 means "unparseable" here too) — do NOT prefill 10% of nothing. Leave Payout
-  // empty; a visible warning + Confirm-disable are wired in below (payoutWarningEl /
-  // updateConfirmEnabled), cleared only once the dispatcher enters a valid amount manually.
-  var payoutMissing = !(boardPayout > 0);
+  // --- Payout. Source moved to the record; the x1.10 markup is UNCHANGED. ---
+  var payoutMissing = (src.payout === null) || !(src.payout > 0);
   if (payoutMissing) {
-    logger.warn('patModal', 'openPostModal: board payout missing/unparseable — Payout left empty', {
-      loadId: loadId, payout: loadUnit.payout, payoutNum: loadUnit.payoutNum,
+    logger.warn('patModal', 'openPostModal: record carries no usable payout — Payout left empty', {
+      loadId: loadId, payout: src.payout
     });
   }
-  var initPayout = payoutMissing ? null : parseFloat((boardPayout * PAT_PAYOUT_MARKUP_RATE).toFixed(2));
+  var initPayout = payoutMissing ? null
+    : parseFloat((src.payout * PAT_PAYOUT_MARKUP_RATE).toFixed(2));
 
-  // EDGE CASE (no-silent-fallback rule, same as Payout above and times below — 2026-07-30):
-  // this used to be `parseNumStr(loadUnit.distance)`, whose failure sentinel is 0 (`|| 0`),
-  // indistinguishable from a genuine zero. An unreadable distance therefore produced
-  // minMiles = max(0, 0-25) = 0 and maxMiles = 0+25 = 25, and those fabricated values were
-  // posted to the live marketplace with no warning and no Confirm gating (the submit-time
-  // check validates the DERIVED min/max, which pass happily). Now parsed through a local
-  // null-returning helper so "unparseable" is distinguishable from "0".
-  //
-  // Deliberately a LOCAL helper, not a change to patApi.js's shared parseNumStr(): that
-  // function is also the payout fallback on the line above, and the other currency/number
-  // parsers are explicitly out of scope for this task (they use three further sentinels —
-  // see CHANGELOG.md; unifying them is tracked separately).
-  var distMilesNum    = parsePatMilesOrNull(loadUnit.distance);
-  var distanceMissing = distMilesNum === null;
-  // Kept as a plain number for the per-mile↔payout linkage below, which is only ever
-  // consulted behind a `> 0` guard — 0 here means "no linkage", never a posted value.
-  var distMiles = distanceMissing ? 0 : distMilesNum;
+  // --- Distance. Source moved to the record; the +/-25 window is UNCHANGED. ---
+  var distanceMissing = (src.distance === null);
+  var distMiles = distanceMissing ? 0 : src.distance;
   var minMiles  = distanceMissing ? null : Math.max(0, Math.round(distMiles) - 25);
   var maxMiles  = distanceMissing ? null : Math.round(distMiles) + 25;
   var initPermile = (!payoutMissing && distMiles > 0) ? (initPayout / distMiles).toFixed(2) : '';
   if (distanceMissing) {
-    logger.warn('patModal', 'openPostModal: board distance missing/unparseable — Min/Max Miles left empty, no fabricated 0/25', {
-      loadId: loadId, distance: loadUnit.distance,
+    logger.warn('patModal', 'openPostModal: record carries no totalDistance — Min/Max Miles left empty', {
+      loadId: loadId
     });
   }
 
-  // Same edge case for stop count: `parseInt(...) || 0` collapsed an unreadable value to 0
-  // and posted "0 stops". NaN is the honest sentinel from parseInt; a parsed value below 1
-  // is also treated as unusable (a post with zero stops is not a real load either way).
-  var stopsCountStr   = (detail.header && detail.header.stopsCount) || '';
-  var parsedStopCount = parseInt(stopsCountStr, 10);
-  var stopCountMissing = isNaN(parsedStopCount) || parsedStopCount < 1;
-  var stopCount        = stopCountMissing ? null : parsedStopCount;
+  // --- D3: stop count, straight from the record. This is the field that was empty. ---
+  var stopCount        = src.stopCount;
+  var stopCountMissing = (stopCount === null);
+  var stopsCountStr    = stopCountMissing ? '' : (stopCount + ' stops');
   if (stopCountMissing) {
-    logger.warn('patModal', 'openPostModal: stop count missing/unparseable — field left empty for manual entry', {
-      loadId: loadId, stopsCount: stopsCountStr, parsed: parsedStopCount,
+    logger.warn('patModal', 'openPostModal: record carries no usable stopCount — field left empty', {
+      loadId: loadId, stopCount: record.stopCount
     });
   }
 
-  var loadingTypeStr  = loadUnit.loadingType || '';
-  var loadingTypeList = resolveLoadingType(loadingTypeStr);
-  var loadingDispStr  = LOADING_TYPE_DISPLAY[loadingTypeStr] || loadingTypeStr;
+  // --- F1: equipment DISPLAY text for the summary line, from the record like everything else.
+  // Never from loadUnit and never from the card. No posted value depends on it. ---
+  var equipment = PAT_EQUIPMENT_LABEL_BY_ENUM[src.equipmentEnum] || src.equipmentEnum || '';
 
-  // Times from first/last stop arrivals (firstStop/lastStop declared in sync extraction above)
-  var startTimeResult = firstStop ? parsePatStopTime(firstStop.arrival) : null;
-  var endTimeResult   = lastStop  ? parsePatStopTime(lastStop.arrival)  : null;
+  // --- Trailer ownership, from the badge letter. ⚠ INTERIM DOM DEPENDENCY — see the block above.
+  // No default and no fallback: an unexpected or missing letter blocks the post. ---
+  var trailerLetter = patTrailerLetter(loadId);
+  var providedTrailerType = (trailerLetter &&
+      Object.prototype.hasOwnProperty.call(PAT_TRAILER_BY_LETTER, trailerLetter))
+    ? PAT_TRAILER_BY_LETTER[trailerLetter] : null;
+  var trailerLabel = (trailerLetter &&
+      Object.prototype.hasOwnProperty.call(PAT_TRAILER_LABEL_BY_LETTER, trailerLetter))
+    ? PAT_TRAILER_LABEL_BY_LETTER[trailerLetter] : (trailerLetter || 'unknown');
+  if (trailerLetter === 'R') {
+    logger.warn('patModal', 'openPostModal: R (carrier-owned) trailer — this branch has NEVER ' +
+      'been verified against a real post. "R" appears in no captured card. Check the posted ' +
+      'trailer type on Amazon after confirming.', { loadId: loadId });
+  }
 
-  // Missing/unparseable (not a recognized-but-unmapped tzError — that's handled separately
-  // below with its own specific message) — recorded before the tzError check runs, since
-  // that check also nulls the result out for a different reason.
+  // --- Driver type, derived from the load. Read-only: no control, by product rule. ---
+  var driverTypes = src.driverTypes;
+  var driverLabel = src.driverLabel || (src.transitOperatorType || 'unknown');
+
+  // --- F3: one fixed loading type for every load. Not derived. See PAT_LOADING_TYPE_LIST. ---
+  var loadingTypeList = PAT_LOADING_TYPE_LIST;
+  var loadingDispStr  = PAT_LOADING_TYPE_LABEL;
+  if (src.unloadingEnum && src.unloadingEnum !== 'DROP') {
+    logger.log('patModal', 'openPostModal: posting the fixed loading type; the load itself says ' +
+      'something else — this is deliberate (F3), not a mismatch', {
+      loadId: loadId, loadSays: src.unloadingEnum, posting: PAT_LOADING_TYPE_LABEL
+    });
+  }
+
+  // --- D1 / D2 / D4: times, already shifted, from the real instant and the stop's IANA zone. ---
+  var startTimeResult  = src.startTime;
+  var endTimeResult    = src.endTime;
   var startTimeMissing = !startTimeResult;
   var endTimeMissing   = !endTimeResult;
 
-  // Collect blocking errors
+  // F3: there is no "unknown loading type" blocking error any more — the value is a constant, so
+  // it can never be unknown. The submit-time guard on loadingTypeList is left in place as a plain
+  // defensive check on the payload; it does not choose anything.
   var blockingErrors = [];
-  if (!loadingTypeList) blockingErrors.push('Unknown loading type: «' + loadingTypeStr + '»');
-  if (startTimeResult && startTimeResult.tzError) {
-    blockingErrors.push('Unrecognized timezone: «' + startTimeResult.tzError + '» in start time');
-    startTimeResult = null;
-  }
-  if (endTimeResult && endTimeResult.tzError) {
-    blockingErrors.push('Unrecognized timezone: «' + endTimeResult.tzError + '» in end time');
-    endTimeResult = null;
-  }
-
-  // EDGE CASE (no-silent-fallback rule, same as Payout, 2026-07-20): a missing/unparseable
-  // load time must not be silently replaced with a fabricated "now +Nh" value — that was
-  // this function's previous behavior (fallbackTime()) and posted a fictional availability
-  // window to Amazon with no operator awareness. Leave it empty instead (makeTimeStepper
-  // renders "Not set — click to enter" for a null timeResult) and surface one shared warning
-  // (ext-pat-times-warning, wired up below). Deliberately NOT pushed into blockingErrors —
-  // unlike loadingType/tzError (permanent for this modal instance, per "leave tzError
-  // handling as-is"), a missing time IS recoverable: Confirm is gated on it live via
-  // updateConfirmEnabled()/timesValid(), so the dispatcher can still enter both times
-  // manually and proceed.
-  if (startTimeMissing || endTimeMissing) {
-    logger.warn('patModal', 'openPostModal: load time(s) missing/unparseable — left empty, no fabricated default', {
-      loadId: loadId, startTimeMissing: startTimeMissing, endTimeMissing: endTimeMissing,
+  if (!providedTrailerType) {
+    logger.error('patModal', 'openPostModal: trailer ownership UNRESOLVED — the card carried no ' +
+      'recognised P/R badge letter. No default is applied; a guessed trailer type would post the ' +
+      'wrong ownership to the live marketplace.', {
+      loadId: loadId,
+      trailerLetter: (trailerLetter === null || trailerLetter === undefined)
+        ? '(no letter — the card was not parsed, or has no badge)' : trailerLetter
     });
+    blockingErrors.push('Unknown trailer type: «' +
+      ((trailerLetter === null || trailerLetter === undefined)
+        ? 'no P/R badge read from this card' : String(trailerLetter)) +
+      '» — cannot post without knowing whether Amazon provides the trailer.');
+  }
+  if (!driverTypes) {
+    if (src.transitOperatorType === 'TEAM_DRIVER') {
+      logger.error('patModal', 'openPostModal: TEAM load detected, but the upsert driverTypes ' +
+        'value for a team post has never been captured — refusing to post rather than sending ' +
+        'SOLO or a guessed enum. Capture a manual Post-a-Truck upsert with Team selected and ' +
+        'send it to the PM.', { loadId: loadId, transitOperatorType: src.transitOperatorType });
+      blockingErrors.push('This is a TEAM load. Posting it is blocked until the Team driver ' +
+        'value is confirmed — a solo post would be wrong. Send the PM a Post-a-Truck capture ' +
+        'made with Team selected.');
+    } else {
+      logger.error('patModal', 'openPostModal: UNMAPPED transitOperatorType — no mapping is ' +
+        'invented and no default is applied. Send the PM a capture of this load.',
+        { loadId: loadId, transitOperatorType: src.transitOperatorType });
+      blockingErrors.push('Unknown driver type: «' +
+        (src.transitOperatorType === null || src.transitOperatorType === undefined
+          ? 'not present in the record' : String(src.transitOperatorType)) +
+        '» — cannot post without knowing whether this load is solo or team.');
+    }
+  }
+  if (startTimeMissing || endTimeMissing) {
+    logger.warn('patModal', 'openPostModal: load time(s) missing from the record — left empty, no ' +
+      'fabricated default', {
+      loadId: loadId, startTimeMissing: startTimeMissing, endTimeMissing: endTimeMissing
+    });
+  }
+  if (src.missing.length) {
+    logger.warn('patModal', 'openPostModal: fields unresolved from the record — Confirm stays ' +
+      'disabled until they are entered', { loadId: loadId, missing: src.missing.join(', ') });
   }
 
   // --- Build modal DOM ---
@@ -816,7 +1278,9 @@ async function openPostModal(loadId) {
   var driverVal = document.createElement('div');
   driverVal.setAttribute('data-testid', 'ext-pat-driver');
   driverVal.className = 'pat-static-val';
-  driverVal.textContent = 'Solo';
+  // Derived from the load, never a literal and never editable (product rule: the driver type is
+  // a property of the load, not a choice).
+  driverVal.textContent = driverLabel;
 
   var stopsField = numField('Stops', stopsVal);
   stopsField.appendChild(stopsWarningEl);
@@ -909,7 +1373,11 @@ async function openPostModal(loadId) {
   var summaryEl = document.createElement('div');
   summaryEl.setAttribute('data-testid', 'ext-pat-summary');
   summaryEl.className = 'pat-summary';
-  summaryEl.textContent = "Equipment: " + equipment + " (Provided) Loading Type: " + loadingDispStr;
+  // The ownership word is DERIVED now, not the hardcoded "(Provided)" it used to be — an R load
+  // reads "Required". WARNING: INTERIM DOM DEPENDENCY; see the block near PAT_TRAILER_BY_LETTER.
+  // The separator is U+2003 EM SPACE, preserved byte-for-byte — the layout must not change.
+  summaryEl.textContent = "Equipment: " + equipment + " (" + trailerLabel + ") Loading Type: " +
+    loadingDispStr;
 
   // Assemble body
   body.appendChild(routeRow);
@@ -1148,6 +1616,8 @@ async function openPostModal(loadId) {
       permile:              permileVal,
       payout:               payoutVal,
       stemMin:              parseInt(stemSel.value, 10),
+      providedTrailerType:  providedTrailerType,
+      driverTypes:          driverTypes,
       loadingTypeList:      loadingTypeList,
       excludeSpecialServices: swingCheckbox.checked ? ['SWING_DOOR'] : [],
     };

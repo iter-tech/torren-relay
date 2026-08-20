@@ -123,6 +123,39 @@ async function grantOrDenyPermit(sharedLimitEnabled) {
   return { granted: true };
 }
 
+// ── PLAN 10 DIAGNOSTICS (2026-08-20) — measurement only, no pacing change ─────────────────
+//
+// WHY IT LIVES HERE. The aggregate rate is a property of ALL tabs together, and the only place
+// that sees every tab is this service worker. Recording grants here lets ANY ONE tab print the
+// aggregate, so Ihor does not have to correlate four consoles by hand.
+//
+// OFF BY DEFAULT and stored, not compiled in: background.js is a separate context and never sees
+// utils/constants.js, so the flag cannot be CITY_ASSIGN_DEBUG. It is a stored boolean that the
+// content-side command flips. When off, noteGrantForDiag() does nothing and writes nothing.
+//
+// ⚠ IT CHANGES NO PACING. The ring is appended AFTER the grant decision is final, and nothing in
+// grantOrDenyPermit(), reportResult() or the backoff math ever reads it.
+const RATE_DIAG_KEY  = 'extRateDiag';
+const RATE_DIAG_MAX  = 200;   // ~7 minutes at a 2s floor; far more than the 60s window needs
+
+async function getRateDiag() {
+  var data = await chrome.storage.local.get(RATE_DIAG_KEY);
+  return data[RATE_DIAG_KEY] || { on: false, grants: [] };
+}
+
+// Appends one granted-permit timestamp with the tab that got it. Fire-and-forget by its caller.
+async function noteGrantForDiag(tabId) {
+  try {
+    var diag = await getRateDiag();
+    if (!diag.on) return;
+    diag.grants.push({ t: Date.now(), tab: (tabId === undefined || tabId === null) ? '?' : tabId });
+    while (diag.grants.length > RATE_DIAG_MAX) diag.grants.shift();
+    await chrome.storage.local.set({ [RATE_DIAG_KEY]: diag });
+  } catch (e) {
+    console.error('[background] noteGrantForDiag failed — diagnostics only, pacing unaffected', e);
+  }
+}
+
 async function requestPermit(sharedLimitEnabled) {
   permitQueueTail = permitQueueTail.then(
     function () { return grantOrDenyPermit(sharedLimitEnabled); },
@@ -295,7 +328,14 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       });
     }
     requestPermit(sharedLimitEnabled)
-      .then(function (result) { sendResponse(result); })
+      .then(function (result) {
+        // PLAN 10: record the grant for the aggregate view. AFTER the decision, never awaited
+        // before the response — it cannot add latency to or alter pacing.
+        if (result && result.granted) {
+          noteGrantForDiag(sender.tab && sender.tab.id).catch(function () {});
+        }
+        sendResponse(result);
+      })
       .catch(function (e) { sendResponse({ granted: false, error: String(e) }); });
     return true; // async response
   }
@@ -305,6 +345,54 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       .then(function (state) { sendResponse({ ack: true, state: state }); })
       .catch(function (e) { sendResponse({ ack: false, error: String(e) }); });
     return true; // async response
+  }
+
+  // PLAN 10 diagnostics + the synthetic rate-limit hook. Measurement and test only.
+  if (msg.type === 'RATE_DIAG') {
+    (async function () {
+      try {
+        var diag = await getRateDiag();
+        if (msg.action === 'on')    { diag.on = true;  diag.grants = []; }
+        if (msg.action === 'off')   { diag.on = false; }
+        if (msg.action === 'clear') { diag.grants = []; }
+        if (msg.action === 'on' || msg.action === 'off' || msg.action === 'clear') {
+          await chrome.storage.local.set({ [RATE_DIAG_KEY]: diag });
+        }
+        // ⚠ THE SYNTHETIC RATE-LIMIT HOOK. It does NOT mock the path — it calls the SAME
+        // reportResult() that a real 503 reaches, with the same status, so the real
+        // classification, the real backoff curve, the real storage write and the real
+        // cross-tab propagation all execute.
+        //
+        // WHAT IT PROVES: everything downstream of the status — that a rate-limit status pauses
+        // every tab, that the backoff step advances, and that a later 2xx resumes them together.
+        // WHAT IT DOES NOT PROVE: that a genuine Amazon 503 actually arrives here as status 503.
+        // That is the networkObserver -> content.js relay, which this bypasses. Only a real 503
+        // exercises that half.
+        if (msg.action === 'simulate') {
+          var st = (typeof msg.status === 'number') ? msg.status : 503;
+          console.log('[background] RATE_DIAG simulate — injecting status ' + st +
+            ' into the REAL reportResult path');
+          var after = await reportResult(false, st);
+          sendResponse({ ok: true, simulated: st, state: after, diag: { on: diag.on, count: diag.grants.length } });
+          return;
+        }
+        if (msg.action === 'recover') {
+          console.log('[background] RATE_DIAG recover — injecting a success into the REAL path');
+          var ok = await reportResult(true, 200);
+          sendResponse({ ok: true, state: ok, diag: { on: diag.on, count: diag.grants.length } });
+          return;
+        }
+        var state = await getState();
+        var floor = await getGlobalPacingFloorMs();
+        var tabs  = await chrome.storage.local.get(ACTIVE_TAB_COUNT_KEY);
+        sendResponse({ ok: true, on: diag.on, grants: diag.grants, state: state,
+                       floorMs: floor, tabCount: (tabs[ACTIVE_TAB_COUNT_KEY] || {}).count });
+      } catch (e) {
+        console.error('[background] RATE_DIAG failed', e);
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
   }
 
   if (msg.type === 'RELEASE_TAB') {

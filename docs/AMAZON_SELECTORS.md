@@ -241,8 +241,11 @@ captures in `samples/`:
 | `search-5cities-active.json` | 50 | 50 | **104** |
 | `search-5cities-other.json` | 5 | 5 | **11** |
 
-**One response carries one page.** Note the third row — this is not a "big board" problem: a board
-of 11 results paginated at 5 shows the same split.
+**One response carries one page.** Note the third row — this is not a "big board" problem: an
+11-result board split the same way.
+
+⚠ **The page size is NOT fixed.** 4, 5 and 50 records per response have all been observed
+(api-samples.md §6.5). Never hardcode it — compare against the RENDERED range below.
 
 **Cross-check available, and its correct form:** the main list's card count must be **≤ the
 RENDERED count**, never compared against the grand total. More than rendered means cards from

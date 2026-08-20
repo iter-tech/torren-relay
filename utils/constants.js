@@ -81,7 +81,7 @@ const CAPTURE_RESPONSES = false;
 // decides whether ids and coordinates cross the postMessage boundary at all. Gating only on
 // the isolated side would send them and then discard them, which is precisely what
 // summariseAndDiscard()'s "no ids, no cities, no addresses" contract exists to prevent.
-const CITY_ASSIGN_DEBUG = false;
+const CITY_ASSIGN_DEBUG = true;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FEATURE SWITCH — per-city card filtering (2026-08-13). Shipped OFF.

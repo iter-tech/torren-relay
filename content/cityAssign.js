@@ -85,6 +85,110 @@ var CITY_PICKUP_MAX = 4000;
 var _cityPickupById = {};   // id -> { lat, lng }
 var _cityPickupOrder = [];  // insertion order, for eviction
 
+// ── THE PANEL'S RECORD STORE (STAGE B, 2026-08-14) ────────────────────────────────────────
+//
+// work-opportunity id -> the curated record projectRecord() emits in networkObserver.js.
+// Lives here because this is where the capture message arrives and where the bounded eviction
+// and teardown already are; inlinePanel reads it through getLoadRecord() and never touches the
+// network path itself.
+//
+// Bounded by the SAME rule as the pickup map and evicted together, so the two can never
+// disagree about which loads we know. Cleared on teardown and logout with everything else.
+var _cityRecordById = {};
+
+// ── PART 2: TRAILER-LABEL COLLECTION (2026-08-20) ─────────────────────────────────────────
+//
+// WHY THIS EXISTS. Four hypotheses for the P/R rule died UNCONFIRMED — assetOwner, containerOwner,
+// C1 and C5 — for one reason: exactly ONE labelled record existed on disk, and it was a P. With no
+// labelled R, a field can be refuted but never confirmed. This fixes the cause rather than
+// guessing again: every time Ihor works the board, the card's badge letter is filed beside the
+// captured record under the SAME work-opportunity id, so labelled pairs accumulate by themselves.
+//
+// It lives HERE, next to _cityRecordById, deliberately: same id, same eviction list, same
+// teardown. If the label lived somewhere else it could outlive or predecease its record and the
+// pair would silently drift — which is the whole failure this is meant to end.
+//
+// IN-MEMORY ONLY. No disk write, no network, no storage API, nothing leaves the tab. The letter is
+// the one loadParser already reads at loadParser.js:84; no extra DOM traversal is added.
+var _cityTrailerLabelById = {};
+
+// Called by loadParser for each card it parses. Records only — nothing here decides anything and
+// nothing here can affect filtering, the panel, detection or what PAT posts.
+function noteTrailerLabel(loadId, letter) {
+  try {
+    if (!loadId) return;
+    if (letter === null || letter === undefined || letter === '') return;
+    _cityTrailerLabelById[loadId] = String(letter);
+  } catch (e) {
+    logger.error('cityAssign', 'noteTrailerLabel failed — label collection only, nothing else ' +
+      'is affected', { error: e, loadId: !!loadId });
+  }
+}
+
+// The badge letter for a load, or null. PAT reads this — see the INTERIM DOM DEPENDENCY note in
+// patModal.js. It is a plain read of an in-memory map; it touches no DOM itself.
+function getTrailerLabel(loadId) {
+  logger.log('cityAssign', 'getTrailerLabel called');
+  try {
+    if (!loadId) return null;
+    return Object.prototype.hasOwnProperty.call(_cityTrailerLabelById, loadId)
+      ? _cityTrailerLabelById[loadId] : null;
+  } catch (e) {
+    logger.error('cityAssign', 'getTrailerLabel failed', { error: e, loadId: !!loadId });
+    return null;
+  }
+}
+
+// THE DUMP COMMAND. Deliberately console.* and NOT logger.* — logger.log needs DEBUG_LEVEL 3, and
+// this must work at the shipped level so Ihor changes no configuration to run it. It is invoked
+// explicitly by a human, never ambient.
+//
+//   __EXT_DEBUG.dumpTrailerLabels()
+//
+function dumpTrailerLabels() {
+  try {
+    var out = [];
+    for (var id in _cityTrailerLabelById) {
+      if (!Object.prototype.hasOwnProperty.call(_cityTrailerLabelById, id)) continue;
+      var rec = Object.prototype.hasOwnProperty.call(_cityRecordById, id) ? _cityRecordById[id] : null;
+      out.push({ id: id, badge: _cityTrailerLabelById[id], record: rec });
+    }
+    var withRec = out.filter(function (x) { return x.record !== null; });
+    var p = out.filter(function (x) { return x.badge === 'P'; }).length;
+    var r = out.filter(function (x) { return x.badge === 'R'; }).length;
+    var other = out.length - p - r;
+    console.log('[EXT] TRAILER LABELS  ' + out.length + ' card(s) labelled  |  P: ' + p +
+      '  R: ' + r + (other ? '  other/unexpected: ' + other : '') +
+      '  |  ' + withRec.length + ' of them also have a captured record (those are the useful ones)');
+    if (r === 0) {
+      console.log('[EXT] ** No R labels yet. R is the scarce one and worth the most — the rule ' +
+        'cannot be confirmed without it. **');
+    }
+    console.log('[EXT] Copy everything between the markers and send it to the PM:');
+    console.log('----- BEGIN TRAILER LABELS -----');
+    console.log(JSON.stringify(withRec, null, 2));
+    console.log('----- END TRAILER LABELS -----');
+    return { total: out.length, P: p, R: r, withRecord: withRec.length };
+  } catch (e) {
+    logger.error('cityAssign', 'dumpTrailerLabels failed', { error: e });
+    return null;
+  }
+}
+
+// The inline panel's ONLY data source. Returns null for an id we have never captured, which is
+// what makes "no record, no panel, no interception" checkable rather than assumed.
+function getLoadRecord(loadId) {
+  logger.log('cityAssign', 'getLoadRecord called');
+  try {
+    if (!loadId) return null;
+    return Object.prototype.hasOwnProperty.call(_cityRecordById, loadId)
+      ? _cityRecordById[loadId] : null;
+  } catch (e) {
+    logger.error('cityAssign', 'getLoadRecord failed', { error: e, loadId: !!loadId });
+    return null;
+  }
+}
+
 // Ids a response DID list but WITHOUT coordinates. Kept only so an unmatched card can be given
 // the right reason: "we never saw this load" and "we saw it and Amazon sent no position" are the
 // same outcome but very different problems, and Ihor cannot report a pattern from a number.
@@ -125,8 +229,31 @@ function mergePickupCoords(pairs) {
   }
   while (_cityPickupOrder.length > CITY_PICKUP_MAX) {
     var old = _cityPickupOrder.shift();
+    // The record goes with the coordinates, always — one eviction, one order list, so the two
+    // stores can never disagree about which loads we still know.
+    if (Object.prototype.hasOwnProperty.call(_cityRecordById, old)) delete _cityRecordById[old];
+    // The trailer label goes with them too — same id, same eviction, so a label can never outlive
+    // the record it describes (PART 2).
+    if (Object.prototype.hasOwnProperty.call(_cityTrailerLabelById, old)) {
+      delete _cityTrailerLabelById[old];
+    }
     if (!Object.prototype.hasOwnProperty.call(_cityPickupById, old)) continue;
     delete _cityPickupById[old];
+  }
+  return added;
+}
+
+// Folds one response's curated records into the store, keyed by id. Same last-write-wins rule as
+// the coordinates, and safe for the same reason: the id is globally unique, so a repeat is the
+// same load.
+function mergeLoadRecords(records) {
+  var added = 0;
+  if (!records || !records.length) return 0;
+  for (var i = 0; i < records.length; i++) {
+    var r = records[i];
+    if (!r || !r.id) continue;
+    if (!Object.prototype.hasOwnProperty.call(_cityRecordById, r.id)) added++;
+    _cityRecordById[r.id] = r;
   }
   return added;
 }
@@ -1027,10 +1154,19 @@ function restoreDeadheads() {
       var rec = _deadheadPatched[i];
       if (!rec) continue;
       try {
-        if (rec.ourEl && rec.ourEl.parentNode) rec.ourEl.parentNode.removeChild(rec.ourEl);
+        if (rec.ourEl && rec.ourEl.parentNode) {
+          if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'removeChild deadhead', rec.ourEl, 'attached', 'detached');
+          rec.ourEl.parentNode.removeChild(rec.ourEl);
+        }
+        // IDEMPOTENT (2026-08-19): a card already restored is not written to again. The
+        // removeChild above is already guarded by rec.ourEl.parentNode; this guards the style.
         if (rec.valueEl && rec.valueEl.style) {
-          if (rec.hadInline) rec.valueEl.style.display = rec.prevDisplay;
-          else rec.valueEl.style.removeProperty('display');
+          var backTo = rec.hadInline ? rec.prevDisplay : '';
+          if ((rec.valueEl.style.display || '') !== backTo) {
+            if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(deadhead restore)', rec.valueEl, rec.valueEl.style.display, backTo);
+            if (rec.hadInline) rec.valueEl.style.display = rec.prevDisplay;
+            else rec.valueEl.style.removeProperty('display');
+          }
         }
         restored++;
       } catch (e1) {
@@ -1049,7 +1185,11 @@ function restoreDeadheads() {
       // Un-hide whatever sibling we hid before removing ourselves, so the card is never left
       // with NO number at all.
       var sib = el.nextElementSibling;
-      if (sib && sib.style && sib.style.display === 'none') sib.style.removeProperty('display');
+      if (sib && sib.style && sib.style.display === 'none') {
+        if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(deadhead sweep)', sib, 'none', '');
+        sib.style.removeProperty('display');
+      }
+      if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'removeChild deadhead-sweep', el, 'attached', 'detached');
       el.parentNode.removeChild(el);
       swept++;
     }
@@ -1066,9 +1206,22 @@ function restoreDeadheads() {
 // `cards` are the ones the filter just left VISIBLE; `activeCity` is resolved to coordinates.
 function applyCityDeadheads(cards, activeCity) {
   logger.log('cityAssign', 'applyCityDeadheads called');
-  var replaced = 0, singleCity = 0, noCoords = 0, noNode = 0;
+  // IDEMPOTENT SINCE 2026-08-19. A card already showing the value we would write is left
+  // COMPLETELY untouched: no removeChild, no insertBefore, no style write. Only cards whose
+  // desired state differs from their current state are written to.
+  //
+  // Three passes, because "what should be there" has to be known before "what is there" can be
+  // judged. Pass 1 writes nothing at all.
+  var replaced = 0, updated = 0, unchanged = 0, undone = 0;
+  var singleCity = 0, noCoords = 0, noNode = 0;
   try {
     if (!activeCity) return { replaced: 0 };
+
+    // ── PASS 1: the DESIRED state. Read-only. ────────────────────────────────────────────
+    // Keyed on the value ELEMENT, not the load id: a duplicate id (readMainCardElements has no
+    // dedupe) means two real elements, and today both are substituted. Keying on the id would
+    // silently drop one and change what is rendered.
+    var desired = [];
     for (var i = 0; i < cards.length; i++) {
       var id = cards[i].id;
       var assigned = Object.prototype.hasOwnProperty.call(_cityAssignByCard, id)
@@ -1086,33 +1239,123 @@ function applyCityDeadheads(cards, activeCity) {
       if (!valueEl || !valueEl.style) { noNode++; continue; }
 
       var miles = haversineMiles(pickup.lat, pickup.lng, activeCity.lat, activeCity.lng);
+      desired.push({
+        id: id, valueEl: valueEl,
+        text:  formatMiles(miles),
+        title: 'Deadhead to ' + activeCity.name + ' (Torren Relay)',
+        done:  false
+      });
+    }
+
+    // ── PASS 2: judge what is ALREADY there. ─────────────────────────────────────────────
+    var survivors = [];
+    for (var k = 0; k < _deadheadPatched.length; k++) {
+      var rec = _deadheadPatched[k];
+      if (!rec) continue;
+
+      // Match on the value element — the node actually being stood in for.
+      var want = null;
+      for (var w = 0; w < desired.length; w++) {
+        if (!desired[w].done && desired[w].valueEl === rec.valueEl) { want = desired[w]; break; }
+      }
+
+      var attached = !!(rec.ourEl && rec.ourEl.parentNode);
+      if (want && attached) {
+        var textOk  = (rec.ourEl.textContent === want.text);
+        var titleOk = (typeof rec.ourEl.getAttribute !== 'function') ||
+                      (rec.ourEl.getAttribute('title') === want.title);
+        var hiddenOk = !!(rec.valueEl && rec.valueEl.style && rec.valueEl.style.display === 'none');
+
+        if (textOk && titleOk && hiddenOk) {
+          // ALREADY IN THE DESIRED STATE — the whole point of this change. Zero DOM writes.
+          want.done = true; survivors.push(rec); unchanged++;
+          continue;
+        }
+
+        // Wrong VALUE only (a city switch, or a moved load). Update in place rather than
+        // remove-and-reinsert: textContent and attributes are not childList, so this cannot wake
+        // the observer, and the rendered result is identical either way.
+        if (!textOk) {
+          if (cityVerboseDiagnostics()) cityDiagWrite('characterData', 'textContent deadhead', rec.ourEl, rec.ourEl.textContent, want.text);
+          rec.ourEl.textContent = want.text;
+        }
+        if (!titleOk) {
+          if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'title deadhead', rec.ourEl, rec.ourEl.getAttribute('title'), want.title);
+          rec.ourEl.setAttribute('title', want.title);
+        }
+        if (!hiddenOk && rec.valueEl && rec.valueEl.style) {
+          if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(hide Amazon value)', rec.valueEl, rec.valueEl.style.display, 'none');
+          rec.valueEl.style.display = 'none';
+        }
+        rec.text = want.text; rec.title = want.title;
+        want.done = true; survivors.push(rec); updated++;
+        continue;
+      }
+
+      // Either this card is no longer eligible, or Amazon replaced the node under us. Undo what
+      // is still ours, exactly as restoreDeadheads would, and let pass 3 rebuild if wanted.
+      try {
+        if (attached) {
+          if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'removeChild deadhead', rec.ourEl, 'attached', 'detached');
+          rec.ourEl.parentNode.removeChild(rec.ourEl);
+        }
+        if (rec.valueEl && rec.valueEl.style) {
+          var back = rec.hadInline ? rec.prevDisplay : '';
+          if ((rec.valueEl.style.display || '') !== back) {
+            if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(deadhead restore)', rec.valueEl, rec.valueEl.style.display, back);
+            if (rec.hadInline) rec.valueEl.style.display = rec.prevDisplay;
+            else rec.valueEl.style.removeProperty('display');
+          }
+        }
+        undone++;
+      } catch (e1) {
+        logger.error('cityAssign', 'one deadhead reconcile-undo failed — continuing', { error: e1 });
+      }
+    }
+    _deadheadPatched = survivors;
+
+    // ── PASS 3: insert what is still missing. ────────────────────────────────────────────
+    for (var d = 0; d < desired.length; d++) {
+      var want2 = desired[d];
+      if (want2.done) continue;
+      var valueEl2 = want2.valueEl;
 
       // OUR node. textContent only — never innerHTML, and never a read of Amazon's text.
       // font/colour inherit, so it carries the same size, weight and colour as the value it
       // stands in for and the card does not look edited. No hardcoded colour, no hash class.
       var ours = document.createElement('span');
       ours.setAttribute('data-testid', DEADHEAD_TESTID);
-      ours.setAttribute('title', 'Deadhead to ' + activeCity.name + ' (Torren Relay)');
+      ours.setAttribute('title', want2.title);
       ours.style.font = 'inherit';
       ours.style.color = 'inherit';
-      ours.textContent = formatMiles(miles);
+      ours.textContent = want2.text;
 
-      var hadInline = !!(valueEl.style.display && valueEl.style.display.length);
+      var hadInline = !!(valueEl2.style.display && valueEl2.style.display.length);
       _deadheadPatched.push({
-        valueEl: valueEl, hadInline: hadInline, prevDisplay: valueEl.style.display, ourEl: ours
+        id: want2.id, valueEl: valueEl2, hadInline: hadInline,
+        prevDisplay: valueEl2.style.display, ourEl: ours,
+        text: want2.text, title: want2.title
       });
 
       // Rule 4: hide with display only. The node stays, its text is never touched.
-      valueEl.parentNode.insertBefore(ours, valueEl);
-      valueEl.style.display = 'none';
+      if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'insertBefore deadhead', ours, 'detached', 'attached');
+      valueEl2.parentNode.insertBefore(ours, valueEl2);
+      if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(hide Amazon value)', valueEl2, valueEl2.style.display, 'none');
+      valueEl2.style.display = 'none';
       replaced++;
     }
-    if (replaced > 0) {
-      logger.log('cityAssign', 'CITY DEADHEAD  ' + activeCity.name + ' — replaced ' + replaced +
-        ' multi-city value(s)  |  left alone: ' + singleCity + ' single-city, ' +
+
+    if (replaced > 0 || updated > 0 || undone > 0) {
+      logger.log('cityAssign', 'CITY DEADHEAD  ' + activeCity.name + ' — inserted ' + replaced +
+        ', updated in place ' + updated + ', removed ' + undone + ', ALREADY CORRECT (no write) ' +
+        unchanged + '  |  left alone: ' + singleCity + ' single-city, ' +
         noCoords + ' without coordinates, ' + noNode + ' with no deadhead node');
+    } else if (unchanged > 0) {
+      logger.log('cityAssign', 'CITY DEADHEAD  ' + activeCity.name + ' — ' + unchanged +
+        ' substitution(s) ALREADY CORRECT, no DOM write performed');
     }
-    return { replaced: replaced, singleCity: singleCity, noCoords: noCoords, noNode: noNode };
+    return { replaced: replaced, updated: updated, unchanged: unchanged, undone: undone,
+             singleCity: singleCity, noCoords: noCoords, noNode: noNode };
   } catch (e) {
     logger.error('cityAssign', 'applyCityDeadheads failed — restoring Amazon values', { error: e });
     restoreDeadheads();
@@ -1136,6 +1379,7 @@ function restoreAllCards() {
     for (var i = 0; i < _cityFilterHidden.length; i++) {
       var rec = _cityFilterHidden[i];
       if (!rec || !rec.el || !rec.el.style) continue;
+      if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(restore)', rec.el, rec.el.style.display, rec.hadInline ? rec.prevDisplay : '');
       if (rec.hadInline) rec.el.style.display = rec.prevDisplay;
       else rec.el.style.removeProperty('display');   // exact: leave NO inline display behind
       restored++;
@@ -1148,6 +1392,7 @@ function restoreAllCards() {
     for (var j = 0; j < cards.length; j++) {
       var el = cards[j].el;
       if (el && el.style && el.style.display === 'none') {
+        if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display(sweep)', el, 'none', '');
         el.style.removeProperty('display');
         swept++;
       }
@@ -1173,15 +1418,36 @@ function applyCityFilter(cityKey) {
       return { applied: false, reason: 'flag-off' };
     }
 
+    // CITYDIAG Q5 (round 3): open the write ledger before the first write of this apply.
+    if (cityVerboseDiagnostics()) cityDiagBeginWrites();
     // ALWAYS restore first: guarantees no residue, and re-applies cleanly onto re-rendered nodes.
     // The deadhead substitution restores here too — BEFORE the new city is applied, so switching
     // from HEBRON to COLUMBUS can never leave Hebron's number on a card (rule 5).
     restoreAllCards();
-    restoreDeadheads();
+    // DEADHEADS ARE RECONCILED, NOT TORN DOWN AND REBUILT (2026-08-19).
+    //
+    // The blanket restoreDeadheads() that used to run here removed our node from every
+    // substituted card, and applyCityDeadheads() then re-inserted an identical one. Measured on
+    // Ihor's board: 24 removeChild + 24 insertBefore per apply. Those are childList mutations —
+    // exactly what the board observer watches — so every apply woke it, and the wake re-applied
+    // the filter. Self-sustaining, measured at ~27 wakes/sec.
+    //
+    // Only the paths that will NOT substitute still tear down here. For a real city with known
+    // coordinates the reconcile inside applyCityDeadheads() handles removal, in-place update and
+    // insertion per card, so rule 5 still holds: switching HEBRON -> COLUMBUS finds a value/title
+    // mismatch and rewrites that card, and a card that is no longer eligible is restored.
+    //
+    // The condition mirrors the call site below exactly — same city key, same coordinate lookup.
+    // If those two ever disagree, a substitution would be left stranded.
+    var _ddCity = (cityKey === undefined || cityKey === null) ? null : String(cityKey);
+    var _ddWillReconcile = (_ddCity !== null && _ddCity !== CITY_FILTER_UNMATCHED &&
+                            !!_cityCoordCache[_ddCity]);
+    if (!_ddWillReconcile) restoreDeadheads();
     _cityFilterActive = (cityKey === undefined || cityKey === null) ? null : String(cityKey);
 
     if (_cityFilterActive === null) {
       logger.log('cityAssign', 'CITY FILTER  cleared — showing all');
+      if (cityVerboseDiagnostics()) { cityDiagEndWrites('cleared to ALL'); logCityDiagOrphans('filter cleared to ALL'); }
       return { applied: true, city: null, hidden: 0, shown: 0, unassignedShown: 0 };
     }
 
@@ -1220,6 +1486,7 @@ function applyCityFilter(cityKey) {
       if (!el || !el.style) continue;
       var hadInline = !!(el.style.display && el.style.display.length);
       _cityFilterHidden.push({ el: el, hadInline: hadInline, prevDisplay: el.style.display });
+      if (cityVerboseDiagnostics()) cityDiagWrite('attributes', 'style.display', el, el.style.display, 'none');
       el.style.display = 'none';
       hidden++;
     }
@@ -1244,6 +1511,7 @@ function applyCityFilter(cityKey) {
 
     // A filter change can hide the card an open panel belongs to. A panel over a hidden row is
     // an orphan, so it goes — checked AFTER the hiding above, so the display values are final.
+    if (cityVerboseDiagnostics()) { cityDiagEndWrites('applied: ' + _cityFilterActive); logCityDiagOrphans('filter applied: ' + _cityFilterActive); }
     if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('city filter changed');
     return { applied: true, city: _cityFilterActive, hidden: hidden, shown: shown,
              unassignedShown: unassignedShown };
@@ -1436,6 +1704,606 @@ function resolveActiveCitiesFromCache() {
   return resolved;
 }
 
+// ── Q5/Q6 WRITE-AND-WAKE LEDGER (2026-08-18, round 3) ─────────────────────────────────────
+//
+// A filter application on the live board is repeating every 20-25 ms with IDENTICAL state.
+// These two ledgers record what the filter writes and what the observer then wakes on, so the
+// two can be matched against each other instead of assumed to be related.
+//
+// RATE LIMITED. Filtering fires hundreds of times a second when it loops; an unbounded log makes
+// the console useless and slows the page enough to change what is being measured. Q5 and Q6 log
+// for the first CITYDIAG_WAKE_MAX applies/wakes after a filter selection, then print one summary
+// line, then go silent until the selection changes.
+//
+// STRICTLY READ-ONLY, and deliberately WITHOUT a loop guard: suppressing the loop here would
+// destroy the measurement that the fix has to be chosen from.
+var CITYDIAG_WAKE_MAX = 20;
+
+var _cityDiagWakeCount   = 0;      // observer wakes since the current selection
+var _cityDiagApplyCount  = 0;      // filter applies since the current selection
+var _cityDiagWakeFor     = null;   // the selection those counters belong to; null forces a reset
+var _cityDiagSilenced    = false;  // the one summary line has been printed
+var _cityDiagFirstAt     = 0;      // when this burst started, for the rate in the summary
+var _cityDiagTotalWrites = 0;      // writes across the WHOLE burst, not just the logged ones
+var _cityDiagTotalMuts   = 0;
+
+var _cityDiagWrites     = null;    // ledger for the apply in progress
+var _cityDiagLastWrites = [];      // the immediately preceding apply's ledger, for Q6 matching
+var _cityDiagPendingMuts = [];     // mutation records accumulated since the last frame
+
+// Resets the budget whenever the dispatcher changes what is selected — each selection gets its
+// own 20, so a later selection is not silenced by an earlier one.
+function cityDiagBudget() {
+  var sel = (_cityFilterActive === null) ? '(ALL)' : String(_cityFilterActive);
+  if (sel !== _cityDiagWakeFor) {
+    _cityDiagWakeFor = sel;
+    _cityDiagWakeCount = 0; _cityDiagApplyCount = 0;
+    _cityDiagSilenced = false; _cityDiagFirstAt = Date.now();
+    _cityDiagTotalWrites = 0; _cityDiagTotalMuts = 0;
+  }
+  return sel;
+}
+
+// The single summary line, printed once when the budget runs out.
+function cityDiagSummary() {
+  if (_cityDiagSilenced) return;
+  _cityDiagSilenced = true;
+  var ms = Date.now() - _cityDiagFirstAt;
+  logger.log('cityAssign', 'CITYDIAG Q56 SUMMARY  [' + _cityDiagWakeFor + ']  ' +
+    _cityDiagApplyCount + ' filter applies and ' + _cityDiagWakeCount + ' observer wakes in ' +
+    ms + ' ms' + (ms > 0 ? '  (~' + Math.round(_cityDiagWakeCount * 1000 / ms) + ' wakes/sec)' : '') +
+    '  |  ' + _cityDiagTotalWrites + ' DOM write(s), ' + _cityDiagTotalMuts +
+    ' mutation record(s)  |  going SILENT now — change the selection to measure again');
+}
+
+// ── Q5 WHAT WE WRITE ──────────────────────────────────────────────────────────────────────
+//
+// Called at each write site inside the filter chain, BEFORE the write, so the recorded "was" is the value
+// actually on the node. The kind is what the MutationObserver would classify it as: only
+// 'childList' can wake ours — it observes {childList:true, subtree:true} and NOT attributes.
+function cityDiagWrite(kind, prop, node, was, now) {
+  try {
+    _cityDiagTotalWrites++;
+    if (!_cityDiagWrites) return;
+    _cityDiagWrites.push({
+      kind: kind, prop: prop, node: node,
+      was: String(was), now: String(now),
+      changed: String(was) !== String(now)
+    });
+  } catch (e) {
+    // Rule 5: every catch logs. This one should be unreachable — it guards a push onto an array.
+    logger.error('cityAssign', 'cityDiagWrite failed — diagnostics only, the write itself is ' +
+      'unaffected', { error: e, kind: kind, prop: prop });
+  }
+}
+
+function cityDiagBeginWrites() {
+  _cityDiagWrites = [];
+}
+
+function cityDiagEndWrites(where) {
+  try {
+    var w = _cityDiagWrites || [];
+    _cityDiagWrites = null;
+    _cityDiagLastWrites = w;
+    cityDiagBudget();
+    _cityDiagApplyCount++;
+    if (_cityDiagApplyCount > CITYDIAG_WAKE_MAX) { cityDiagSummary(); return; }
+
+    if (w.length === 0) {
+      logger.log('cityAssign', 'CITYDIAG Q5 WRITES    apply #' + _cityDiagApplyCount +
+        ' [' + where + ']  ** ZERO WRITES **');
+      return;
+    }
+    // Count per kind, and separately how many were WAKING writes (childList) versus writes the
+    // observer is blind to (attributes), and how many wrote a value that was already there.
+    var byKind = {}, waking = 0, identical = 0;
+    for (var i = 0; i < w.length; i++) {
+      var k = w[i].kind + '/' + w[i].prop;
+      byKind[k] = (byKind[k] || 0) + 1;
+      if (w[i].kind === 'childList') waking++;
+      if (!w[i].changed) identical++;
+    }
+    var tally = [];
+    for (var key in byKind) if (Object.prototype.hasOwnProperty.call(byKind, key)) tally.push(key + ': ' + byKind[key]);
+
+    logger.log('cityAssign', 'CITYDIAG Q5 WRITES    apply #' + _cityDiagApplyCount +
+      ' [' + where + ']  ' + w.length + ' write(s) — ' + tally.join(' | ') +
+      '  ||  ' + waking + ' are childList (THE ONLY KIND THIS OBSERVER SEES — it watches ' +
+      '{childList:true, subtree:true}, not attributes)' +
+      '  |  ' + identical + ' wrote a value identical to what was already there');
+    for (var j = 0; j < w.length && j < 5; j++) {
+      var testid = (w[j].node && w[j].node.getAttribute) ? w[j].node.getAttribute('data-testid') : null;
+      logger.log('cityAssign', 'CITYDIAG Q5 WRITES    ' + (j + 1) + '/' + w.length + '  ' +
+        w[j].kind + '.' + w[j].prop + '  "' + w[j].was + '" -> "' + w[j].now + '"  ' +
+        (w[j].changed ? 'CHANGED' : 'IDENTICAL — this write altered nothing') +
+        (testid ? '  |  data-testid=' + testid : ''));
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'cityDiagEndWrites failed — diagnostics only', { error: e });
+  }
+}
+
+// ── Q6 WHAT WAKES US ──────────────────────────────────────────────────────────────────────
+//
+// The observer callback discards its records argument. They are accumulated here instead, and
+// read once per frame by logCityDiagWake(). rAF-coalesced, so one frame can carry several
+// batches — hence an accumulator rather than a single assignment.
+function cityDiagNoteMutations(records) {
+  try {
+    if (!records || !records.length) return;
+    _cityDiagTotalMuts += records.length;
+    for (var i = 0; i < records.length; i++) {
+      if (_cityDiagPendingMuts.length >= 200) break;   // bounded; the count above stays exact
+      _cityDiagPendingMuts.push(records[i]);
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'cityDiagNoteMutations failed — diagnostics only, the observer is ' +
+      'unaffected', { error: e });
+  }
+}
+
+// Does this record correspond to a node the PRECEDING apply wrote? Identity first — the ledger
+// holds the actual node references — then data-testid as the fallback for a node we created.
+function cityDiagMatchesOurWrite(rec) {
+  try {
+    var hit = function (list) {
+      if (!list) return false;
+      for (var a = 0; a < list.length; a++) {
+        for (var b = 0; b < _cityDiagLastWrites.length; b++) {
+          if (_cityDiagLastWrites[b].node === list[a]) return true;
+        }
+        if (list[a] && list[a].getAttribute &&
+            list[a].getAttribute('data-testid') === DEADHEAD_TESTID) return true;
+      }
+      return false;
+    };
+    if (hit(rec.addedNodes)) return 'YES — we INSERTED this node in the preceding apply';
+    if (hit(rec.removedNodes)) return 'YES — we REMOVED this node in the preceding apply';
+    for (var b = 0; b < _cityDiagLastWrites.length; b++) {
+      if (_cityDiagLastWrites[b].node === rec.target) return 'YES — we wrote to this exact node';
+    }
+    return 'no — not attributable to our preceding apply';
+  } catch (e) {
+    logger.error('cityAssign', 'cityDiagMatchesOurWrite failed — diagnostics only', { error: e });
+    return 'unknown (match failed)';
+  }
+}
+
+function logCityDiagWake() {
+  try {
+    var recs = _cityDiagPendingMuts;
+    _cityDiagPendingMuts = [];
+    cityDiagBudget();
+    _cityDiagWakeCount++;
+    if (_cityDiagWakeCount > CITYDIAG_WAKE_MAX) { cityDiagSummary(); return; }
+
+    var kinds = {}, ours = 0;
+    for (var i = 0; i < recs.length; i++) {
+      kinds[recs[i].type] = (kinds[recs[i].type] || 0) + 1;
+      if (cityDiagMatchesOurWrite(recs[i]).indexOf('YES') === 0) ours++;
+    }
+    var tally = [];
+    for (var k in kinds) if (Object.prototype.hasOwnProperty.call(kinds, k)) tally.push(k + ': ' + kinds[k]);
+
+    logger.log('cityAssign', 'CITYDIAG Q6 WAKE      wake #' + _cityDiagWakeCount +
+      '  |  ' + recs.length + ' mutation record(s) — ' + (tally.length ? tally.join(' | ') : '(none captured)') +
+      '  ||  ' + ours + ' of them are OUR OWN writes from the preceding apply' +
+      (recs.length && ours === recs.length
+        ? '  ** EVERY record this wake is self-inflicted **' : ''));
+
+    for (var j = 0; j < recs.length && j < 3; j++) {
+      var r = recs[j];
+      // Is the target inside a card the filter hid? _cityFilterHidden holds those elements.
+      var inHidden = false;
+      for (var h = 0; h < _cityFilterHidden.length; h++) {
+        var he = _cityFilterHidden[h] && _cityFilterHidden[h].el;
+        if (he && he.contains && r.target && he.contains(r.target)) { inHidden = true; break; }
+      }
+      logger.log('cityAssign', 'CITYDIAG Q6 WAKE      ' + (j + 1) + '/' + recs.length +
+        '  type=' + r.type +
+        (r.type === 'attributes' ? '  attributeName=' + r.attributeName : '') +
+        '  added=' + ((r.addedNodes && r.addedNodes.length) || 0) +
+        '  removed=' + ((r.removedNodes && r.removedNodes.length) || 0) +
+        '  |  target inside a card we hid: ' + (inHidden ? 'YES' : 'no') +
+        '  |  matches our write: ' + cityDiagMatchesOurWrite(r));
+    }
+    if (recs.length > 3) {
+      logger.log('cityAssign', 'CITYDIAG Q6 WAKE      ... and ' + (recs.length - 3) +
+        ' more record(s) this wake, not shown');
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'logCityDiagWake failed — diagnostics only', { error: e });
+  }
+}
+
+// ── PAGE-DEGRADATION DIAGNOSTIC (2026-08-18) ──────────────────────────────────────────────
+//
+// WHY IT EXISTS: per-city filtering is reported to degrade above 50 results, where Amazon shows
+// pagination controls — city tabs start listing loads from states nowhere near the selected city,
+// while the All button's unassigned counter stays at zero. Counters alone cannot separate the
+// candidate causes, so this prints the whole chain for one cycle: what is rendered, how the page
+// was classified, what the merged map knows, what got assigned, and what survived the filter.
+//
+// EVERY LINE IS TAGGED "CITYDIAG" so the console can be filtered down to just this chain.
+//
+// STRICTLY READ-ONLY. It reads the DOM and module state and prints. It writes no style, issues no
+// request, and nothing here feeds a decision — deleting the whole section changes no behaviour.
+//
+// GATED TWICE by construction: cityVerboseDiagnostics() is CITY_ASSIGN_DEBUG, and logger.log
+// needs DEBUG_LEVEL 3. A shipped build (flag false, level 1) executes none of it.
+
+// Buffer objects already reported, so each response is announced as NEW exactly once. A Set of
+// object references — buffers dropped by the CITY_ASSIGN_MAX_BUFFERS shift are simply never
+// looked up again. Created lazily so a non-debug session allocates nothing.
+var _cityDiagSeenBuffers = null;
+
+// The last verdict the RE-RENDER path reached, recorded by cityDiagNoteRerender(). The cycle
+// cannot recompute it: by the time the cycle runs, _cityPageKey has already moved on.
+var _cityDiagLastRerender = null;
+
+// Which COMPONENT of the page signature moved. currentPageKey() joins four with '|':
+// range | count | firstId | lastId. Naming the one that changed is what turns "PAGE CHANGE" into
+// a reason — a range change is a real page turn, a first/last-id change on the same range is
+// Amazon re-rendering different loads into the same window.
+function cityDiagKeyDiff(prev, now) {
+  if (prev === now) return 'identical';
+  if (prev === null || prev === undefined) return 'no previous key (first cycle of the session)';
+  if (now === null) return 'current key unreadable';
+  var a = String(prev).split('|'), b = String(now).split('|');
+  var names = ['range', 'count', 'firstId', 'lastId'], moved = [];
+  for (var i = 0; i < names.length; i++) {
+    if (a[i] !== b[i]) moved.push(names[i] + ' ' + (a[i] || '-') + '->' + (b[i] || '-'));
+  }
+  return moved.length ? moved.join(', ') : 'components equal but keys differ';
+}
+
+// Called from onBoardRerender, already behind the flag there. Records only — decides nothing.
+//
+// ALSO ANSWERS Q3 (2026-08-18): the re-render's effect on the board and on our hidden state.
+//
+// ⚠ THE "re-applied?" VERDICT IS RE-DERIVED, NOT OBSERVED. This runs near the TOP of
+// onBoardRerender, before the guards it is describing, so it re-tests the same four conditions
+// read-only rather than watching the call happen. They are quoted here in the same order the
+// function checks them; if that order ever changes, this line silently starts lying. The
+// alternative — instrumenting each early return — would put five diagnostic blocks inside the
+// hot observer path, which is worse.
+var _cityDiagLastDomCount = null;   // cards seen at the PREVIOUS re-render
+
+function cityDiagNoteRerender(prevKey, nextKey, changed, cards) {
+  _cityDiagLastRerender = {
+    changed: !!changed, prev: prevKey, next: nextKey,
+    rule: cityDiagKeyDiff(prevKey, nextKey), at: Date.now()
+  };
+  try {
+    cards = cards || [];
+    var before = _cityDiagLastDomCount;
+    _cityDiagLastDomCount = cards.length;
+
+    // Our hidden state, measured two ways. They disagree when Amazon has replaced the nodes:
+    // _cityFilterHidden still points at DETACHED elements while the fresh ones carry no
+    // display:none at all. restoreAllCards() has an orphan sweep for the reverse case.
+    var domHidden = 0, domVisible = 0;
+    for (var i = 0; i < cards.length; i++) {
+      var el = cards[i].el;
+      if (el && el.style && el.style.display === 'none') domHidden++; else domVisible++;
+    }
+    var tracked = _cityFilterHidden.length, stillAttached = 0;
+    for (var j = 0; j < _cityFilterHidden.length; j++) {
+      var r = _cityFilterHidden[j];
+      if (r && r.el && document.contains && document.contains(r.el)) stillAttached++;
+    }
+
+    // The four guards, in source order, re-tested read-only.
+    var why = null;
+    if (typeof CITY_FILTER_ENABLED === 'undefined' || !CITY_FILTER_ENABLED) why = 'CITY_FILTER_ENABLED is off';
+    else if (_cityFilterActive === null) why = 'filter is ALL (_cityFilterActive === null) — this path returns before assigning or filtering';
+    else if (resolveActiveCitiesFromCache().length === 0) why = 'no active city has coordinates cached yet';
+    else if (cards.length === 0) why = 'zero cards rendered at this instant';
+
+    logger.log('cityAssign', 'CITYDIAG Q3 RERENDER  cards in DOM ' +
+      (before === null ? '(first)' : before) + ' -> ' + cards.length +
+      '  |  hidden by us ' + domHidden + ', not hidden ' + domVisible +
+      '  |  _cityFilterHidden tracks ' + tracked + ' node(s), ' + stillAttached +
+      ' still in the document' +
+      '  |  page verdict ' + (changed ? 'PAGE CHANGE -> would REPLACE the assignment map' : 're-render -> would MERGE') +
+      '  |  FILTER RE-APPLIED BY THIS PATH: ' + (why === null ? 'YES' : 'NO — ' + why));
+  } catch (e) {
+    logger.error('cityAssign', 'cityDiagNoteRerender Q3 failed — diagnostics only', { error: e });
+  }
+}
+
+// ── Q2 SOURCE OF THE EXCESS ───────────────────────────────────────────────────────────────
+//
+// WHY A SEPARATE MAP. Endpoint attribution lives on the buffers, and _cityAssignBuffers keeps
+// only CITY_ASSIGN_MAX_BUFFERS (6) — an id whose response has aged out would report "none" even
+// though it WAS captured, which is precisely the wrong answer for this question. So the endpoint
+// is remembered per id here instead. DEBUG-ONLY: written solely from the flag-gated call in
+// onCityCoordsMessage, read solely by the line below, bounded by the same cap as the coords map.
+var _cityDiagEndpointById = {};
+var _cityDiagEndpointOrder = [];
+
+function cityDiagNoteEndpoints(endpoint, pairs, noCoordIds) {
+  try {
+    var take = function (id) {
+      if (!Object.prototype.hasOwnProperty.call(_cityDiagEndpointById, id)) {
+        _cityDiagEndpointById[id] = endpoint;
+        _cityDiagEndpointOrder.push(id);
+        if (_cityDiagEndpointOrder.length > CITY_PICKUP_MAX) {
+          delete _cityDiagEndpointById[_cityDiagEndpointOrder.shift()];
+        }
+      } else if (_cityDiagEndpointById[id].indexOf(endpoint) === -1) {
+        // Seen from more than one endpoint — worth knowing, so both are kept.
+        _cityDiagEndpointById[id] += '+' + endpoint;
+      }
+    };
+    for (var i = 0; i < (pairs || []).length; i++) take(String(pairs[i].id));
+    for (var j = 0; j < (noCoordIds || []).length; j++) take(String(noCoordIds[j]));
+  } catch (e) {
+    logger.error('cityAssign', 'cityDiagNoteEndpoints failed — diagnostics only', { error: e });
+  }
+}
+
+// Which endpoint each rendered card came from, and WHERE the non-/search cards sit relative to
+// the block of /search cards. "Above" means Amazon injected them at the top of the main list.
+function logCityDiagExcess(cards, showing) {
+  try {
+    var byEp = {}, order = [], firstSearch = -1, lastSearch = -1;
+    for (var i = 0; i < cards.length; i++) {
+      var ep = Object.prototype.hasOwnProperty.call(_cityDiagEndpointById, cards[i].id)
+        ? _cityDiagEndpointById[cards[i].id]
+        : (Object.prototype.hasOwnProperty.call(_cityPickupById, cards[i].id)
+            ? 'none (in coords map, response aged out)' : 'none (never captured)');
+      byEp[ep] = (byEp[ep] || 0) + 1;
+      order.push({ i: i, id: cards[i].id, ep: ep });
+      if (ep.indexOf('search') === 0) { if (firstSearch === -1) firstSearch = i; lastSearch = i; }
+    }
+    var tally = [];
+    for (var k in byEp) if (Object.prototype.hasOwnProperty.call(byEp, k)) tally.push(k + ': ' + byEp[k]);
+
+    var rendered = (showing && showing.rendered !== null) ? showing.rendered : null;
+    logger.log('cityAssign', 'CITYDIAG Q2 EXCESS    collected ' + cards.length +
+      '  vs  Showing range ' + (rendered === null ? '?' : rendered) +
+      (rendered === null ? '' : '  =  excess ' + (cards.length - rendered)) +
+      '  |  by endpoint — ' + (tally.length ? tally.join(' | ') : '(none attributed)') +
+      '  |  /search block spans DOM index ' + firstSearch + '..' + lastSearch);
+
+    // Every non-/search card, positioned against that block. Capped so a 60-card board stays
+    // readable; the tally above is already complete.
+    var shown = 0;
+    for (var m = 0; m < order.length && shown < 12; m++) {
+      if (order[m].ep.indexOf('search') === 0) continue;
+      var pos = (firstSearch === -1) ? 'no /search card to compare against'
+        : (order[m].i < firstSearch ? 'ABOVE the /search block'
+          : (order[m].i > lastSearch ? 'BELOW the /search block' : 'INTERLEAVED inside it'));
+      logger.log('cityAssign', 'CITYDIAG Q2 EXCESS    dom#' + order[m].i + '  ' + order[m].id +
+        '  from ' + order[m].ep + '  —  ' + pos);
+      shown++;
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'logCityDiagExcess failed — diagnostics only', { error: e });
+  }
+}
+
+// ── Q1 ORPHANS ────────────────────────────────────────────────────────────────────────────
+//
+// A card in the DOM with no entry in the assignment map. It is NEVER hidden (rule 2), so under a
+// city tab every orphan is a load shown regardless of where it actually is. The last column is
+// the one that matters: an orphan whose id IS in the coords map was assignable and simply was not
+// assigned — that points at WHEN the map was built, not at the capture.
+function logCityDiagOrphans(where) {
+  try {
+    var cards = readMainCardElements();
+    var orphans = [];
+    for (var i = 0; i < cards.length; i++) {
+      var a = Object.prototype.hasOwnProperty.call(_cityAssignByCard, cards[i].id)
+        ? _cityAssignByCard[cards[i].id] : null;
+      if (a && a.length) continue;
+      orphans.push(cards[i]);
+    }
+    logger.log('cityAssign', 'CITYDIAG Q1 ORPHANS   after [' + where + ']  filter ' +
+      (_cityFilterActive === null ? 'ALL' : _cityFilterActive) +
+      '  |  cards in DOM ' + cards.length + '  |  assignment map ' + countKeys(_cityAssignByCard) +
+      ' id(s)  |  ORPHANS ' + orphans.length +
+      (orphans.length ? '  — every one of these is VISIBLE regardless of the selected city' : ''));
+    for (var j = 0; j < orphans.length && j < 5; j++) {
+      var el = orphans[j].el;
+      var vis = (el && el.style && el.style.display === 'none') ? 'HIDDEN' : 'VISIBLE';
+      logger.log('cityAssign', 'CITYDIAG Q1 ORPHANS   ' + (j + 1) + '/' + orphans.length + '  ' +
+        orphans[j].id + '  ' + vis +
+        '  |  in coords map: ' +
+        (Object.prototype.hasOwnProperty.call(_cityPickupById, orphans[j].id)
+          ? 'YES — it was assignable, so the map was built without it'
+          : 'no — never captured') +
+        '  |  endpoint: ' + (Object.prototype.hasOwnProperty.call(_cityDiagEndpointById, orphans[j].id)
+          ? _cityDiagEndpointById[orphans[j].id] : 'unknown'));
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'logCityDiagOrphans failed — diagnostics only', { error: e });
+  }
+}
+
+// ── Q4 READ SYNCHRONY ─────────────────────────────────────────────────────────────────────
+//
+// currentPageKey() combines two INDEPENDENT reads of the same board: the "Showing" line and the
+// rendered card ids. Amazon updates them at different moments, so one can describe the next page
+// while the other still describes this one. This fires only when they DISAGREE — when one moved
+// since the previous read and the other did not. That asymmetry is what identifies the stale one.
+var _cityDiagLastRead = null;
+var _cityDiagReadSeq = 0;
+
+function cityDiagNoteRead(showing, cards) {
+  try {
+    _cityDiagReadSeq++;
+    var tRange = Date.now();
+    var range = (showing.from !== null && showing.to !== null)
+      ? (showing.from + '-' + showing.to) : '?';
+    var tIds = Date.now();
+    var firstId = (cards && cards.length) ? cards[0].id : '-';
+    var lastId  = (cards && cards.length) ? cards[cards.length - 1].id : '-';
+    var now = { seq: _cityDiagReadSeq, range: range, total: showing.total, raw: showing.raw,
+                rendered: showing.rendered, from: showing.from, to: showing.to,
+                firstId: firstId, lastId: lastId,
+                count: cards ? cards.length : 0, tRange: tRange, tIds: tIds };
+    var prev = _cityDiagLastRead;
+    _cityDiagLastRead = now;
+    if (!prev) return;
+
+    var rangeMoved = (prev.range !== now.range);
+    var idsMoved   = (prev.firstId !== now.firstId || prev.lastId !== now.lastId);
+    if (rangeMoved === idsMoved) return;          // both moved, or neither — nothing to report
+
+    var stamp = function (t) { return new Date(t).toISOString().slice(11, 23); };
+    logger.log('cityAssign', 'CITYDIAG Q4 SYNC      ** the two reads DISAGREE ** ' +
+      (rangeMoved ? 'the RANGE moved and the IDS did not — the id read is stale, or Amazon ' +
+                    'relabelled the page before swapping the cards'
+                  : 'the IDS moved and the RANGE did not — the Showing line is stale, or Amazon ' +
+                    'swapped the cards before relabelling') +
+      '  ||  read #' + prev.seq + '  range "' + prev.range + '" of ' + prev.total +
+      ' @' + stamp(prev.tRange) + '  first ' + String(prev.firstId).slice(0, 8) +
+      ' last ' + String(prev.lastId).slice(0, 8) + ' (' + prev.count + ' cards) @' + stamp(prev.tIds) +
+      '  ->  read #' + now.seq + '  range "' + now.range + '" of ' + now.total +
+      ' @' + stamp(now.tRange) + '  first ' + String(now.firstId).slice(0, 8) +
+      ' last ' + String(now.lastId).slice(0, 8) + ' (' + now.count + ' cards) @' + stamp(now.tIds) +
+      '  ||  ' + (now.to !== null && now.to !== undefined && now.total !== null && now.to > now.total
+        ? '** the range runs PAST the total (' + now.to + ' > ' + now.total + ') — impossible ' +
+          'for a settled board, so this reading is mid-update **'
+        : 'range arithmetic is self-consistent') +
+      '  |  Showing line: ' + (now.raw === null ? '(none)' : JSON.stringify(now.raw)));
+  } catch (e) {
+    logger.error('cityAssign', 'cityDiagNoteRead failed — diagnostics only', { error: e });
+  }
+}
+
+// THE BLOCK. Seven lines, one cycle. ctx carries what only the cycle knows.
+function logCityPageDiagnostics(ctx) {
+  logger.log('cityAssign', 'logCityPageDiagnostics called');
+  try {
+    var cards    = ctx.cards || [];
+    var cardIds  = ctx.cardIds || [];
+    var showing  = ctx.showing || { from: null, to: null, total: null, rendered: null, raw: null };
+    var result   = ctx.result || { counts: {}, unresolved: 0, outOfRange: 0 };
+    var resolved = ctx.resolved || [];
+    var nul = function (v) { return (v === null || v === undefined) ? '?' : v; };
+
+    // 1. PAGE — what the board says is on screen, and the ids that bracket it.
+    logger.log('cityAssign', 'CITYDIAG 1 PAGE      from ' + nul(showing.from) + ' to ' +
+      nul(showing.to) + ' of ' + nul(showing.total) + ' total  |  rendered(parsed) ' +
+      nul(showing.rendered) + '  |  cards collected ' + cards.length +
+      '  |  first ' + (cardIds.length ? cardIds[0] : '-') +
+      '  |  last ' + (cardIds.length ? cardIds[cardIds.length - 1] : '-') +
+      '  |  showing line: ' + (showing.raw === null ? '(none found)' : JSON.stringify(showing.raw)));
+
+    // 2. PAGE VERDICT — for BOTH paths, because they behave differently and only one of them
+    //    merges. ⚠ The CYCLE has no page-change branch at all: it overwrites _cityPageKey and
+    //    then replaces _cityAssignByCard unconditionally. The re-render path is the only one
+    //    that ever merges, so its verdict is the one that can leave a stale assignment behind.
+    var r = _cityDiagLastRerender;
+    logger.log('cityAssign', 'CITYDIAG 2 VERDICT   cycle: ' +
+      (ctx.prevPageKey === ctx.pageKey ? 'SAME PAGE' : 'PAGE CHANGE') +
+      ' (' + cityDiagKeyDiff(ctx.prevPageKey, ctx.pageKey) + ')' +
+      ' — but the cycle branches on nothing: it always REPLACES the assignment map' +
+      '  ||  last re-render: ' + (r === null
+        ? 'none since load (the MutationObserver path has not run)'
+        : (r.changed ? 'PAGE CHANGE -> REPLACED' : 'RE-RENDER -> MERGED') +
+          ' by [' + r.rule + '] ' + Math.round((Date.now() - r.at) / 1000) + 's ago'));
+
+    // 3. MAP — ⚠ TWO DIFFERENT MAPS, and conflating them is how this gets misread:
+    //    _cityPickupById (id -> coords) is ALWAYS merged and never replaced — that is task 7e's
+    //    whole point, and it persists across pages on purpose. _cityAssignByCard (id -> cities)
+    //    is the one that is replaced or merged.
+    logger.log('cityAssign', 'CITYDIAG 3 MAP       coords map ' + ctx.mapBefore + ' -> ' +
+      _cityPickupOrder.length + ' ids (cap ' + CITY_PICKUP_MAX + ')  |  MERGED — this map is ' +
+      'never replaced by design  ||  assignment map now ' + countKeys(_cityAssignByCard) +
+      ' ids, REPLACED by this cycle  |  no-coord ids known: ' + countKeys(_cityNoCoordIds));
+
+    // Q2 — where the cards beyond the Showing range came from.
+    logCityDiagExcess(cards, showing);
+
+    // 4. COVERAGE — how many rendered ids the coords map could answer for at all.
+    var missing = [];
+    for (var i = 0; i < cardIds.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(_cityPickupById, cardIds[i])) missing.push(cardIds[i]);
+    }
+    logger.log('cityAssign', 'CITYDIAG 4 COVERAGE  rendered ' + cardIds.length + '  |  in coords map ' +
+      (cardIds.length - missing.length) + '  |  MISSING ' + missing.length +
+      (missing.length ? '  |  first ' + Math.min(5, missing.length) + ': ' +
+        missing.slice(0, 5).join(' ') : '  |  every rendered card is joinable'));
+
+    // 5. ASSIGN — memberships per city (a load in range of two cities counts in both), then the
+    //    TWO kinds of unassigned. They are kept apart deliberately: only the first is published
+    //    to the All button, so the second is invisible to the dispatcher.
+    var parts = [];
+    for (var c = 0; c < resolved.length; c++) {
+      parts.push(resolved[c].name + ': ' + (result.counts[resolved[c].name] || 0));
+    }
+    logger.log('cityAssign', 'CITYDIAG 5 ASSIGN    ' + (parts.length ? parts.join(' | ') : '(no city resolved)') +
+      '  ||  unassigned: ' + result.unresolved + ' never captured (THIS is what the All badge shows)' +
+      '  +  ' + result.outOfRange + ' captured but beyond ' + CITY_ASSIGN_MAX_MILES +
+      ' mi of every city (NOT on the badge, and shown under every tab)');
+
+    // 6. VISIBLE — measured from the settled DOM, not from what the filter believes it did. The
+    //    split is the point: a card visible under a city it is not assigned to is the symptom.
+    var active = _cityFilterActive;
+    var vis = 0, visAssigned = 0, visUnassignedNeverSeen = 0, visUnassignedOutOfRange = 0, visOther = 0;
+    for (var v = 0; v < cards.length; v++) {
+      var el = cards[v].el;
+      if (!el || !el.style || el.style.display === 'none') continue;
+      vis++;
+      var a = Object.prototype.hasOwnProperty.call(_cityAssignByCard, cards[v].id)
+        ? _cityAssignByCard[cards[v].id] : null;
+      if (a && a.length) {
+        if (active === null || a.indexOf(active) !== -1) visAssigned++;
+        else visOther++;                       // visible under a city it is NOT assigned to
+      } else if (Object.prototype.hasOwnProperty.call(_cityPickupById, cards[v].id)) {
+        visUnassignedOutOfRange++;             // we know where it is; it is simply too far
+      } else {
+        visUnassignedNeverSeen++;              // no coordinates for it at all
+      }
+    }
+    logger.log('cityAssign', 'CITYDIAG 6 VISIBLE   filter ' +
+      (active === null ? 'ALL' : (active === CITY_FILTER_UNMATCHED ? 'UNMATCHED-ONLY' : active)) +
+      '  |  visible ' + vis + '/' + cards.length +
+      '  =  ' + visAssigned + ' assigned to it' +
+      '  +  ' + visUnassignedOutOfRange + ' unassigned/too-far shown anyway' +
+      '  +  ' + visUnassignedNeverSeen + ' unassigned/never-captured shown anyway' +
+      (visOther ? '  +  ' + visOther + ' ** VISIBLE BUT ASSIGNED ELSEWHERE — filter did not hide these **' : ''));
+
+    // 7. CAPTURE — every buffered response still held, and how much of it is on screen. A
+    //    response whose ids barely intersect the rendered list is describing a different page.
+    if (_cityDiagSeenBuffers === null && typeof Set === 'function') _cityDiagSeenBuffers = new Set();
+    var rendered = {};
+    for (var q = 0; q < cardIds.length; q++) rendered[cardIds[q]] = true;
+    if (!_cityAssignBuffers.length) {
+      logger.log('cityAssign', 'CITYDIAG 7 CAPTURE   no buffered responses held');
+    }
+    for (var b = 0; b < _cityAssignBuffers.length; b++) {
+      var buf = _cityAssignBuffers[b];
+      var isNew = _cityDiagSeenBuffers ? !_cityDiagSeenBuffers.has(buf) : true;
+      if (_cityDiagSeenBuffers) _cityDiagSeenBuffers.add(buf);
+      var hit = 0, ids = 0;
+      for (var k in buf.byId) {
+        if (!Object.prototype.hasOwnProperty.call(buf.byId, k)) continue;
+        ids++; if (rendered[k]) hit++;
+      }
+      var ncHit = 0;
+      for (var k2 in buf.noCoord) {
+        if (Object.prototype.hasOwnProperty.call(buf.noCoord, k2) && rendered[k2]) ncHit++;
+      }
+      logger.log('cityAssign', 'CITYDIAG 7 CAPTURE   [' + (b + 1) + '/' + _cityAssignBuffers.length +
+        ']' + (isNew ? ' NEW' : '    ') + '  endpoint ' + buf.endpoint +
+        '  |  woCount ' + nul(buf.woCount) +
+        '  |  totalResultsSize ' + nul(buf.totalResultsSize) +
+        '  |  nextItemToken ' + nul(buf.nextItemToken) +
+        '  |  ids with coords ' + ids + ', of which ON SCREEN ' + hit +
+        '  |  no-coord ids on screen ' + ncHit);
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'logCityPageDiagnostics failed — diagnostics only, the cycle is ' +
+      'unaffected', { error: e });
+  }
+}
+
 // ── THE CYCLE ─────────────────────────────────────────────────────────────────────────────
 
 // One assignment pass. Reads, computes, logs, and touches nothing.
@@ -1463,6 +2331,10 @@ async function runCityAssignCycle() {
     // Keep the page signature current here too, so a page turn that happens without a mutation
     // the observer sees (or before it is attached) still registers rather than leaving the
     // previous page's key in place and suppressing the next real change.
+    // CITYDIAG (2026-08-18): snapshot what the next line overwrites and what the coords map
+    // held on entry. Locals, read by logCityPageDiagnostics() only — nothing else consults them.
+    var diagPrevPageKey = _cityPageKey;
+    var diagMapBefore   = _cityPickupOrder.length;
     _cityPageKey = currentPageKey(cards);
     var cardIds = [];
     for (var idi = 0; idi < cards.length; idi++) cardIds.push(cards[idi].id);
@@ -1609,6 +2481,16 @@ async function runCityAssignCycle() {
     // open panel belongs to. reapplyCityFilter runs its own check, but only when a filter is
     // active — this covers the "All" case too.
     if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('assignment cycle');
+
+    // CITYDIAG (2026-08-18). LAST, so item 6 measures the DOM after the filter has settled
+    // rather than what the filter thinks it did. Flag-gated: nothing runs in a shipped build.
+    if (cityVerboseDiagnostics()) {
+      logCityPageDiagnostics({
+        cards: cards, cardIds: cardIds, showing: showing, result: result,
+        resolved: resolved, prevPageKey: diagPrevPageKey, pageKey: _cityPageKey,
+        mapBefore: diagMapBefore
+      });
+    }
   } catch (e) {
     logger.error('cityAssign', 'runCityAssignCycle failed', { error: e });
   } finally {
@@ -1629,10 +2511,25 @@ async function runCityAssignCycle() {
 // network wait at all.
 //
 // HOW THE RE-RENDER IS DETECTED: a MutationObserver watching childList+subtree. Cards are added
-// and removed, so childList fires; we deliberately do NOT observe attributes, which is what keeps
-// our own work invisible to it — applyCityFilter only writes style.display, an attribute change,
-// so the filter cannot retrigger itself. It observes the main list's PARENT, not the list, because
-// Amazon replaces the list element itself on some renders; the parent survives.
+// and removed, so childList fires; we deliberately do NOT observe attributes, so the filter's own
+// hide/show — which writes nothing but style.display — is invisible to it.
+//
+// CORRECTED 2026-08-19. This block used to claim outright that "the filter cannot retrigger
+// itself". That was true when it was written and became FALSE when the per-city deadhead
+// substitution landed: substituting inserts a <span> and restoring removes it, and those ARE
+// childList mutations inside the observed subtree. Every apply therefore woke this observer,
+// which re-applied the filter — a loop measured live at ~27 wakes/sec on a board with 24
+// multi-city loads.
+//
+// WHAT HOLDS NOW: applyCityDeadheads() is IDEMPOTENT. A card already showing the value we would
+// write receives no DOM write of any kind, and a changed value is written in place via
+// textContent/attributes rather than by removing and re-inserting the node. So a REPEATED apply
+// over an unchanged board emits no childList mutation and cannot wake this observer. A FIRST
+// apply, and any apply that genuinely changes a card, still inserts or removes — that is a real
+// change to the board and waking on it is correct.
+//
+// It observes the main list's PARENT, not the list, because Amazon replaces the list element
+// itself on some renders; the parent survives.
 //
 // Coalesced with requestAnimationFrame: a render arrives as a burst of mutations, and this runs
 // once per frame at most, before the browser paints. That is what makes it flash-free rather than
@@ -1669,6 +2566,8 @@ function currentPageKey(cards) {
       ? (showing.from + '-' + showing.to) : '?';
     var first = (cards && cards.length) ? cards[0].id : '-';
     var last  = (cards && cards.length) ? cards[cards.length - 1].id : '-';
+    // CITYDIAG Q4 (2026-08-18): both reads are in hand here and nowhere else. Read-only.
+    if (cityVerboseDiagnostics()) cityDiagNoteRead(showing, cards);
     return range + '|' + (cards ? cards.length : 0) + '|' + first + '|' + last;
   } catch (e) {
     logger.error('cityAssign', 'currentPageKey failed', { error: e });
@@ -1690,6 +2589,9 @@ function onBoardRerender() {
     var cards   = readMainCardElements();
     var pageKey = currentPageKey(cards);
     var pageChanged = (pageKey !== null && pageKey !== _cityPageKey);
+    // CITYDIAG (2026-08-18): the cycle cannot recover this — _cityPageKey has moved on by then.
+    // Records only; the branch below is untouched.
+    if (cityVerboseDiagnostics()) { logCityDiagWake(); cityDiagNoteRerender(_cityPageKey, pageKey, pageChanged, cards); }
     if (pageChanged) {
       logger.log('cityAssign', 'CITY PAGE  working set changed — ' + cards.length +
         ' card(s) now rendered  [' + _cityPageKey + '  ->  ' + pageKey + ']');
@@ -1762,7 +2664,10 @@ function startBoardRenderObserver() {
     var target = (list && list.parentElement) ? list.parentElement : document.body;
     if (!target) return;
 
-    _cityRenderObserver = new MutationObserver(function () {
+    _cityRenderObserver = new MutationObserver(function (records) {
+      // CITYDIAG Q6 (round 3): the callback discarded its records; they are accumulated for the
+      // frame instead. Recording only — the scheduling below is untouched.
+      if (cityVerboseDiagnostics()) cityDiagNoteMutations(records);
       if (_cityRenderFrame !== null) return;               // already scheduled for this frame
       var raf = (typeof requestAnimationFrame === 'function')
         ? requestAnimationFrame
@@ -1905,10 +2810,15 @@ function onCityCoordsMessage(ev) {
     // MERGE INTO THE PERSISTENT MAP — this is assignment's input again, and the merge is the
     // whole fix: every response contributes, none is discarded by a vote, and what earlier
     // responses taught us survives.
+    // CITYDIAG Q2 (2026-08-18): remember which endpoint each id came from. Debug-only and
+    // write-only from here; the buffers cannot answer this once they age out at 6.
+    if (cityVerboseDiagnostics()) cityDiagNoteEndpoints(data.endpoint, pairs, nc);
     var addedNow = mergePickupCoords(pairs);
+    // STAGE B: the panel's records ride the same message and the same eviction.
+    var recAdded = mergeLoadRecords(data.records);
     logger.log('cityAssign', 'CITY MERGE  +' + addedNow + ' new id(s) from this ' +
       data.endpoint + ' response; merged map now holds ' + _cityPickupOrder.length +
-      ' of a possible ' + CITY_PICKUP_MAX);
+      ' of a possible ' + CITY_PICKUP_MAX + '  |  +' + recAdded + ' panel record(s)');
 
     scheduleCityAssignCycle();
   } catch (e) {
@@ -2067,6 +2977,8 @@ function teardownCityAssign() {
     _cityPickupById  = {};
     _cityPickupOrder = [];
     _cityNoCoordIds  = {};
+    _cityRecordById  = {};
+    _cityTrailerLabelById = {};
     // The page signature too, so a re-activation treats the first board it sees as a new working
     // set rather than matching a key left over from the previous session.
     _cityPageKey     = null;
@@ -2087,6 +2999,8 @@ function teardownCityAssign() {
 //   __EXT_DEBUG.filterCity()               -> show ALL again (also the panic button)
 //   __EXT_DEBUG.cityAssignments()          -> the current id -> city map, to pick a valid key
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};
+// PART 2 (2026-08-20): dump the collected badge-letter + record pairs, for the PM.
+window.__EXT_DEBUG.dumpTrailerLabels = dumpTrailerLabels;
 window.__EXT_DEBUG.filterCity      = function (city) { return applyCityFilter(city); };
 window.__EXT_DEBUG.cityAssignments = function () {
   var out = {};

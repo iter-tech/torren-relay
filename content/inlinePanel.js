@@ -1,43 +1,30 @@
-// Read-only module — reads Amazon's native #selected-work-sheet and renders
-// our own collapsible segmented summary panel injected below the clicked load card.
-// NO clicks on Amazon elements, NO booking, NO hiding or modifying the native sheet.
+// Our own collapsible segmented summary panel, injected below a load card.
+//
+// ── STAGE A, 2026-08-14: THE SCRAPE PATH IS GONE ────────────────────────────────────────────
+//
+// This module used to click nothing but WAIT for Amazon's native #selected-work-sheet to open,
+// then read the panel's contents out of it with a wall of `.css-<hash>` selectors. All of that
+// is removed — waitForSheet(), cancelSheetPoll(), sheetFingerprint(), readSheetData(),
+// parseStopBlock(), and every hashed selector they carried (338 lines).
+//
+// ⚠ THIS STAGE DELIBERATELY LEAVES NO PANEL. Rendering returns in Stage B (PLAN §29b) from the
+// captured API records, keyed by load id. Everything the dispatcher relies on is untouched:
+// Amazon's own detail sheet still opens on every card click (we never intercepted it — this
+// listener has no preventDefault and no stopPropagation), the loop still stops when he opens a
+// load, START/STOP, the auto-switch, filtering, detection and the alert are all unaffected.
+//
+// NO clicks on Amazon elements from this module except Fast Book's own, NO hiding or modifying
+// the native sheet.
 
 var PANEL_ID                  = 'ext-inline-panel';
+// KEPT FOR FAST BOOK, deliberately. Stage A's brief listed this for removal, but
+// executeFastBook() reads Amazon's live sheet through it to find the Book button — removing it
+// would break Fast Book, which is a dependency to preserve. It is a stable id selector, not one
+// of the hashed classes the scrape used. See the report for the full dependency trace.
 var SHEET_SELECTOR            = '#selected-work-sheet';
 var currentPanelCard          = null; // owned by showInlinePanel (set on success) and removeInlinePanel (clear)
 var _fastBookStorageListener  = null; // storage.onChanged listener for Fast Book visibility — cleaned up in removeInlinePanel
 
-// --- waitForSheet poller state (2026-07-30 fix) --------------------------------------
-// waitForSheet() used to create a bare setInterval per call with no handle and no way to
-// cancel it. Clicking card A then quickly card B left BOTH pollers alive; A's poller then
-// saw the sheet fingerprint change — caused by B's sheet loading — treated that as "my
-// sheet is ready", and rendered card A's panel from card B's sheet data. The dispatcher
-// could then create a PAT post from the wrong load entirely.
-//
-// Three pieces of state, because cancelling an interval alone is not sufficient: a callback
-// already queued on the event loop still runs after clearInterval().
-//   _sheetPollInterval — handle of the in-flight run, so it can actually be cancelled.
-//   _sheetPollToken    — monotonic run id. Every cancel/start bumps it; a tick whose captured
-//                        token no longer matches is from a superseded run and must not fire.
-//   _sheetPollCard     — the card element the in-flight run was started for, so a resolved
-//                        poll can confirm it is still the card the dispatcher is waiting on.
-var _sheetPollInterval = null;
-var _sheetPollToken    = 0;
-var _sheetPollCard     = null;
-
-// Cancels any in-flight waitForSheet run and invalidates its queued callback.
-// Safe to call at any time, including when nothing is polling.
-function cancelSheetPoll() {
-  if (_sheetPollInterval !== null) {
-    logger.log('inlinePanel', 'cancelSheetPoll: cancelling in-flight sheet poll');
-    clearInterval(_sheetPollInterval);
-    _sheetPollInterval = null;
-  }
-  _sheetPollCard = null;
-  // Bumped even when no interval was live: a tick that already fired and is sitting on the
-  // event loop reads this token, so incrementing is what actually neutralizes it.
-  _sheetPollToken++;
-}
 
 function injectPanelStyle() {
   if (document.getElementById('ext-inline-panel-style')) return;
@@ -93,11 +80,20 @@ function injectPanelStyle() {
     // 2026-07-30 nightMode.js entry in CHANGELOG.md for why (background/border-color are
     // already covered by existing !important overrides there).
     '.ext-seg-header{' +
-      'background:var(--ext-leg-header-bg);color:#1F3A45;padding:10px 16px;' +
+      // TEXT TREATMENT (2026-08-17). The header read as a faint caption rather than a heading,
+      // and the measurement said why: it was 12px/600 while the rows it heads are 13px — a
+      // heading SMALLER than its own content. Now 15px/700, so it is unambiguously the larger,
+      // heavier element in its block.
+      //
+      // ⚠ CONTRAST WAS NEVER THE PROBLEM: the old #1F3A45 on --ext-leg-header-bg (#F5F5F5)
+      // already measured 11.01:1. It is replaced by --ext-n900 anyway, which measures 15.79:1
+      // and removes a hardcoded hex in favour of a token. The BACKGROUND token is untouched, as
+      // specified.
+      'background:var(--ext-leg-header-bg);color:var(--ext-n900);padding:10px 16px;' +
       'border-bottom:1px solid #C4D2D6;' +
       'display:grid;grid-template-columns:34% 18% 24% calc(24% - 24px) 24px;' +
       'align-items:center;justify-items:start;column-gap:0;' +
-      'font-size:12px;font-weight:600;letter-spacing:0.3px;cursor:pointer;user-select:none;' +
+      'font-size:15px;font-weight:700;letter-spacing:0.3px;cursor:pointer;user-select:none;' +
       // FLOATING CARD (2026-07-30): no shared per-leg wrapper exists in the DOM (see
       // CHANGELOG.md), so the header/body pair approximate one card independently, keyed
       // off the .ext-open class JS already toggles on both. width:100%+box-sizing:
@@ -150,16 +146,25 @@ function injectPanelStyle() {
     // without a wrapper element. Replaces the old overflow-wrap/word-break (multi-line
     // wrap) with single-line + ellipsis per spec ("GAHANNA, OH" truncates instead of
     // wrapping or pushing the arrow off its column).
+    // ⚠ THESE ARE THE HEADER'S ACTUAL TEXT — the "MDT4 → LEWISTOWN, PA" route — and at 11px they
+    // were SMALLER than the 13px rows beneath them, which is most of why the header read as a
+    // caption. Raising .ext-seg-header alone would have left a 15px container holding 11px
+    // content. 13px matches the rows and, with weight 700, sits clearly above them; the existing
+    // ellipsis still protects the fixed grid track from a long city name.
+    //
+    // Colour moved off the #1F3A45 literal onto --ext-n900 so it matches the header text exactly
+    // (15.79:1) instead of being a second, lighter tone. Night mode already overrides both
+    // selectors (nightMode.js:157-158), so this touches light mode only.
     '.ext-route-origin{' +
       'grid-column:1;margin-left:26px;' +
-      'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11px;' +
-      'color:#1F3A45;font-weight:600;' +
+      'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:13px;' +
+      'color:var(--ext-n900);font-weight:700;' +
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;' +
     '}' +
     '.ext-route-dest{' +
       'grid-column:3;margin-left:26px;' +
-      'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11px;' +
-      'color:#1F3A45;font-weight:600;' +
+      'font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:13px;' +
+      'color:var(--ext-n900);font-weight:700;' +
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;' +
     '}' +
     // Own 28px cell, centred — this (fixed track + justify-self:center) is what makes every
@@ -208,7 +213,15 @@ function injectPanelStyle() {
     // DK_HIGH !important (see its .ext-seg-body rule), so this hex is never exercised in
     // dark mode and nightMode.js needed no change.
     '.ext-seg-body{' +
-      'display:none;background:#FFFFFF;padding:0 16px 12px;' +
+      // SIDE INSET REMOVED (2026-08-17): was `padding:0 16px 12px`, and that 16px on each side
+      // was the entire cause of the expanded table sitting inset. This element contains NOTHING
+      // BUT the stop table (segBody.appendChild(buildSegmentTable(segment)) is its only child),
+      // so dropping the horizontal padding moves the table and nothing else.
+      //
+      // The selector IS shared with nightMode.js, which sets `background-color` on it — checked
+      // before changing this, and padding does not collide with that. The bottom 12px stays: it
+      // is the gap above the card's rounded bottom edge, not part of the inset.
+      'display:none;background:#FFFFFF;padding:0 0 12px;' +
       'width:100%;box-sizing:border-box;overflow:hidden;' +
     '}' +
     // Visible (expanded): this is the card's bottom half — bottom-only radius, the card's
@@ -254,13 +267,11 @@ function injectPanelStyle() {
     // avoided touching buildSegmentTable() for a rule this simple). TYPOGRAPHY HIERARCHY
     // (2026-07-30): 13px/var(--ext-n700) → 15px/#111827 per spec.
     '.ext-inline-panel__table td b{font-weight:600;color:#111827;font-size:15px;}' +
-    // Zebra striping (CSS POLISH, 2026-07-20): reuses var(--ext-n100) — the same subtle
-    // tint already established for the header — rather than inventing a new shade, per
-    // "existing CSS custom properties only". content/nightMode.js's existing
-    // `tbody td{background-color:DK_HIGH !important}` would otherwise erase this in dark
-    // mode (blanket !important on every cell); a matching dark-mode counterpart was added
-    // there (reusing the panel's own existing DK_OVERLAY, not a new color) — see that file.
-    '.ext-inline-panel__table tbody tr:nth-child(even) td{background:var(--ext-n100);}' +
+    // ZEBRA STRIPING REMOVED 2026-08-17. Every row is now the same white, per Ihor. The rule
+    // that used to sit here tinted even rows with var(--ext-n100); it is DELETED rather than
+    // overridden by a second rule, so there is one source of truth for a row's background.
+    // Its dark-mode counterpart in nightMode.js went with it — leaving that would have kept
+    // night mode striped. Row SEPARATORS are untouched: they come from td{border-bottom}.
     // Last-row radius per spec — the VISIBLE rounded bottom corners of an expanded leg
     // card actually come from .ext-seg-body.ext-open's own box-radius above (the table
     // sits inset by .ext-seg-body's 16px/12px padding, not flush against its edges, so the
@@ -413,334 +424,9 @@ function executeFastBook(sheetLoadId, fastBookBtn) {
   }, POLL_MS);
 }
 
-// Returns a cheap string fingerprint of the currently open detail sheet.
-// Composed of payout text, expander count, and first stop label — enough to detect
-// when Amazon has replaced the previous card's sheet with the new card's sheet.
-function sheetFingerprint(sheet) {
-  var payoutEl    = sheet.querySelector('.css-6hcxnp');
-  var payout      = payoutEl ? payoutEl.textContent : '';
-  var expanders   = sheet.querySelectorAll('.load-expander').length;
-  var firstNameEl = sheet.querySelector('.css-424exj');
-  var firstName   = firstNameEl ? firstNameEl.textContent : '';
-  return payout + '|' + expanders + '|' + firstName;
-}
 
-// Polls until Amazon's native sheet has rendered segments AND its fingerprint has changed
-// from prevFingerprint (when provided — guards against reading the previous card's stale sheet).
-// prevFingerprint is null/undefined when no sheet was open before clicking; in that case any
-// sheet with .load-expander is accepted immediately.
-// Hard timeout: 1500ms — callback fires regardless; downstream handles null/stale data.
-//
-// SINGLE-FLIGHT as of 2026-07-30 (see the _sheetPoll* comment at the top of this file for the
-// bug this fixes). At most one poll run exists at a time: starting a run cancels any previous
-// one, and three independent guards stop a superseded run from ever reaching `callback`:
-//   1. token check at tick entry   — a superseded run stops polling immediately.
-//   2. token check before callback — catches a tick already queued when the cancel landed.
-//   3. card identity + DOM check   — the run's card must still be the one being waited on,
-//      and still attached. (Detached is not merely stale: showInlinePanel() renders via
-//      cardElement.parentNode.insertBefore, which already throws on a detached node today —
-//      so this converts a caught exception into a deliberate, silent discard.)
-// `card` is optional; when omitted only the token guards apply.
-function waitForSheet(callback, prevFingerprint, card) {
-  logger.log('inlinePanel', 'waitForSheet called', { hasPrevFingerprint: prevFingerprint != null });
 
-  // Requirement 1: never leave a previous poller running alongside this one.
-  cancelSheetPoll();
 
-  var myToken = _sheetPollToken; // identity of THIS run (cancelSheetPoll just bumped it)
-  _sheetPollCard = card || null;
-
-  var POLL_MS = 50;
-  var MAX_MS  = 1500;
-  var elapsed = 0;
-
-  _sheetPollInterval = setInterval(function () {
-    // Guard 1 — a newer run (or a teardown) superseded us. Do not poll, do not fire.
-    // The interval itself was already cleared by cancelSheetPoll; this is for the tick that
-    // was mid-flight when that happened.
-    if (myToken !== _sheetPollToken) return;
-
-    elapsed += POLL_MS;
-    var sheet       = document.querySelector(SHEET_SELECTOR);
-    var hasExpander = sheet && sheet.querySelector('.load-expander');
-    var ready;
-    if (prevFingerprint == null) {
-      ready = !!hasExpander;
-    } else {
-      ready = !!(hasExpander && sheetFingerprint(sheet) !== prevFingerprint);
-    }
-
-    if (ready || elapsed >= MAX_MS) {
-      // Requirement 4: always clear on resolve OR timeout — no orphaned pollers either way.
-      clearInterval(_sheetPollInterval);
-      _sheetPollInterval = null;
-
-      // Guard 2 — re-check after the work above, before committing to a render.
-      if (myToken !== _sheetPollToken) {
-        logger.log('inlinePanel', 'waitForSheet: run superseded — discarding result');
-        return;
-      }
-      // Guard 3 — requirement 2. Silent discard: a superseded click is not an error.
-      if (card && (_sheetPollCard !== card || !document.contains(card))) {
-        logger.log('inlinePanel', 'waitForSheet: card no longer the one being waited on — discarding result', {
-          stillCurrent: _sheetPollCard === card, inDom: document.contains(card)
-        });
-        _sheetPollCard = null;
-        return;
-      }
-
-      _sheetPollCard = null;
-      if (elapsed >= MAX_MS && !ready) {
-        logger.warn('inlinePanel', 'waitForSheet: hard timeout reached — firing callback anyway', { elapsed: elapsed });
-      }
-      callback();
-    }
-  }, POLL_MS);
-}
-
-function parseStopBlock(block) {
-  var addrContainer = block.querySelector('.css-w1kk5u');
-  var name          = '';
-  var addressLines  = [];
-
-  if (addrContainer) {
-    var paras = addrContainer.querySelectorAll('p');
-    paras.forEach(function (p) {
-      var bold = p.querySelector('b');
-      if (bold) {
-        name = bold.textContent.trim();
-      }
-      var text = p.textContent.trim();
-      if (text) addressLines.push(text);
-    });
-    addressLines = addressLines.filter(function (line) { return line !== name; });
-  }
-
-  var address = addressLines.join(', ');
-
-  var arrivalEl   = block.querySelector('.scheduled-arrival__time .scheduled-time');
-  var departureEl = block.querySelector('.scheduled-departure__time .scheduled-time');
-  var arrival     = arrivalEl   ? arrivalEl.textContent.trim()   : '';
-  var departure   = departureEl ? departureEl.textContent.trim() : '';
-
-  // Equipment text + load type — both extracted from the same .css-1cbogyo block
-  // that contains "Trailer". Normalized text looks like: "Equipment/ID 53' Trailer Drop"
-  var equipmentText = '';
-  var loadType      = '';
-  var equipEls      = block.querySelectorAll('.css-1cbogyo');
-  equipEls.forEach(function (eq) {
-    if (eq.textContent.indexOf('Trailer') !== -1) {
-      var normalized   = eq.textContent.replace(/\s+/g, ' ').trim();
-      var trailerMatch = normalized.match(/\d+'\s*Trailer/);
-      equipmentText    = trailerMatch ? trailerMatch[0].trim() : '';
-      var statusMatch  = normalized.match(/Trailer\s+(Live|Drop|Preloaded)/i);
-      if (statusMatch) {
-        var raw = statusMatch[1].toLowerCase();
-        if      (raw === 'live')      loadType = 'Live';
-        else if (raw === 'drop')      loadType = 'Drop';
-        else if (raw === 'preloaded') loadType = 'Preloaded';
-      }
-    }
-  });
-
-  // Loaded flag — first matching circle icon only; classList.contains avoids substring match
-  var loaded   = false;
-  var dotIcons = block.querySelectorAll('i.fa-circle, i.fa-circle-o');
-  for (var d = 0; d < dotIcons.length; d++) {
-    var icon = dotIcons[d];
-    if (icon.classList.contains('fa-circle-o')) {
-      loaded = false;
-    } else if (icon.classList.contains('fa-circle')) {
-      loaded = true;
-    }
-    break;
-  }
-
-  return {
-    num:           '',
-    name:          name,
-    address:       address,
-    equipmentText: equipmentText,
-    loadType:      loadType,
-    loaded:        loaded,
-    arrival:       arrival,
-    departure:     departure
-  };
-}
-
-function readSheetData() {
-  try {
-    var sheet = document.querySelector(SHEET_SELECTOR);
-    if (!sheet) {
-      logger.warn('inlinePanel', 'readSheetData: sheet not found', { selector: SHEET_SELECTOR });
-      return null;
-    }
-
-    // Header summary — stopsCount + totalMiles
-    var stopsCount    = '';
-    var totalMiles    = '';
-    var headerSummary = sheet.querySelector('.css-ntd8uw .css-1q48g4q');
-    if (headerSummary) {
-      var summaryPs = headerSummary.querySelectorAll('p');
-      if (summaryPs[0]) stopsCount = summaryPs[0].textContent.trim();
-      if (summaryPs[1]) totalMiles = summaryPs[1].textContent.trim();
-    }
-
-    // Payout
-    var payoutEl = sheet.querySelector('.css-6hcxnp');
-    var payout   = payoutEl ? payoutEl.textContent.trim() : null;
-
-    // Segments — one per .load-expander
-    var loadExpanders = sheet.querySelectorAll('.load-expander');
-
-    // Selector-drift alarm: .load-expander is a non-hashed class (stable); its absence
-    // while the sheet exists may indicate Amazon changed the DOM structure.
-    if (loadExpanders.length === 0) {
-      logger.warn('inlinePanel', 'SELECTOR DRIFT SUSPECTED: sheet present but no .load-expander found — Amazon may have rebuilt CSS classes or DOM structure');
-    }
-
-    var segments = [];
-
-    loadExpanders.forEach(function (expander) {
-      // Segment header (id="#expanded-header" is reused; query within this expander)
-      var segHeaderEl = expander.querySelector('#expanded-header');
-      var fromName    = '';
-      var toName      = '';
-      var miles       = '';
-
-      if (segHeaderEl) {
-        var stopLabels = segHeaderEl.querySelectorAll('.css-17jtd1r');
-        if (stopLabels[0]) {
-          var fn = stopLabels[0].querySelector('.css-424exj');
-          fromName = fn ? fn.textContent.trim() : '';
-        }
-        if (stopLabels[1]) {
-          var tn = stopLabels[1].querySelector('.css-424exj');
-          toName = tn ? tn.textContent.trim() : '';
-        }
-        var milesEl = segHeaderEl.querySelector('.css-14f9df9');
-        miles = milesEl ? milesEl.textContent.trim() : '';
-      }
-
-      var fromTo = fromName + ' → ' + toName;
-
-      // Duration — extract token after first bullet if present
-      var duration   = '';
-      var durationEl = expander.querySelector('.css-gudqq2 .css-1cp4is8');
-      if (durationEl) {
-        var dText  = durationEl.textContent;
-        var bullet = dText.indexOf('•');
-        if (bullet !== -1) {
-          duration = dText.slice(bullet + 1).trim().split('•')[0].trim();
-        }
-      }
-
-      // Stops from expander-content
-      var content = expander.querySelector('.expander-content');
-      var stops   = [];
-      if (content) {
-        var stopBlocks = content.querySelectorAll('.css-zgauvq');
-        stopBlocks.forEach(function (block) {
-          var stop = parseStopBlock(block);
-          if (!stop.address && !stop.arrival) return;
-          stops.push(stop);
-        });
-      }
-
-      // De-duplicate stops within this segment by arrival+departure time.
-      // Fresh seen object per segment — no cross-segment dedup.
-      var seen         = {};
-      var dedupedStops = [];
-      for (var s = 0; s < stops.length; s++) {
-        var stop    = stops[s];
-        var timeKey = stop.arrival + '|' + stop.departure;
-        if (stop.arrival && stop.departure) {
-          if (seen[timeKey]) continue;
-          seen[timeKey] = true;
-        }
-        dedupedStops.push(stop);
-      }
-
-      // segment.loaded = true if ANY stop in dedupedStops is loaded
-      var segLoaded = false;
-      for (var k = 0; k < dedupedStops.length; k++) {
-        if (dedupedStops[k].loaded) { segLoaded = true; break; }
-      }
-
-      // segment.loadType = loadType of the LAST stop (delivery reflects what happens at destination)
-      var segLoadType = '';
-      if (dedupedStops.length > 0) {
-        segLoadType = dedupedStops[dedupedStops.length - 1].loadType || '';
-      }
-
-      segments.push({
-        idLabel:  '',
-        fromTo:   fromTo,
-        miles:    miles,
-        duration: duration,
-        loadType: segLoadType,
-        loaded:   segLoaded,
-        price:    '',
-        stops:    dedupedStops
-      });
-    });
-
-    // Selector-drift alarm: if segments were found but every one has 0 stops AND
-    // empty fromTo, all the hashed css- class selectors likely returned nothing.
-    if (segments.length > 0) {
-      var allSegmentsEmpty = segments.every(function (seg) {
-        return seg.stops.length === 0 && seg.fromTo.trim() === '→';
-      });
-      if (allSegmentsEmpty) {
-        logger.warn('inlinePanel', 'SELECTOR DRIFT SUSPECTED: sheet present but all hashed selectors returned empty — Amazon may have rebuilt CSS classes');
-      }
-    }
-
-    // Assign global stop numbers using a cumulative counter.
-    // Boundary stops (first stop of each non-first segment, n>0 && sn===0) share
-    // the previous segment's last number — counter is NOT advanced for them.
-    // Correct for segments with any stop count (old per-segment formula assumed exactly 2).
-    // Example (3 segments × 2 stops → 1,2 / 2,3 / 3,4):
-    //   seg 0: stops[0].num="1"  stops[1].num="2"
-    //   seg 1: stops[0].num="2"  stops[1].num="3"   ← 2 shared with seg 0 end
-    //   seg 2: stops[0].num="3"  stops[1].num="4"   ← 3 shared with seg 1 end
-    var stopCounter = 1;
-    for (var n = 0; n < segments.length; n++) {
-      var segStops = segments[n].stops;
-      for (var sn = 0; sn < segStops.length; sn++) {
-        if (n > 0 && sn === 0) {
-          // Boundary stop: shares the previous segment's last number (counter - 1).
-          segStops[sn].num = String(stopCounter - 1);
-        } else {
-          segStops[sn].num = String(stopCounter);
-          stopCounter++;
-        }
-      }
-    }
-
-    // Route = first segment from-name → last segment to-name
-    var route = '';
-    if (segments.length > 0) {
-      var firstParts = segments[0].fromTo.split(' → ');
-      var lastParts  = segments[segments.length - 1].fromTo.split(' → ');
-      route = (firstParts[0] || '') + ' → ' + (lastParts[lastParts.length - 1] || '');
-    }
-
-    return {
-      header: {
-        route:      route,
-        stopsCount: stopsCount,
-        totalMiles: totalMiles,
-        payout:     payout
-      },
-      segments: segments
-    };
-
-  } catch (e) {
-    logger.error('inlinePanel', 'readSheetData failed', { error: e });
-    return null;
-  }
-}
 
 // Builds the stops <table> for a segment — shared by both single and multi rendering.
 function buildSegmentTable(segment) {
@@ -783,7 +469,11 @@ function buildSegmentTable(segment) {
     var dot = document.createElement('span');
     dot.className = stop.loaded ? 'ext-dot-loaded' : 'ext-dot-empty';
     td2.appendChild(dot);
-    td2.appendChild(document.createTextNode(stop.equipmentText));
+    // Defensive coalesce (2026-08-17): this exact line printed the literal string "undefined" on
+    // every stop for as long as the panel existed, because createTextNode(undefined) stringifies.
+    // recordToPanelData now always supplies a value; this guarantees that a future caller with a
+    // different data shape degrades to an em dash instead of putting "undefined" on screen again.
+    td2.appendChild(document.createTextNode(stop.equipmentText || EQUIPMENT_UNKNOWN));
 
     // td3 — arrival
     var td3 = document.createElement('td');
@@ -1187,35 +877,327 @@ function enforcePanelAnchor(reason) {
   }
 }
 
+// ── STAGE B (2026-08-14): THE RECORD BECOMES THE PANEL ──────────────────────────────────────
+
+// A stop's planned time, rendered in THAT STOP'S OWN local zone.
+//
+// WHY STOP-LOCAL, and why per stop rather than per load: the payload carries UTC (`2026-08-04T
+// 01:30:00Z`) plus a `timeZone` on every stop — 484 of 484 have one. **31% of the captured
+// records have stops in more than one zone**, so converting a whole load with a single zone
+// would be wrong on nearly a third of them. A dispatcher reads the time at the stop: 01:30 at a
+// Chicago dock means 01:30 Chicago, whatever his own clock says. This is the first field he will
+// check against Amazon's sheet, so it renders the way Amazon shows it.
+//
+// The zone abbreviation is appended (CDT/EDT) because on a two-zone load two bare times a few
+// hours apart are ambiguous without it.
+// FORMAT: "Mon Aug 17 17:30 EDT" — weekday, month, day, time, zone, matching what Amazon's own
+// sheet prints (2026-08-17). Time alone was ambiguous the moment a load crossed midnight or ran
+// over two days, which the payload routinely does: firstPickupTime and lastDeliveryTime differ by
+// a calendar day on most records.
+function formatStopTime(iso, timeZone) {
+  try {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    // No zone on the stop -> show UTC and SAY so, rather than silently using the browser's zone,
+    // which would be a different time presented as if it were the stop's. Same date shape.
+    if (!timeZone) {
+      var u = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      }).formatToParts(d);
+      return assembleStopTime(u, 'UTC');
+    }
+    var parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone, weekday: 'short', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+      timeZoneName: 'short'
+    }).formatToParts(d);
+    return assembleStopTime(parts, null);
+  } catch (e) {
+    logger.error('inlinePanel', 'formatStopTime failed — showing nothing rather than a wrong time', {
+      error: e, timeZone: timeZone
+    });
+    return '';
+  }
+}
+
+// Assembles the parts in a fixed order rather than trusting the locale's own ordering, so the
+// output cannot drift with the browser's locale. `forceZone` supplies the label when the formatter
+// was not asked for one (the UTC fallback).
+function assembleStopTime(parts, forceZone) {
+  var wd = '', mon = '', day = '', hh = '', mm = '', zone = forceZone || '';
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (p.type === 'weekday')      wd = p.value;
+    if (p.type === 'month')        mon = p.value;
+    if (p.type === 'day')          day = p.value;
+    if (p.type === 'hour')         hh = p.value;
+    if (p.type === 'minute')       mm = p.value;
+    if (p.type === 'timeZoneName' && !forceZone) zone = p.value;
+  }
+  if (!hh) return '';
+  // 24-hour formatting yields "24" for midnight in some ICU versions; normalise so a stop at
+  // midnight does not read "Mon Aug 17 24:00".
+  if (hh === '24') hh = '00';
+  var date = [wd, mon, day].filter(Boolean).join(' ');
+  var time = hh + ':' + mm + (zone ? ' ' + zone : '');
+  return date ? (date + ' ' + time) : time;
+}
+
+// ── EQUIPMENT (2026-08-17) ───────────────────────────────────────────────────────────────────
+//
+// THE DEFECT: the renderer reads `stop.equipmentText` and recordToPanelData never set it, so
+// every stop printed the literal string "undefined" via createTextNode(undefined).
+//
+// LABELS ARE BUILT FROM OBSERVED VALUES ONLY. Enumerated across all six captures on disk,
+// 159 records / 506 stops — these are the ONLY values that exist:
+//
+//   loads[i].equipmentType : FIFTY_THREE_FOOT_TRUCK (235), FIFTY_THREE_FOOT_CONTAINER (16)
+//   stops[j].loadingType   : null (253), PRELOADED (236), LIVE (17)
+//   stops[j].unloadingType : null (253), DROP (226), LIVE (27)
+//
+// Anything not on these lists renders as an em dash. No label is invented for a value that has
+// not been seen — a wrong equipment label on a booking screen is worse than no label.
+//
+// ⚠ trailerDetails is NOT used, and could not be: .assetId, .assetType, .assetSource and
+// .trailerLoadingStatus are null in ALL 253 entries, and .assetOwner (AZNG/NCSL/HUBG/AZNU) is not
+// in the record projection — which this task must not change.
+var EQUIPMENT_LABELS = {
+  FIFTY_THREE_FOOT_TRUCK:    "53' Trailer",
+  FIFTY_THREE_FOOT_CONTAINER: "53' Container"
+};
+
+// PRELOADED/LIVE/DROP rendered as words, not initials. Amazon's own card shows a single letter
+// ("P"), and pairing samples/paired-card.html against paired-search.json PROVES that letter comes
+// from loadingType PRELOADED — but that pairing exists for ONE card and one value. Inventing "L"
+// and "D" for LIVE and DROP would be exactly the guess this task forbids, so the full word is
+// used for all three and the report offers the switch to initials if Ihor wants the tighter match.
+var HANDLING_LABELS = {
+  PRELOADED: 'Preloaded',
+  LIVE:      'Live',
+  DROP:      'Drop'
+};
+
+var EQUIPMENT_UNKNOWN = '—';   // em dash
+
+// "53' Trailer · Preloaded", or the parts that are known, or an em dash when nothing is.
+function formatEquipment(equipmentType, loadingType, unloadingType) {
+  try {
+    var bits = [];
+    if (equipmentType && Object.prototype.hasOwnProperty.call(EQUIPMENT_LABELS, equipmentType)) {
+      bits.push(EQUIPMENT_LABELS[equipmentType]);
+    }
+    // A stop is either loaded or unloaded, never both in the captures; take whichever applies.
+    var handling = loadingType || unloadingType || null;
+    if (handling && Object.prototype.hasOwnProperty.call(HANDLING_LABELS, handling)) {
+      bits.push(HANDLING_LABELS[handling]);
+    }
+    return bits.length ? bits.join(' · ') : EQUIPMENT_UNKNOWN;
+  } catch (e) {
+    logger.error('inlinePanel', 'formatEquipment failed', {
+      error: e, equipmentType: equipmentType, loadingType: loadingType, unloadingType: unloadingType
+    });
+    return EQUIPMENT_UNKNOWN;
+  }
+}
+
+// "2201 W 159TH ST, HARVEY, IL 60428-4804" — the parts that exist, in order, nothing invented.
+function formatStopAddress(stop) {
+  try {
+    var line = [];
+    if (stop.line1) line.push(stop.line1);
+    var tail = [];
+    if (stop.city) tail.push(stop.city);
+    if (stop.state) tail.push(stop.state);
+    var cs = tail.join(', ');
+    if (stop.zip) cs = cs ? cs + ' ' + stop.zip : stop.zip;
+    if (cs) line.push(cs);
+    return line.join(', ');
+  } catch (e) {
+    logger.error('inlinePanel', 'formatStopAddress failed', { error: e });
+    return '';
+  }
+}
+
+// Segment duration, DERIVED — the one field the payload has no path for (Stage E of the plan).
+// Last CHECKOUT minus first CHECKIN. Returns '' rather than a guess when either is missing.
+function segmentDuration(stops) {
+  try {
+    if (!stops || stops.length === 0) return '';
+    var first = stops[0].checkIn;
+    var last  = stops[stops.length - 1].checkOut;
+    if (!first || !last) return '';
+    var ms = new Date(last).getTime() - new Date(first).getTime();
+    if (!isFinite(ms) || ms <= 0) return '';
+    var mins = Math.round(ms / 60000);
+    var h = Math.floor(mins / 60);
+    var m = mins % 60;
+    return h > 0 ? (h + 'h ' + m + 'm') : (m + 'm');
+  } catch (e) {
+    logger.error('inlinePanel', 'segmentDuration failed', { error: e });
+    return '';
+  }
+}
+
+// Maps a captured record onto the shape buildPanelElement already renders.
+//
+// Deliberately a MAPPING, not a new renderer: the existing markup is textContent-only, carries
+// its data-testids and its --ext-* tokens, and has been through several rounds of review. Feeding
+// it a different source is a far smaller change than rewriting it, and keeps Stage B to what it
+// claims to be.
+//
+// SEGMENTS ARE loads[], iterated — never a fixed two-stop shape. Up to 3 loads and 4 stops each
+// were measured, and loads[] order is segment order (verified four ways; see the Stage B report).
+function recordToPanelData(record) {
+  logger.log('inlinePanel', 'recordToPanelData called');
+  try {
+    if (!record || !record.loads || record.loads.length === 0) return null;
+
+    var segments = [];
+    for (var li = 0; li < record.loads.length; li++) {
+      var l = record.loads[li];
+      var srcStops = l.stops || [];
+      var stops = [];
+      for (var si = 0; si < srcStops.length; si++) {
+        var st = srcStops[si];
+        stops.push({
+          num:       (typeof st.seq === 'number') ? st.seq : (si + 1),
+          name:      st.label || (st.city || 'Stop'),
+          address:   formatStopAddress(st),
+          arrival:   formatStopTime(st.checkIn, st.tz),
+          departure: formatStopTime(st.checkOut, st.tz),
+          // The stop's own handling, whichever applies at this end of the leg.
+          loadType:  st.loadingType || st.unloadingType || '',
+          loaded:    l.loadType === 'LOADED',
+          // THE FIELD THAT WAS MISSING (2026-08-17). The renderer has always read this; nothing
+          // ever set it, so every stop printed "undefined". Equipment is a property of the LOAD,
+          // handling a property of the STOP, so the cell needs both.
+          equipmentText: formatEquipment(l.equipmentType, st.loadingType, st.unloadingType)
+        });
+      }
+      var from = stops.length ? stops[0].name : '';
+      var to   = stops.length ? stops[stops.length - 1].name : '';
+      segments.push({
+        fromTo:   from + ' → ' + to,
+        miles:    (typeof l.distance === 'number')
+          ? (Math.round(l.distance * 10) / 10) + ' ' + (l.distanceUnit || 'mi') : '',
+        duration: segmentDuration(srcStops),
+        loadType: l.loadType || '',
+        loaded:   l.loadType === 'LOADED',
+        stops:    stops
+      });
+    }
+
+    return {
+      stopsCount: (typeof record.stopCount === 'number') ? (record.stopCount + ' stops') : '',
+      totalMiles: (typeof record.totalDistance === 'number')
+        ? (Math.round(record.totalDistance * 10) / 10) + ' ' + (record.distanceUnit || 'mi') : '',
+      payout: (typeof record.payout === 'number')
+        ? ((record.payoutUnit === 'USD' ? '$' : '') + record.payout.toFixed(2)) : null,
+      segments: segments
+    };
+  } catch (e) {
+    logger.error('inlinePanel', 'recordToPanelData failed — no panel rather than a wrong one', {
+      error: e, loadId: record && record.id
+    });
+    return null;
+  }
+}
+
+// ── STAGE B: THE PANEL BELONGS TO A LOAD ID ─────────────────────────────────────────────────
+//
+// The four rules this stage exists to enforce, in the order they are checked:
+//   1. No id on the card              -> no panel.
+//   2. No record for that id          -> NO PANEL AND NO INTERCEPTION. Amazon's own sheet opens
+//                                        exactly as Stage A guarantees; we simply add nothing.
+//   3. The id is not in the rendered main list, or its card is hidden by the city filter
+//                                     -> no panel. visibleAnchorFor() decides both.
+//   4. Otherwise                      -> render from the record, bound to that id.
+//
+// Every one of those returns false, and false has always meant "no panel" to every caller. There
+// is no branch that can leave a panel attached to the wrong load, because the panel is never
+// built from anything but the record belonging to the id under it.
+// ── PANEL GATE TRACE (2026-08-14) ───────────────────────────────────────────────────────────
+//
+// WHY THIS EXISTS. The panel silently never appeared, and finding out why meant reading five
+// files. Every decision point below now prints ONE line at DEBUG_LEVEL 3 naming which gate
+// stopped it and the id involved, so the question is answered by a console filter instead of an
+// investigation.
+//
+// The most important line is the FIRST one: `GATE 0 — reached`. Its absence is the whole answer
+// when nothing renders, because it means nothing ever called this function — which is exactly
+// what was wrong. A gate trace that only covers the gates cannot report "never asked".
+function panelGate(step, loadId, detail) {
+  logger.log('inlinePanel', 'PANEL GATE ' + step + (loadId ? '  id=' + loadId : '') +
+    (detail ? '  ' + detail : ''));
+}
+
 function showInlinePanel(cardElement) {
   logger.log('inlinePanel', 'showInlinePanel called');
-
-  injectPanelStyle();
+  panelGate('0 — reached', null, 'showInlinePanel was CALLED (absence of this line means no ' +
+    'caller ran: check initManualToggle and the auto-open path)');
 
   var old = document.getElementById(PANEL_ID);
   if (old) old.remove();
 
-  var data = readSheetData();
-  if (!data || !data.segments || data.segments.length === 0) {
-    logger.warn('inlinePanel', 'no sheet data to render');
-    return false;
-  }
-
-  // Phase 2 merge — store the detail struct under this load's loadId.
-  // readSheetData() does not know the loadId; resolve it the same way parseOneCard() does.
-  var sheetLoadIdEl = cardElement.querySelector('div[id]');
+  // Reads the CARD, never a sheet.
+  var sheetLoadIdEl = cardElement ? cardElement.querySelector('div[id]') : null;
   var sheetLoadId   = sheetLoadIdEl ? sheetLoadIdEl.id : null;
-  if (sheetLoadId) {
-    loadStore.mergeLoadUnit(sheetLoadId, { detail: data });
-  }
-
-  // NO ID, NO PANEL (2026-08-13). An unidentified panel is exactly what leaked across the
-  // saved-search tabs: nothing could later decide whether it still belonged. Refusing to render
-  // costs one panel; rendering one that cannot be verified costs a panel under the wrong load.
   if (!sheetLoadId) {
+    panelGate('1 STOPPED — no load id on the card', null,
+      'cardElement ' + (cardElement ? 'present' : 'NULL'));
     logger.warn('inlinePanel', 'no load id on the card — refusing to render an unbindable panel');
     return false;
   }
+  panelGate('1 ok — card carries an id', sheetLoadId);
+
+  // RULE 2. No record, no panel — and nothing intercepted. This is the case Ihor refused to
+  // accept as a regression, and the answer is that we do nothing at all: his click already
+  // reached Amazon before we were asked.
+  var haveGetter = (typeof getLoadRecord === 'function');
+  var record = haveGetter ? getLoadRecord(sheetLoadId) : null;
+  if (!record) {
+    // The two causes are very different and must not read the same: a missing GETTER means
+    // cityAssign never loaded, a missing RECORD means the capture never covered this load.
+    panelGate('2 STOPPED — no captured record', sheetLoadId,
+      haveGetter ? 'getLoadRecord() returned null — this id is in no captured response'
+                 : 'getLoadRecord is NOT DEFINED — cityAssign.js did not load');
+    logger.log('inlinePanel', 'no captured record for this load — leaving Amazon\'s own sheet to it',
+      { loadId: sheetLoadId });
+    return false;
+  }
+  panelGate('2 ok — record found', sheetLoadId,
+    'loads=' + (record.loads ? record.loads.length : 0));
+
+  var data = recordToPanelData(record);
+  if (!data || !data.segments || data.segments.length === 0) {
+    panelGate('3 STOPPED — record carries no usable segments', sheetLoadId,
+      'recordToPanelData returned ' + (data ? 'a shape with 0 segments' : 'null'));
+    logger.warn('inlinePanel', 'record carries no usable segments — no panel', { loadId: sheetLoadId });
+    return false;
+  }
+  panelGate('3 ok — mapped to ' + data.segments.length + ' segment(s)', sheetLoadId);
+
+  // Gates 4 (anchor missing / hidden by the filter) and 5 (the build throwing) are inside
+  // renderPanelFromData, which reports them itself.
+  return renderPanelFromData(cardElement, sheetLoadId, data);
+}
+
+// Everything below this point is the Stage B render path, currently unreachable. Left in place
+// deliberately: it is the panel's markup, its actions row and its Fast Book wiring, and Stage B
+// re-points it at the captured record rather than rewriting it.
+// The render half, now reached from showInlinePanel() with a record-derived `data` and an id
+// resolved by the caller. Unchanged in what it BUILDS — textContent only, data-testids, --ext-*
+// tokens — only in where its data comes from.
+function renderPanelFromData(cardElement, sheetLoadId, data) {
+  logger.log('inlinePanel', 'renderPanelFromData called', { loadId: sheetLoadId });
+
+  injectPanelStyle();
+
+  // Phase 2 merge, unchanged: the detail struct is stored under this load's id so PAT and the
+  // rest of the app can read it without re-deriving anything.
+  loadStore.mergeLoadUnit(sheetLoadId, { detail: data });
 
   // NEVER INSERT WITHOUT A VISIBLE ANCHOR. Covers the detached-node case (the card element was
   // captured before a re-render) and the hidden-card case (the city filter hid it between the
@@ -1223,11 +1205,19 @@ function showInlinePanel(cardElement) {
   // handed — that reference is precisely what went stale.
   var anchor = visibleAnchorFor(sheetLoadId);
   if (!anchor) {
+    // The two reasons are indistinguishable to visibleAnchorFor but very different to diagnose,
+    // so name both possibilities rather than one guess.
+    var stillOnBoard = !!document.getElementById(sheetLoadId);
+    panelGate('4 STOPPED — no visible anchor', sheetLoadId,
+      stillOnBoard ? 'the card IS in the DOM, so it is hidden by the city filter or outside the ' +
+                     'main results list'
+                   : 'the id is not in the DOM at all — not in the rendered page');
     logger.log('inlinePanel', 'anchor card is missing or hidden — not rendering a floating panel', {
       loadId: sheetLoadId
     });
     return false;
   }
+  panelGate('4 ok — visible anchor resolved', sheetLoadId);
 
   var panel = buildPanelElement(data);
   panel.id  = PANEL_ID;
@@ -1299,7 +1289,16 @@ function showInlinePanel(cardElement) {
       } catch (e) {
         logger.error('inlinePanel', 'ext-action-post: on-demand Phase 1 parse failed', { error: e, loadId: sheetLoadId });
       }
-      openPostModal(sheetLoadId);
+      // F2 (2026-08-19): openPostModal is async. Dropping the promise here is what made a throw
+      // inside it invisible — no handler, no console error, no modal. openPostModal now catches
+      // its own failures and shows the dispatcher a dialog; this catch is the backstop for a
+      // rejection that escapes even that.
+      Promise.resolve()
+        .then(function () { return openPostModal(sheetLoadId); })
+        .catch(function (e) {
+          logger.error('inlinePanel', 'ext-action-post: openPostModal rejected — the modal did ' +
+            'not open', { error: e, message: e && e.message, stack: e && e.stack, loadId: sheetLoadId });
+        });
     });
   }
 
@@ -1342,6 +1341,7 @@ function showInlinePanel(cardElement) {
   // Ownership is here (set) and in removeInlinePanel (clear); initManualToggle no longer touches it.
   currentPanelCard = anchor;
 
+  panelGate('5 ok — PANEL RENDERED', sheetLoadId, data.segments.length + ' segment(s)');
   logger.log('inlinePanel', 'panel rendered', { segments: data.segments.length });
   return true;
 }
@@ -1351,16 +1351,288 @@ function removeInlinePanel() {
   // covers every path that matters — content.js's clearPipelineDom() calls removeInlinePanel(),
   // and clearPipelineDom() is itself called by deactivateExtensionUI() (logout / auth-gate
   // close) AND by every shouldContinue()-failing bail-out checkpoint in runDetectionPipeline.
-  // Also covers the toggle-off path below. Without this, a poll started just before logout
-  // would still fire and re-create the panel after everything had been torn down.
-  cancelSheetPoll();
-
+  // Also covers the toggle-off path below.
+  //
+  // 2026-08-14: the cancelSheetPoll() call that used to open this function is gone with the
+  // poller itself. Its whole purpose was to stop a queued sheet-poll tick from re-creating the
+  // panel after teardown — there is no poll and no tick any more, so there is nothing to cancel.
   var old = document.getElementById(PANEL_ID);
   if (old) old.remove();
   currentPanelCard = null;
   if (_fastBookStorageListener) {
     chrome.storage.onChanged.removeListener(_fastBookStorageListener);
     _fastBookStorageListener = null;
+  }
+}
+
+// ── CLICKDIAG (2026-08-19) — the click-zone mismatch ──────────────────────────────────────
+//
+// REPORTED LIVE: clicking the CENTRE of a card highlights it, opens Amazon's sheet and expands
+// our accordion. Clicking the very EDGE — a few pixels at the top or bottom — expands ONLY our
+// accordion. The hazard is that the highlighted load and the load our panel shows can then be
+// DIFFERENT loads.
+//
+// STRICTLY PASSIVE. Registered in the CAPTURE phase so it reads the DOM as it was at the click,
+// before our own handler renders anything. It never calls preventDefault or stopPropagation, so
+// it cannot swallow or reorder anything: capture-phase listeners that do neither are invisible to
+// every other handler. The existing click handler in initManualToggle() is untouched.
+//
+// ⚠ WHAT CANNOT BE READ, AND IS THEREFORE NOT CLAIMED. Amazon is a React app; its click handlers
+// are synthetic and attached at the root, not as DOM attributes. There is NO way for a content
+// script to enumerate them — getEventListeners() is a DevTools-only API and is not available
+// here. So C3 does NOT report "Amazon's listener". It reports what IS readable on the nodes:
+// anchors, buttons, role attributes, tabindex, and the click GEOMETRY relative to each. Anything
+// stronger than that would be a guess.
+//
+// Registered only when the debug flag is on, so a shipped build carries no extra listener at all.
+
+// The bare-UUID shape, as documented in AMAZON_SELECTORS.md ("Count cards by ID SHAPE"). Reuses
+// cityAssign's constant when that file is loaded so there is one definition in practice.
+function clickDiagUuidRe() {
+  if (typeof CARD_UUID_RE !== 'undefined') return CARD_UUID_RE;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+}
+
+function clickDiagEnabled() {
+  return (typeof CITY_ASSIGN_DEBUG !== 'undefined') && CITY_ASSIGN_DEBUG;
+}
+
+// A node as one readable line. Never a css-<hash> anchor — the classes are PRINTED as evidence,
+// never selected on.
+function clickDiagDescribe(el) {
+  try {
+    if (!el || !el.tagName) return '(no element)';
+    var cls = String(el.className || '');
+    if (cls.length > 90) cls = cls.slice(0, 90) + '…';
+    var id = el.id ? ' id=' + el.id : '';
+    var role = (el.getAttribute && el.getAttribute('role')) ? ' role=' + el.getAttribute('role') : '';
+    var ti = (el.getAttribute && el.getAttribute('tabindex') !== null &&
+              el.getAttribute('tabindex') !== undefined)
+      ? ' tabindex=' + el.getAttribute('tabindex') : '';
+    var testid = (el.getAttribute && el.getAttribute('data-testid'))
+      ? ' data-testid=' + el.getAttribute('data-testid') : '';
+    return '<' + String(el.tagName).toLowerCase() + '>' + id + role + ti + testid +
+           (cls ? '  class="' + cls + '"' : '  (no class)');
+  } catch (e) {
+    logger.error('inlinePanel', 'clickDiagDescribe failed — diagnostics only', { error: e });
+    return '(describe failed)';
+  }
+}
+
+// Is this node one the DOM itself marks as interactive? Anchors and buttons are unambiguous;
+// role and tabindex are the only other readable signals. This is a proxy, and is labelled as one.
+function clickDiagInteractive(el) {
+  try {
+    if (!el || !el.tagName) return null;
+    var tag = String(el.tagName).toLowerCase();
+    if (tag === 'a') return 'anchor';
+    if (tag === 'button') return 'button';
+    if (!el.getAttribute) return null;
+    var role = el.getAttribute('role');
+    // role="img" is NOT interactive — it is on the icon spans and would otherwise dominate this
+    // report. Measured in samples/paired-card.html: 5 role="img", 0 anchors, 0 buttons.
+    if (role && role !== 'img' && role !== 'presentation' && role !== 'none') return 'role=' + role;
+    var ti = el.getAttribute('tabindex');
+    if (ti !== null && ti !== undefined && String(ti) !== '-1') return 'tabindex=' + ti;
+    return null;
+  } catch (e) {
+    logger.error('inlinePanel', 'clickDiagInteractive failed — diagnostics only', { error: e });
+    return null;
+  }
+}
+
+// Distance from a point to each edge of a rect, so "a few pixels at the top" becomes a number.
+function clickDiagEdges(rect, x, y) {
+  return 'top+' + Math.round(y - rect.top) + ' bottom+' + Math.round(rect.bottom - y) +
+         ' left+' + Math.round(x - rect.left) + ' right+' + Math.round(rect.right - x) +
+         '  (card is ' + Math.round(rect.width) + 'x' + Math.round(rect.height) + ')';
+}
+
+function clickDiagPointInRect(rect, x, y) {
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+// The id our own render path would resolve for this card — deliberately the SAME expression
+// showInlinePanel() uses, so this reports what the panel will actually bind to, not what it
+// ought to. Note it takes the FIRST div[id] and does NOT filter by UUID shape.
+function clickDiagOurLoadId(card) {
+  try {
+    var el = card ? card.querySelector('div[id]') : null;
+    return el ? el.id : null;
+  } catch (e) {
+    logger.error('inlinePanel', 'clickDiagOurLoadId failed — diagnostics only', { error: e });
+    return null;
+  }
+}
+
+// The first bare-UUID id inside Amazon's own detail sheet, if there is one. NOT confirmed from a
+// capture — there is no sheet sample on disk — so the line says so rather than asserting it.
+function clickDiagSheetLoadId() {
+  try {
+    var sheet = document.querySelector(SHEET_SELECTOR);
+    if (!sheet) return { present: false, id: null };
+    var re = clickDiagUuidRe();
+    var ids = sheet.querySelectorAll('div[id]');
+    for (var i = 0; i < ids.length; i++) {
+      if (re.test(ids[i].id)) return { present: true, id: ids[i].id };
+    }
+    return { present: true, id: null };
+  } catch (e) {
+    logger.error('inlinePanel', 'clickDiagSheetLoadId failed — diagnostics only', { error: e });
+    return { present: false, id: null };
+  }
+}
+
+function initClickZoneDiagnostic() {
+  logger.log('inlinePanel', 'initClickZoneDiagnostic called');
+  try {
+    if (window.__extClickDiagInit) return;
+    if (!clickDiagEnabled()) return;          // shipped build: no listener is registered at all
+    window.__extClickDiagInit = true;
+
+    document.addEventListener('click', function (ev) {
+      try {
+        var target = ev.target;
+        if (!target || !target.closest) return;
+
+        // Scope: only clicks inside the MAIN results list. findMainResultsList() is cityAssign's
+        // and already excludes the Similar-matches list.
+        var mainList = (typeof findMainResultsList === 'function') ? findMainResultsList() : null;
+        if (!mainList || !mainList.contains || !mainList.contains(target)) return;
+
+        // ── C2 (computed first, because C1's path terminates at this element) ──
+        // EXACTLY the selector initManualToggle() uses. Not the wider card-shape list.
+        var card = target.closest('div.load-card, div.load-card__selected');
+        var ourId = clickDiagOurLoadId(card);
+        var re = clickDiagUuidRe();
+
+        logger.log('inlinePanel', 'CLICKDIAG ─────────── click in the main results list ───────────');
+
+        // ── C1 TARGET ──
+        logger.log('inlinePanel', 'CLICKDIAG C1 TARGET   ' + clickDiagDescribe(target));
+        var hops = 0, node = target;
+        while (node && node !== mainList && hops < 12) {
+          logger.log('inlinePanel', 'CLICKDIAG C1 PATH     ' + (node === target ? '  target  ' : '  ^' + hops + '      ') +
+            clickDiagDescribe(node) + (node === card ? '   <<< THE CARD our handler matched' : ''));
+          if (node === card) break;
+          node = node.parentElement; hops++;
+        }
+        if (!card) {
+          logger.log('inlinePanel', 'CLICKDIAG C1 PATH     (no div.load-card ancestor — our handler ' +
+            'would NOT treat this as a card click)');
+        }
+
+        // ── C2 OUR MATCH ──
+        if (!card) {
+          logger.log('inlinePanel', 'CLICKDIAG C2 OURS     no match — initManualToggle() returns early ' +
+            'on this click, so nothing of ours runs');
+        } else {
+          logger.log('inlinePanel', 'CLICKDIAG C2 OURS     matched ' +
+            (target === card
+              ? '** THE CARD CONTAINER ITSELF ** — the click landed on the container, not on any ' +
+                'inner element. closest() matches the container, so OUR handler fires for clicks ' +
+                'anywhere in its box, including its own padding and border.'
+              : 'an ancestor ' + hops + ' hop(s) above the target: ' + clickDiagDescribe(card)) +
+            '  ||  resolved load id: ' + (ourId === null ? 'NONE' : ourId) +
+            (ourId === null ? '' : (re.test(ourId)
+              ? '  (bare UUID, as expected)'
+              : '  ** NOT A BARE UUID — showInlinePanel takes the FIRST div[id] and does not ' +
+                'filter by shape, so this is what the panel would bind to **')));
+        }
+
+        // ── C3 AMAZON'S ZONE ──
+        logger.log('inlinePanel', 'CLICKDIAG C3 ZONE     ⚠ Amazon is React: its click handlers are ' +
+          'synthetic and cannot be enumerated from a content script (getEventListeners is ' +
+          'DevTools-only). What follows is what the DOM itself marks, plus geometry — not a ' +
+          'listener list.');
+        var innermost = null, walker = target, guard = 0;
+        while (walker && walker !== mainList && guard < 12) {
+          var kind = clickDiagInteractive(walker);
+          if (kind) {
+            logger.log('inlinePanel', 'CLICKDIAG C3 ZONE     interactive ancestor [' + kind + ']  ' +
+              clickDiagDescribe(walker));
+            if (!innermost) innermost = walker;
+          }
+          if (walker === card) break;
+          walker = walker.parentElement; guard++;
+        }
+        var x = ev.clientX, y = ev.clientY;
+        if (!innermost) {
+          logger.log('inlinePanel', 'CLICKDIAG C3 ZONE     ** NO anchor, button, role or tabindex ' +
+            'anywhere between the target and the card ** — nothing the DOM marks as clickable ' +
+            'was hit. Amazon may still handle it, but nothing readable says so.');
+        } else {
+          var ir = innermost.getBoundingClientRect();
+          var inside = clickDiagPointInRect(ir, x, y);
+          logger.log('inlinePanel', 'CLICKDIAG C3 ZONE     click (' + Math.round(x) + ',' + Math.round(y) +
+            ') is ' + (inside ? 'INSIDE' : '** OUTSIDE **') + ' the innermost interactive element\'s box ' +
+            '[' + Math.round(ir.left) + ',' + Math.round(ir.top) + ' ' + Math.round(ir.width) + 'x' +
+            Math.round(ir.height) + ']');
+        }
+        if (card) {
+          var cr = card.getBoundingClientRect();
+          logger.log('inlinePanel', 'CLICKDIAG C3 ZONE     distance from the CARD edges: ' +
+            clickDiagEdges(cr, x, y));
+        }
+
+        // ── C4 OUTCOME, 300 ms later ──
+        var classesBefore = card ? String(card.className || '') : '';
+        var sheetBefore = clickDiagSheetLoadId();
+        var cardRef = card;
+        setTimeout(function () {
+          try {
+            var addedList = [];
+            if (cardRef) {
+              var before = classesBefore.split(/\s+/);
+              var after = String(cardRef.className || '').split(/\s+/);
+              for (var a = 0; a < after.length; a++) {
+                if (after[a] && before.indexOf(after[a]) === -1) addedList.push(after[a]);
+              }
+            }
+            // Which card the board currently shows as selected. 'load-card__selected' is already
+            // part of this codebase's own documented selector list — not a guess.
+            var selEl = document.querySelector('div.load-card__selected');
+            var selIdEl = selEl ? selEl.querySelector('div[id]') : null;
+            var selId = selIdEl ? selIdEl.id : null;
+
+            var panel = document.getElementById(PANEL_ID);
+            var panelId = panel ? panel.getAttribute('data-load-id') : null;
+            var sheetAfter = clickDiagSheetLoadId();
+
+            var gotHighlight = addedList.length > 0 || !!selEl;
+            var sheetChanged = (sheetBefore.id !== sheetAfter.id);
+            var panelRendered = !!panel;
+
+            logger.log('inlinePanel', 'CLICKDIAG C4 OUTCOME  +300ms  |  card gained a class: ' +
+              (addedList.length ? 'YES [' + addedList.join(' ') + ']' : 'no') +
+              '  |  Amazon sheet id changed: ' + (sheetChanged ? 'YES' : 'no') +
+              ' (' + (sheetBefore.id || (sheetBefore.present ? 'no UUID readable in the sheet' : 'no sheet')) +
+              ' -> ' + (sheetAfter.id || (sheetAfter.present ? 'no UUID readable in the sheet' : 'no sheet')) + ')' +
+              '  |  our panel rendered: ' + (panelRendered ? 'YES' : 'no'));
+            logger.log('inlinePanel', 'CLICKDIAG C4 IDS      highlighted card: ' + (selId || 'NONE') +
+              '   |   our panel: ' + (panelId || 'NONE') +
+              '   |   ' + ((selId && panelId && selId !== panelId)
+                ? '*** MISMATCH — the highlighted load and the panel\'s load are DIFFERENT ***'
+                : (panelRendered && !selId
+                    ? '*** PANEL WITHOUT A HIGHLIGHT — ours expanded, Amazon did not select ***'
+                    : (selId && panelId ? 'match' : 'nothing to compare'))));
+            logger.log('inlinePanel', 'CLICKDIAG C4 SUMMARY  highlight=' + gotHighlight +
+              '  sheetChanged=' + sheetChanged + '  panel=' + panelRendered);
+          } catch (e2) {
+            logger.error('inlinePanel', 'CLICKDIAG outcome pass failed — diagnostics only', { error: e2 });
+          }
+        }, 300);
+      } catch (e) {
+        // Must never affect the click. Swallowed after logging, and nothing here can propagate:
+        // preventDefault and stopPropagation are never called anywhere in this listener.
+        logger.error('inlinePanel', 'CLICKDIAG failed — diagnostics only, the click is unaffected',
+          { error: e });
+      }
+    }, true);   // CAPTURE phase, passive
+
+    logger.log('inlinePanel', 'CLICKDIAG active — passive capture-phase observer registered');
+  } catch (e) {
+    logger.error('inlinePanel', 'initClickZoneDiagnostic failed', { error: e });
   }
 }
 
@@ -1371,6 +1643,40 @@ function initManualToggle() {
   document.addEventListener('click', function (ev) {
     var card = ev.target.closest('div.load-card, div.load-card__selected');
     if (!card) return;
+
+    // CONTAINER-PADDING CLICK — IGNORE IT ENTIRELY (2026-08-19).
+    //
+    // MEASURED, six clicks with CLICKDIAG on 2026-08-19. When the click target is a DESCENDANT of
+    // the card, Amazon highlights the card (load-card__selected) and our panel renders, and the
+    // two ids MATCH. When the target IS div.load-card itself — the container's own padding, a few
+    // pixels along the top and bottom of a 72 px card — Amazon does NOT highlight, but our panel
+    // rendered anyway. All three such clicks logged
+    //     *** MISMATCH — the highlighted load and the panel's load are DIFFERENT ***
+    // which is the real hazard: the dispatcher reads one load's data believing it belongs to the
+    // load Amazon still has selected.
+    //
+    // THE RULE IS TARGET IDENTITY, NOT GEOMETRY. The offsets above (top+4, bottom+6, bottom+7 for
+    // the ignored clicks; top+14, top+19, top+31, bottom+42 for the working ones) were how the
+    // problem was MEASURED — they are deliberately not how it is decided. No pixel threshold, no
+    // bounding box, no offset: if the click hit no child of the card, it is not a card click.
+    //
+    // ⚠ WE DO NOT TRY TO DETECT AMAZON'S LISTENER. Amazon is React, its handlers are synthetic and
+    // cannot be enumerated from a content script. This rule never asks what Amazon bound to; it
+    // only asks whether the dispatcher's click landed on anything at all inside the card.
+    //
+    // NOTHING IS INTERCEPTED, here or anywhere in this handler: no preventDefault, no
+    // stopPropagation. The click still reaches Amazon exactly as it would with the extension
+    // uninstalled — including this ignored case, where Amazon's own answer is also to do nothing.
+    //
+    // Placed immediately after the "not a card at all" return and BEFORE everything else, so an
+    // ignored click resolves no load id, renders no panel, touches no state and — importantly —
+    // does not stop the refresh loop.
+    if (ev.target === card) {
+      logger.log('inlinePanel', 'click ignored — landed on the card container itself, not on any ' +
+        'descendant (container padding). Amazon does not select the card for this click either, ' +
+        'so opening our panel would show a load the board has not highlighted.');
+      return;
+    }
 
     // Login gate (2026-07-20): this listener is registered once and never removed
     // (window.__extManualToggleInit guard above), so it must gate itself on every click
@@ -1419,21 +1725,39 @@ function initManualToggle() {
       logger.error('inlinePanel', 'tabState stop failed on manual card open', { error: e });
     }
 
-    // Toggle on: capture a fingerprint of the currently open sheet BEFORE polling starts.
-    // waitForSheet will only fire the callback once the sheet has changed (i.e., Amazon has
-    // replaced the previous card's sheet with the new one), preventing stale-sheet renders.
-    var prevSheet       = document.querySelector(SHEET_SELECTOR);
-    var prevFingerprint = prevSheet ? sheetFingerprint(prevSheet) : null;
+    // RENDER (STAGE B, wired 2026-08-14).
+    //
+    // ⚠ THIS CALL IS THE WHOLE FEATURE, AND IT WAS MISSING. Stage A removed the sheet poll that
+    // used to end this handler and left a note saying Stage B would replace it; Stage B rebuilt
+    // showInlinePanel() from the captured record and never re-added the call. The function was
+    // correct and unreachable, so clicking a card opened Amazon's sheet and nothing of ours —
+    // with no error anywhere, because nothing ran. 1220 tests passed throughout, one of which
+    // asserted the absence of this very call.
+    //
+    // NO POLL, NO SLEEP: the record is already in memory before the card renders, which is the
+    // entire point of rendering from the capture rather than from the DOM.
+    //
+    // The try/catch is not decoration. This handler is registered on `document` and is not the
+    // only listener on a card click — an uncaught throw here would break the click for whatever
+    // else is bound, and would do it silently from the dispatcher's side. showInlinePanel() only
+    // ever returns false when it declines; a throw means a real defect, so it is logged at error
+    // level and visible at the shipped DEBUG_LEVEL.
+    try {
+      showInlinePanel(card);
+    } catch (e) {
+      logger.error('inlinePanel', 'manual card open — panel render threw', { error: e });
+    }
 
-    waitForSheet(function () {
-      try {
-        showInlinePanel(card);
-        // currentPanelCard ownership has moved to showInlinePanel — no assignment here
-      } catch (e) {
-        logger.warn('inlinePanel', 'manual toggle render failed', { error: e });
-      }
-    }, prevFingerprint, card); // `card` tags this run — see waitForSheet's guard 3
+    // ⚠ THE CLICK IS STILL NOT INTERCEPTED. There is no preventDefault and no stopPropagation
+    // anywhere in this handler, so the click reaches Amazon and its own detail sheet opens
+    // exactly as it would with the extension uninstalled — including for a load whose record we
+    // never captured, where showInlinePanel() declines and we add nothing. That is Ihor's "no
+    // regression is accepted" requirement, and it still holds by construction.
   });
+
+  // CLICKDIAG (2026-08-19). Registered alongside, never inside, the handler above — that
+  // handler is not modified in any way by this diagnostic.
+  initClickZoneDiagnostic();
 
   logger.log('inlinePanel', 'manual toggle initialized');
 }

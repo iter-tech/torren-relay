@@ -216,6 +216,12 @@ function parseLoads() {
       results.push(load);
       // Phase 1 merge into LoadUnit store — additive only, does not change the return value.
       // _element is intentionally excluded (DOM node, never serialized).
+      // PART 2 (2026-08-20): file the badge letter beside the captured record, under the same id,
+      // so labelled P/R pairs accumulate as Ihor works the board. The letter is already in hand —
+      // no extra DOM read. Records only; affects nothing here.
+      if (typeof noteTrailerLabel === 'function') {
+        noteTrailerLabel(load.loadId, load.trailerLetter);
+      }
       loadStore.mergeLoadUnit(load.loadId, {
         payout:          load.payout,
         pricePerMile:    load.pricePerMile,

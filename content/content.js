@@ -62,16 +62,35 @@ chrome.storage.onChanged.addListener(function (changes, area) {
 // legacy behavior. Toggling takes effect on the very next tick — no reload needed.
 var sharedRefreshLimitEnabled = true; // default; corrected by the async seed below
 
+// ── D1 (2026-08-20, Ihor): THE SHARED CROSS-TAB REFRESH LIMIT SHIPS OFF ───────────────────
+//
+// HIS REASONING, recorded so this is not quietly reversed: silently slowing refreshes while
+// the dispatcher is looking at "Refresh every 2.5s" would read as the extension being BROKEN,
+// not as protection. Dispatchers already know Amazon throttles and they manage their own tab
+// count. Honesty about what the extension does outranks the extra safety margin here.
+//
+// The underlying shared-limit machinery in background.js is DELIBERATELY LEFT INTACT and is
+// simply never asked for — see BACKLOG: deferred to a later release, not deleted. Flipping
+// this one constant re-enables the whole path.
+//
+// ⚠ THIS DOES NOT DISABLE BACKOFF. grantOrDenyPermit() checks backoffUntil FIRST, before it
+// ever looks at sharedLimitEnabled, so a 429/502/503/504 still pauses every tab with the
+// shared limit off. Verified in background.js, not assumed.
+var SHARED_LIMIT_SHIPS_ENABLED = false;
+
 chrome.storage.local.get(STORAGE_KEYS.SHARED_LIMIT_ENABLED, function (data) {
   var v = data[STORAGE_KEYS.SHARED_LIMIT_ENABLED];
-  sharedRefreshLimitEnabled = v !== false;
+  // D1: the stored preference is read but never allowed to turn the shared limit ON.
+  sharedRefreshLimitEnabled = SHARED_LIMIT_SHIPS_ENABLED && (v !== false);
   logger.log('content', 'sharedRefreshLimitEnabled seeded', { value: sharedRefreshLimitEnabled });
 });
 
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== 'local') return;
   if (changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED] === undefined) return;
-  sharedRefreshLimitEnabled = changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED].newValue !== false;
+  // D1: same clamp on the cross-tab sync — no stored value can switch it on.
+  sharedRefreshLimitEnabled = SHARED_LIMIT_SHIPS_ENABLED &&
+    (changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED].newValue !== false);
   logger.log('content', 'sharedRefreshLimitEnabled synced from another tab', { value: sharedRefreshLimitEnabled });
 });
 
@@ -101,6 +120,113 @@ window.addEventListener('message', function (ev) {
 
 // DEVELOPMENT DIAGNOSTIC (2026-07-31) — response-body capture summary, shipped OFF.
 //
+// PLAN 10 CONSOLE COMMANDS. console.* on purpose so they work at the shipped DEBUG_LEVEL.
+//   __EXT_DEBUG.rateDiagOn()        start collecting grants across all tabs (clears first)
+//   __EXT_DEBUG.rateDiag()          print the aggregate: rate across ALL tabs vs configured
+//   __EXT_DEBUG.rateDiagOff()       stop collecting
+//   __EXT_DEBUG.simulateRateLimit() inject a 503 into the REAL backoff path
+//   __EXT_DEBUG.simulateRecovery()  inject a 200 into the REAL path, clearing the backoff
+if (typeof window !== 'undefined') {
+  window.__EXT_DEBUG = window.__EXT_DEBUG || {};
+  function _rd(action, extra) {
+    var msg = { type: 'RATE_DIAG', action: action };
+    if (extra) for (var k in extra) msg[k] = extra[k];
+    return chrome.runtime.sendMessage(msg).then(function (r) { console.log('[EXT] RATE_DIAG ' + action, r); return r; });
+  }
+  window.__EXT_DEBUG.rateDiagOn        = function () { return _rd('on'); };
+  window.__EXT_DEBUG.rateDiagOff       = function () { return _rd('off'); };
+  window.__EXT_DEBUG.rateDiagClear     = function () { return _rd('clear'); };
+  window.__EXT_DEBUG.rateDiag          = function () { return rateDiagReport(); };
+  window.__EXT_DEBUG.simulateRateLimit = function (s) { return _rd('simulate', { status: s || 503 }); };
+  window.__EXT_DEBUG.simulateRecovery  = function () { return _rd('recover'); };
+}
+
+// ── PLAN 10 DIAGNOSTICS (2026-08-20) ──────────────────────────────────────────────────────
+//
+// The aggregate request rate is a property of ALL tabs together. background.js is the only place
+// that sees every tab, so it records granted permits; these helpers read that back so ANY ONE
+// console shows the whole picture.
+//
+// ⚠ MEASUREMENT ONLY. Nothing here changes the interval, the backoff curve or WATCH_PATH.
+//
+// ⚠ THERE IS NO TOKEN, LEASE OR TURN TO HOLD, and this is worth stating because it is easy to
+// assume otherwise. The mechanism is a PERMIT with a single GLOBAL FLOOR: background.js keeps one
+// "lastGrantedAt" in chrome.storage.local and refuses any permit until lastGrantedAt + floorMs
+// has passed, serving tabs first-come-first-served. No tab ever "has the turn" — every tab asks
+// every tick and waits its place in the queue. So the state line reports the global floor and the
+// backoff, which is what actually exists.
+
+// A short, stable identity for THIS tab, so four consoles are told apart at a glance. Random per
+// page load; it never leaves the tab except inside these diagnostic lines.
+var RATE_DIAG_TAB = 'tab-' + Math.random().toString(36).slice(2, 6).toUpperCase();
+var _rateDiagLastRequestAt = null;
+
+function rateDiagEnabled() {
+  return (typeof CITY_ASSIGN_DEBUG !== 'undefined') && CITY_ASSIGN_DEBUG;
+}
+
+// One line per outbound board request from THIS tab: when, and how long since its previous one.
+function rateDiagNoteRequest(permit, askedAt) {
+  logger.log('content', 'rateDiagNoteRequest called');
+  try {
+    if (!rateDiagEnabled()) return;
+    var now = Date.now();
+    var sinceMine = (_rateDiagLastRequestAt === null) ? null : (now - _rateDiagLastRequestAt);
+    if (permit && permit.granted) _rateDiagLastRequestAt = now;
+    logger.log('content', 'RATEDIAG REQUEST  ' + RATE_DIAG_TAB +
+      '  at ' + new Date(now).toISOString().slice(11, 23) +
+      '  |  ' + (permit && permit.granted ? 'GRANTED' : 'DENIED') +
+      '  |  waited ' + (now - askedAt) + ' ms for the permit' +
+      '  |  since THIS tab\'s previous request: ' +
+      (sinceMine === null ? '(first)' : sinceMine + ' ms') +
+      (permit && permit.backoffUntil
+        ? '  |  BACKOFF until ' + new Date(permit.backoffUntil).toISOString().slice(11, 23) : ''));
+  } catch (e) {
+    logger.error('content', 'rateDiagNoteRequest failed — diagnostics only', { error: e });
+  }
+}
+
+// THE AGGREGATE VIEW. console.* on purpose, like dumpTrailerLabels: it must work at the shipped
+// DEBUG_LEVEL so Ihor runs it without reconfiguring anything mid-test.
+async function rateDiagReport() {
+  try {
+    var r = await chrome.runtime.sendMessage({ type: 'RATE_DIAG', action: 'read' });
+    if (!r || !r.ok) { console.log('[EXT] RATEDIAG unavailable', r); return null; }
+    var now = Date.now();
+    var recent = (r.grants || []).filter(function (g) { return now - g.t <= 60000; });
+    var byTab = {};
+    recent.forEach(function (g) { byTab[g.tab] = (byTab[g.tab] || 0) + 1; });
+    var mean = null;
+    if (recent.length > 1) {
+      var sorted = recent.slice().sort(function (a, b) { return a.t - b.t; });
+      mean = Math.round((sorted[sorted.length - 1].t - sorted[0].t) / (sorted.length - 1));
+    }
+    console.log('[EXT] RATEDIAG AGGREGATE  ' + RATE_DIAG_TAB +
+      '  |  collecting: ' + (r.on ? 'ON' : '** OFF — run __EXT_DEBUG.rateDiagOn() first **') +
+      '  |  requests across ALL tabs in the last 60s: ' + recent.length +
+      '  |  mean interval between them: ' + (mean === null ? 'n/a' : mean + ' ms') +
+      '  |  configured global interval: ' + r.floorMs + ' ms' +
+      '  |  ' + (mean === null ? '(need 2+ requests)'
+        : (Math.abs(mean - r.floorMs) <= r.floorMs * 0.25
+            ? 'AGREES — the aggregate matches the global interval'
+            : '** DISAGREES — the aggregate is ' + (mean < r.floorMs ? 'FASTER' : 'slower') +
+              ' than configured **')));
+    console.log('[EXT] RATEDIAG PER TAB    ' + JSON.stringify(byTab) +
+      '  |  active tabs background knows about: ' + r.tabCount);
+    console.log('[EXT] RATEDIAG STATE      global lastGrantedAt ' +
+      (r.state.lastGrantedAt ? new Date(r.state.lastGrantedAt).toISOString().slice(11, 23) : 'never') +
+      '  |  backoffUntil ' +
+      (r.state.backoffUntil ? new Date(r.state.backoffUntil).toISOString().slice(11, 23) : 'none') +
+      '  |  backoffStepIndex ' + r.state.backoffStepIndex +
+      '  |  rateLimited ' + r.state.rateLimited +
+      '  |  (no tab "holds" anything — one global floor, first-come-first-served)');
+    return { recent: recent.length, meanMs: mean, floorMs: r.floorMs, state: r.state };
+  } catch (e) {
+    logger.error('content', 'rateDiagReport failed', { error: e });
+    return null;
+  }
+}
+
 // Deliberately a SEPARATE listener from the REPORT_RESULT relay above, not a branch inside
 // it: that relay, the rate-limit path and the abort handling are done and verified, and this
 // keeps their diff at zero lines.
@@ -174,6 +300,12 @@ function shouldContinue() {
 // So this checks the AUTH GATE only. A logout or deactivate still aborts, exactly as before;
 // our own deliberate stop does not. The distinction matters: `running === false` here means
 // "we are finishing an open", while a closed gate means "the extension is being torn down".
+// ⚠ ORPHANED BY STAGE A (2026-08-14) — currently has no caller.
+//
+// It existed for the two post-await checkpoints in the auto-open path, which are gone with the
+// 800ms settle they guarded. NOT deleted: it is PLAN 7b's companion fix, and 7b's whole point was
+// that stopping the loop early requires a gate-only predicate. Stage C re-opens this path; if it
+// truly needs no await then this can go with it, deliberately, rather than by drift now.
 function gateStillOpen() {
   return (typeof isAuthGateActiveSync === 'function') ? isAuthGateActiveSync() : false;
 }
@@ -357,21 +489,17 @@ async function runDetectionPipeline(sourceTag) {
       source: sourceTag, newCount: result.newCount, opened: opened
     });
 
-    if (autoOpen && opened) {
-      await sleep(800);
-      // Gate-only: `running` is false because WE just set it. See gateStillOpen().
-      if (!gateStillOpen()) {
-        logger.log('content', 'runDetectionPipeline: bailing — auth gate closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel' });
-        clearPipelineDom();
-        return;
-      }
-      try {
-        showInlinePanel(ordered[0]._element);
-        logger.log('content', 'runDetectionPipeline: inline panel shown', { source: sourceTag, topPayout: ordered[0].payout });
-      } catch (e) {
-        logger.warn('content', 'runDetectionPipeline: inline panel render failed', { source: sourceTag, error: e });
-      }
-    }
+    // 2026-08-14 (STAGE A): the 800ms settle and the render that followed it are GONE.
+    //
+    // The sleep existed for exactly one reason — to give Amazon's detail sheet time to finish
+    // opening so the scrape could read it. With the scrape removed there is nothing left to
+    // wait for, so waiting would be a delay with no purpose. The card is still opened by
+    // openTopNewLoad() above, which is what the dispatcher sees; OUR panel returns in Stage B
+    // (PLAN §29b) and, per §29c, will render with no fixed delay at all.
+    //
+    // The stop above is UNCHANGED and still runs before any await, which is what PLAN 7b
+    // requires. Removing this block makes that ordering trivially true rather than merely
+    // maintained: there is no await left on this path.
   } else if (surgeLoads.length > 0) {
     var surgeAutoOpen  = await storage.get(STORAGE_KEYS.AUTO_OPEN, true);
     if (!shouldContinue()) {
@@ -392,21 +520,8 @@ async function runDetectionPipeline(sourceTag) {
       source: sourceTag, surgeCount: surgeLoads.length, opened: surgeOpened
     });
 
-    if (surgeAutoOpen && surgeOpened) {
-      await sleep(800);
-      // Gate-only: `running` is false because WE just set it. See gateStillOpen().
-      if (!gateStillOpen()) {
-        logger.log('content', 'runDetectionPipeline: bailing — auth gate closed', { source: sourceTag, checkpoint: 'after 800ms settle, before showInlinePanel (surge)' });
-        clearPipelineDom();
-        return;
-      }
-      try {
-        showInlinePanel(orderedSurge[0]._element);
-        logger.log('content', 'runDetectionPipeline: inline panel shown for surge', { source: sourceTag, topPayout: orderedSurge[0].payout });
-      } catch (e) {
-        logger.warn('content', 'runDetectionPipeline: inline panel render failed for surge', { source: sourceTag, error: e });
-      }
-    }
+    // Same removal as the new-load branch above (STAGE A): no settle, no render. The surge card
+    // is still opened by openTopNewLoad(); only OUR panel is absent until Stage B.
   }
 }
 
@@ -432,8 +547,10 @@ async function orchestratorTick() {
     // modes (requirement: backoff is never optional). sharedRefreshLimitEnabled only tells
     // background.js whether to ALSO enforce the pacing floor on top of the backoff check.
     var permit;
+    var _rlAskedAt = Date.now();
     try {
       permit = await chrome.runtime.sendMessage({ type: 'REQUEST_PERMIT', sharedLimitEnabled: sharedRefreshLimitEnabled });
+      rateDiagNoteRequest(permit, _rlAskedAt);
     } catch (e) {
       logger.warn('content', 'orchestratorTick: permit request failed (service worker unreachable?) — skipping this tick', { error: e });
       return;

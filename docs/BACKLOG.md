@@ -4,6 +4,789 @@ Status key: **UI-BUILT** = HTML/CSS exists in popup, logic not wired | **PLANNED
 
 ---
 
+## ✅ SHIPPED 2026-08-13 → 2026-08-17 — the per-city phase and the inline-panel rebuild
+
+Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.md` §5).
+
+**Per-city filtering — the phase's headline.**
+- City buttons filter the board; "All" resets. Hide/show is `style.display` only, never removal.
+- **Range membership, not nearest-wins**: a load appears under EVERY active city within
+  `CITY_ASSIGN_MAX_MILES` (150). Ihor's decision — two nearby cities should both see a load
+  either driver could take.
+- **Auto-switch**: a new load in a non-active city pulls the view to it — unless a panel is open
+  or the loop is stopped, i.e. never while he is reading something.
+- **Unassigned loads stay visible**, counted on the "All" button, and the count is **clickable**
+  to inspect exactly which loads could not be placed and why.
+- **Per-page working set**: assignment and filtering follow the rendered page. We never touch
+  Amazon's pagination controls.
+- **Per-city deadhead**: Amazon's deadhead is the distance to the *nearest* selected city, so on a
+  load belonging to 2+ cities it is replaced with our own distance to the ACTIVE city. Single-city
+  loads are left alone — Amazon's figure is already right for them.
+
+**Capture layer.**
+- Bodies captured by piggybacking Amazon's own `Response.prototype.json` read.
+- **`/api/loadboard/recommendations/get` added** — the source of the "Recently added" cards. It
+  was being seen and discarded, which is why the NEWEST loads were the ones showing unassigned.
+- `pickBuffer()` replaced by a **merged, persistent id → coords map**.
+
+**Inline panel — rebuilt from captured API data (PLAN §29 Stages A + B).**
+- The click-then-scrape path is gone: 338 lines, every `.css-<hash>` selector, the 800 ms settle.
+- The panel is **bound to a load id** and cannot exist without its card visible in the rendered
+  main list — this killed the "panel opens under the wrong load" class of bug outright.
+- Per-leg segments iterate `loads[]`; stop times render in **each stop's own timezone**.
+
+**UI.**
+- The city row moved **into the top bar** — it no longer floats over Amazon's filter controls and
+  no longer appears on Trips. The bar is draggable and double-click re-docks it.
+- Reserved badge slots so buttons never resize; only the ACTIVE button is highlighted.
+
+---
+
+## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
+
+### 0s. ⏸ SHARED CROSS-TAB REFRESH LIMIT — deferred to a later release, NOT deleted
+
+Ihor's decision, 2026-08-20: the toggle is removed from the UI and the feature ships **off**.
+Silently slowing refreshes while the bar says "Refresh every 2.5s" reads as broken, not as
+protection; dispatchers know Amazon throttles and manage their own tab count.
+
+**Everything still exists:** `grantOrDenyPermit()`, the global `lastGrantedAt` floor, the FIFO
+`permitQueueTail`, `getGlobalPacingFloorMs()`, the active-tab registry, and `popup.js`'s
+null-guarded wiring. **Re-enabling is one constant** — `SHARED_LIMIT_SHIPS_ENABLED` in
+`content.js` — plus restoring the toggle markup in `popup.html`.
+
+⚠ **Backoff is NOT part of this and must never be made optional.** It is checked before the
+shared-limit branch and still pauses every tab.
+
+### 0t. 🔜 NOTIFICATION CENTRE IN THE POPUP — Ihor wants it, separate UI task
+
+A badge with an unread count, hover to read. Out of scope for the 2026-08-20 work, which
+deliberately put the throttling message in the top bar where the dispatcher is already looking.
+The message text and its tone requirement would carry over unchanged.
+
+### 0u. ❌ PRE-EMPTIVE WARNINGS ABOUT REFRESH SPEED OR TAB COUNT — deliberately NOT built
+
+They contradict 0s: we no longer count tabs or slow the dispatcher down, and warning before
+anything has happened would **alarm without cause**. Recorded so it is not proposed as an
+improvement later.
+
+### 0p. 🔴 P/R DETECTION — measured 2026-08-19, NOT in the record. Needs a labelled capture.
+
+Across **159 work opportunities / 506 stops**, **nothing** in a `/api/loadboard/search` response
+distinguishes a Provided load from a Required one. No `AMAZON_PROVIDED`/`CARRIER_OWNED` value,
+no bare `"P"`/`"R"`.
+
+#### ❌ `assetOwner` — REFUTED 2026-08-19. Tested and ruled out. DO NOT RE-DERIVE.
+
+**Two records with a KNOWN P badge carry DIFFERENT values:** `72e5184e` = `"AZNG"` (badge read
+from `samples/paired-card.html`) and `4c0565e4` = `"NCSL"` (Ihor confirmed live). A non-null or
+non-Amazon `assetOwner` does **not** mean carrier-owned, in either direction. It is also unusable
+in principle: 42 of 159 work opportunities carry two different owners across their own stops.
+
+Also refuted: `containerOwner == "EMPTY_CONTAINER_ID"` (`4c0565e4` has it, `72e5184e` — also P —
+does not). Cannot discriminate: `stopRequirementType` is `"CONTAINER"` in 146/146.
+
+#### ❌ C1 — "any stop LIVE means R". REFUTED 2026-08-19 by Ihor's board.
+
+Three **P** cards showed loading *Live/Drop*. Dead.
+
+#### ❌ C5 — "any DROP means P, all-LIVE means R". REFUTED 2026-08-19 by Ihor's board.
+
+Two **R** cards showed loading *Live/Drop*:
+COLUMBUS, IN → GROVEPORT, OH and TOTOWA, NJ → HAZLETON, PA.
+
+🔴 **Loading type does not determine the badge in either direction. Do not propose another
+loading-type rule.**
+
+#### 🔴 THE ANSWER: THE RESPONSE BODIES CANNOT DETERMINE THIS (api-samples §11)
+
+- **The request side is not captured.** `networkObserver.js` reads `init` only for `.signal`.
+  The response does not echo the request either.
+- **The record cannot encode the variant.** Amazon's filter chips read "53' Trailer **(R)**" — the
+  marker is on the *filter option* — but both variants serialise to the same
+  `loads[].equipmentType`.
+- **The labelled set inside the captures is 1 P, 0 R.** Only one captured card file exists. With no
+  labelled R, **no field can be confirmed, only refuted** — which is how every hypothesis has died.
+  83 fields vary; 63 are consistent with the single labelled P. Enumeration is not a path forward.
+
+#### ⚠ IMPLEMENTED 2026-08-20 — THE INTERIM DOM DEPENDENCY (authorised by Ihor)
+
+PAT now derives trailer ownership from the card's P/R badge letter:
+`div.trailer-type-circle > p` → `loadParser.js:84` → `trailerLetter` → `getTrailerLabel()` →
+`patTrailerLetter()` in `patModal.js`. **P → AMAZON_PROVIDED, R → CARRIER_OWNED**, anything else
+blocks Confirm with the value named.
+
+🔴 **THIS IS THE ONLY DOM-SOURCED FIELD IN THE PAYLOAD AND IT BREAKS THE STANDING DIRECTIVE.**
+**DELETE IT when either happens:** (1) the record-based rule is found — the label collection below
+exists to find it; or (2) Ihor's backend supplies trailer ownership directly. **Do not extend the
+pattern to any other field.**
+
+⚠ **`"R"` has never been observed in a captured card.** The R branch is unverified until a real R
+post is confirmed on Amazon. The modal logs a warning whenever it fires.
+
+#### ✅ PART 2 — LABEL COLLECTION IS LIVE (2026-08-20)
+
+Every parsed card's badge letter is filed beside its captured record under the same id, sharing the
+record's eviction and teardown. In-memory only. Dump with:
+
+```
+__EXT_DEBUG.dumpTrailerLabels()
+```
+
+**Works at the shipped `DEBUG_LEVEL`** (uses `console.*`, not `logger.*`).
+
+**How many are needed:** 83 fields vary. R labels are worth ~12× a P label because the R-side
+groups are only 10–20% of the board. Expected chance survivors ≈ 83 × 0.15^(R labels): **3 R makes
+it conclusive, 5 R gives margin.** P accumulates for free.
+
+#### superseded — the costing below is now implemented
+
+`div.trailer-type-circle > p` → `loadParser.js:84` → `trailerLetter` → `loadStore`. **Already
+read today.** PAT could use `loadStore.getLoadUnit(loadId).trailerLetter`, mapping
+**P → AMAZON_PROVIDED**, **R → CARRIER_OWNED**, anything else → Confirm disabled with the raw value
+named. ~10 lines plus tests.
+
+⚠ **Two things Ihor must weigh before authorising it:**
+1. It would be **the only DOM-sourced field in the payload**, against the "one id plus one API
+   record" directive. It must be flagged in code as an interim dependency to delete when his own
+   backend supplies trailer ownership.
+2. **`"R"` has never been captured in a card** — only `"P"`. The R branch would be unverified
+   until an R card is captured.
+
+**The alternative that keeps the directive intact:** capture the `/search` **request** body
+(a change to `networkObserver.js`) and see whether the equipment filter distinguishes the
+variants. That answers E1 properly instead of working around it.
+
+#### superseded — the ranked hypotheses below are all dead or unconfirmable
+
+| # | would mean R | loads |
+|---|---|---|
+| **C1** | any stop `loadingType: "LIVE"` | 15/146 |
+| C2 | `existingSubCarrierName` not purely AZNG | 29/146 |
+| C3 | any load `isExternalLoad: true` | 24/146 |
+| C4 | container equipment | 15/146 |
+
+**C1 leads: it is the only one with a mechanism.** PRELOADED = trailer already loaded and waiting
+(Amazon supplied it); LIVE = loaded while the driver waits (carrier brought its own). It matches
+the upsert tie in §8a — `AMAZON_PROVIDED` → `["DROP"]` 7/7, `CARRIER_OWNED` → `["LIVE"]` 4/4 —
+and **half of it is already confirmed**: the §10b card reads *Drop* and its badge is **P**.
+
+#### ✅ THE ONE QUESTION THAT SETTLES IT
+
+**On today's board, find any card whose Loading Type reads "Live" (not "Drop") and report the
+letter in its circle badge.** No id hunting, no JSON — the card shows both. If it reads **R**, C1
+is confirmed and C2/C3/C4 are all weakened at once. If it reads **P**, C1 is dead.
+
+*(If ids are preferred, these each isolate ONE hypothesis:*
+`353f4243-db07-4e11-be6f-481211f647a1` *tests C1 alone;*
+`22007757-0cc6-4cea-8f66-095f48dbe9e3` *tests C2 alone;*
+`d3dad208-14dc-4296-acef-0ff73e05fcbf` *tests C3 alone. They are days old and may have expired,
+which is why the "any Live card" question is better.)*
+
+### 0q. ✅ CLOSED 2026-08-20 — it was a sampling artefact, not a rule
+
+Power only + "Live or Drop & Hook" produces `loadingTypeList: ["LIVE"]`, captured from the live
+form. The `AMAZON_PROVIDED` → `["DROP"]` (7/7) correlation held only because Ihor had left the
+Load control on "Drop & Hook" for those captures. **Our `AMAZON_PROVIDED` + `["LIVE"]` pairing is
+legitimate; no change needed.** Do not resurrect the 7/7 correlation as evidence.
+
+---
+
+#### superseded — the original decision request
+
+### 0q-was. DECISION FOR IHOR — loading type vs trailer ownership
+
+The eleven captures tie the two together: `AMAZON_PROVIDED` → `["DROP"]` (7/7),
+`CARRIER_OWNED` → `["LIVE"]` (4/4). The UI finding explains why: the **Load control exists only
+under "Power only"**, so for box truck and tractor-and-trailer the form has no Load section and
+`LIVE` is simply what it sends.
+
+**This conflicts with the standing rule "always Live or Drop & Hook".** ⚠ PAT today sends
+`AMAZON_PROVIDED` + `["LIVE"]` — **a combination that appears in none of the eleven captures.**
+
+Three options, Ihor's call:
+1. **Keep the standing rule** — always `["LIVE"]`, accept that it does not match what the form
+   sends for Amazon-provided loads.
+2. **Follow the captures** — derive it from ownership: Provided → `["DROP"]`, Required →
+   `["LIVE"]`. Requires 0p first.
+3. **Send `["DROP"]` for everything**, matching what 7 of 11 captures did.
+
+### 0r. ✅ CLOSED 2026-08-19 — the 53' Trailer array is fully captured and MATCHES the constant
+
+Ihor expanded it in DevTools, twice, once per order type: exactly five elements, identical for both.
+**Byte-identical to `PAT_EQUIPMENT_TYPES_53`** (captured 2026-07-14), so **no code change was
+needed** and 53' Trailer has been mapping correctly all along. The "unverified five-value list"
+doubt below is resolved. Pinned by `patalign-suite` section 9 so it cannot drift.
+
+Both order types send the same array — only `providedTrailerType` differs — so equipment work and
+P/R detection (0p) stay separable.
+
+---
+
+#### Original entry, retained
+
+### 0r-was. ⚠ 53' TRAILER CANNOT BE MAPPED — its equipmentTypes array is truncated
+
+Both captures containing `FIFTY_THREE_FOOT_TRUCK` show a multi-value array cut short:
+`["FIFTY_THREE_FOOT_TRUCK", "SKIRTED_FIFTY_THREE_FOOT_TRUCK", "FIFTY_THREE_FOOT_DRY_VAN", …]`.
+**It is the most common equipment on the board** — 235 of 251 loads on disk. Ihor is re-capturing
+the expanded array. **Do not guess the missing elements.**
+
+⚠ Note `patApi.js` already defines `PAT_EQUIPMENT_TYPES_53` with five values from the 2026-07-14
+capture (api-samples §3). Whether that five-value list matches the current truncated one is
+**unverified** — the re-capture should settle it.
+
+### 0m. ✅ CLOSED 2026-08-19 — a Team load now posts ["TEAM"]
+
+Ihor captured a real upsert containing `driverTypes: ["TEAM"]`
+(`samples/pat-upsert-team-26ft-carrier-owned.json`, api-samples §7). The token that blocked this
+now exists, so `TEAM_DRIVER → ["TEAM"]` and Confirm is enabled for a team load. Detection was
+already solved; only the posted value was missing.
+
+---
+
+#### Earlier state, retained
+
+### 0m-was. 🟠 A Team load posts as Driver = Solo — HALF FIXED 2026-08-19
+
+**FIXED: it can no longer post as solo.** The driver type is now derived from
+`transitOperatorType` (`SINGLE_DRIVER` → `["SOLO"]`), the modal shows the derived value
+read-only, and anything unmapped blocks Confirm with the raw value named.
+
+🔴 **NOT FIXED: a team load still cannot be POSTED — it is blocked instead.** The upsert's
+`driverTypes` value for a team post is on **no** capture, sample or doc (`api-samples.md` has
+only `["SOLO"]`), and the board's `TEAM_DRIVER` is a different API's vocabulary. No enum was
+invented.
+
+**NEEDED FROM IHOR — one capture: a manual Post-a-Truck upsert made with Team selected.** Read its
+`driverTypes` array, add the constant to `patApi.js`, drop it into
+`PAT_DRIVER_BY_TRANSIT_OPERATOR.TEAM_DRIVER.types`. One line, and 0m closes.
+
+---
+
+#### Original diagnosis, retained
+
+**Reported live by Ihor.** A load whose card shows **two driver icons**, and whose Amazon panel
+says **Team**, produces a post with **Driver = Solo**.
+
+⚠ **This is more dangerous than the city defect.** A wrong city BLOCKED the post and Ihor saw it.
+A wrong driver type blocks nothing — **it posts silently and wrongly.**
+
+#### D1 — where the value comes from today: NOWHERE. It is hardcoded, twice.
+
+| what | file:line | value |
+|---|---|---|
+| posted payload | `content/patApi.js:387` | `driverTypes: ['SOLO']` — a literal in `buildPatPayload()`, **not** taken from `formState` |
+| modal display | `content/patModal.js:1129` | `driverVal.textContent = 'Solo'` — a literal in a `.pat-static-val` div, **no listener, no control** |
+
+It is not read from the record, not read from the card, and not a UI control that merely defaults
+to Solo. `formState` carries no driver field at all.
+
+#### D4 — long-standing defect, NOT a regression
+
+`git log -S"driverTypes" -- content/patApi.js` returns **exactly one commit**: `512381d`, which
+introduced it as `['SOLO']`. It has never had any other value and was never load-derived. **The
+re-sourcing did not cause this.** Docs corrected accordingly.
+
+#### D2 — what the record carries: the right field exists, but no team load is on disk
+
+Every key path in all **159** captured work opportunities was scanned.
+
+| finding | result |
+|---|---|
+| `transitOperatorType` (top level) | **present in 159/159** |
+| its distinct values | **`"SINGLE_DRIVER"` × 159 — no variation whatsoever** |
+| any path whose VALUE is ever `TEAM` or `SOLO` | **none, anywhere** |
+| other name-matching paths | only `searchChannelStampedDuration.operator`, which is numeric duration noise |
+| in `projectRecord()`'s projection? | **it was not** — added 2026-08-19 for the diagnostic only |
+
+🔴 **NEEDED FROM IHOR — a capture of a known TEAM load's `/api/loadboard/search` response.**
+`transitOperatorType` is the only candidate, but **every capture on disk is a solo load**, so the
+team value is unknown and must not be guessed. `samples/` is gitignored, so it cannot be recovered
+from the repo.
+
+#### D3 — what PAT accepts
+
+`buildPatPayload()` writes `driverTypes` as an **array of strings**. `api-samples.md` records
+exactly one observed value: `["SOLO"]`. 🔴 **The TEAM enum for the upsert is also not on disk.** So
+two separate unknowns must be captured before this can be fixed:
+1. what `transitOperatorType` reads on a team load — to DETECT it;
+2. what `driverTypes` must contain for a team post — to SEND it.
+
+A capture of a **manual Post-a-Truck upsert made with Team selected** answers (2).
+
+#### The measurement is wired
+
+`PATDIAG DRIVER` (behind `CITY_ASSIGN_DEBUG`) prints, on every modal open: the record's raw
+`transitOperatorType`, the value PAT will post, and whether they agree — flagging **** NO ****
+loudly for anything that is not `SINGLE_DRIVER`.
+
+### 0n. 🔴 An R load posts as Provided — CONSTANTS SETTLED, DETECTION IS THE BLOCKER (2026-08-19)
+
+**Both values are now capture-backed:**
+`PAT_TRAILER_AMAZON_PROVIDED = 'AMAZON_PROVIDED'` (api-samples §3) and
+`PAT_TRAILER_CARRIER_OWNED = 'CARRIER_OWNED'` (§7). **No further capture of the constants is
+needed** — the brief expected P to be the gap; it was not.
+
+🔴 **THE ACTUAL BLOCKER: nothing in the record says which one a load is.** Every
+trailer/owner/carrier/asset-named field across all 159 captured work opportunities was enumerated;
+none distinguishes carrier-owned from Amazon-provided. `trailerDetails[].assetId/.assetType/
+.assetSource` are null in all 253 entries (BACKLOG 5) and `.assetOwner` is a carrier code.
+
+**So P/R was deliberately NOT wired** — an R load still posts `AMAZON_PROVIDED`.
+
+**NEEDED FROM IHOR:** the `/api/loadboard/search` response for a load whose card shows the **R**
+badge, so the field that marks it can be found. Without it there is nothing to branch on.
+
+---
+
+#### Original entry, retained
+
+### 0n-was. 🔜 NEXT TASK — an R load posts as Equipment = Provided
+
+**Reported live by Ihor 2026-08-19.** A load with the card badge **R**, whose Amazon panel says
+**Required**, produces a post with **Equipment = Provided**. The summary line currently hardcodes
+`(Provided)` and `providedTrailerType: "AMAZON_PROVIDED"` is a constant in the payload.
+Related to 0l (P/R handling) and distinct from PLAN 8 (unsupported equipment types).
+
+### 0o. `normalizeState()` in patApi.js still has a first-two-letters fallback
+
+`return STATE_NAME_TO_CODE[s.toLowerCase()] || s.toUpperCase().slice(0, 2);` — the heuristic
+that would map "New York" to NE (Nebraska). It is reachable **only** from
+`resolvePATCity`'s board-string branch, and PAT always passes a `{city, state}` object now, so
+it is **off PAT's path**. Left alone as out of scope for the city-resolution fix. Its table also
+has **no Canadian provinces**, unlike the new `PAT_STATE_CODE_BY_NAME`. Worth deleting or
+redirecting when someone next touches `patApi.js`.
+
+### 0i-FIXED / 0k-DECIDED. PAT modal crash, silence, and loading type — 2026-08-19
+
+**0i (crash)** — `ReferenceError: equipment is not defined` fixed; the value now comes from the
+record like every other field.
+
+**0i-b (silence)** — fixed at the class level, not just this instance: `openPostModal` has a
+top-level try/catch that logs message + stack + loadId, the dispatcher sees a failure dialog, and
+the caller handles the rejection. **This is the rule to carry forward: any function that can throw
+behind a user action needs a catch that logs AND a visible signal.**
+
+**0k (loading type)** — CLOSED by Ihor's decision: always post "Live or Drop & Hook". No longer an
+open question. `resolveLoadingType()` deleted.
+
+**One item remains open, and it is the only unverified byte in a live post:**
+
+⚠ **`["LIVE","DROP"]` has never been captured.** `api-samples.md` records only `["LIVE"]` and
+`["DROP"]` for `loadingTypeList`. The pair is inherited from the old `resolveLoadingType`
+inference, not from a capture. **Needed from Ihor: a capture of a manual Post-a-Truck upsert made
+with the "Live or Drop & Hook" option selected**, to confirm the exact array Amazon expects. Until
+then, a rejected or silently-narrowed post is the symptom to watch for.
+
+### 0l. Provided vs Required (P/R) handling — NEXT TASK, deliberately not touched
+
+The summary line still reads `Equipment: <label> (Provided)` with "Provided" hardcoded. Out of
+scope for the 2026-08-19 fixes by instruction. Recorded here so it is not lost.
+
+### 0i. 🔴 PAT modal does not appear at all — diagnosed 2026-08-19, NOT fixed
+
+**Cause, proven by running the real `openPostModal` against a real sample record:**
+
+    ReferenceError: equipment is not defined
+        at openPostModal (content/patModal.js:1008)
+
+Line 1008 is `summaryEl.textContent = "Equipment: " + equipment + " (Provided) Loading Type: " …`.
+The 2026-08-19 re-sourcing replaced the preamble that declared `var equipment = loadUnit.equipment`
+and did not re-declare it. **It is a display string in the modal summary — it feeds no posted
+value.** Everything before it works: PATDIAG SOURCE reports `missing: none`, and the trace shows
+`removePatModal` and two `makeTimeStepper` calls completing before the throw.
+
+**How it was missed:** the verification grep after the rewrite checked a hand-picked list of
+variable names, and `equipment` was not on that list. `patsource-suite` tested
+`patSourceFromRecord()` in isolation and never called `openPostModal()` end to end — the same
+gap that let the inline panel ship unwired in Stage B. **The regression test must invoke
+`openPostModal` and assert a modal node exists**, not assert on the helpers.
+
+#### 0i-b. The silence is a SEPARATE defect — code rule 5 is violated on this path
+
+`openPostModal` is `async` and has **no top-level try/catch**; the caller does
+`openPostModal(sheetLoadId);` with no `await` and no `.catch()`. Any throw is an unhandled
+promise rejection: **0 `logger.error` calls**, nothing visible. That is why Ihor saw "no modal, no
+error" and why smoke item (f) still passes. Any function that can throw behind a user action needs
+either a top-level catch that logs, or a caller that handles the rejection.
+
+### 0j. M1 — origin/destination derivation is CORRECT (verified 2026-08-19, no defect)
+
+`patSourceFromRecord()` reads `lastLoad = loads[loads.length - 1]`, then
+`lastStop = lastLoad.stops[lastLoad.stops.length - 1]` — **the last stop of the LAST element of
+`loads[]`, not of `loads[0]`.** Measured across **71 multi-segment records**; in the **63** where
+the two differ, PAT's destination matched the last load's last stop **63/63**. Worked example:
+`3a45d54c` origin TOLEDO, OH — `loads[0]` last stop PERRYSBURG, Ohio (what a `loads[0]` bug
+would give) — `loads[N]` last stop **GARNER, NC** — PAT dest **GARNER, NC**.
+
+**So "origin and dest both MONROE, Ohio" is not this bug.** `origin === dest` occurs legitimately
+in **5 of 71** multi-segment records — a round trip returning to the same facility. ⚠ Ihor's case
+had **7 stops**, and no 7-stop record exists in `samples/`; the largest on disk are 2+2. **If it
+still looks wrong, send that load's id and a capture of its `/search` response** — it cannot be
+checked further from disk.
+
+### 0k. M2 — loadingType: the change altered what PAT posts. Ihor's call. NOT changed.
+
+**Where the record value comes from:** the **last stop of the last load**'s `unloadingType`. Across
+all captures only two shapes exist: `first.loadingType=PRELOADED | last.unloadingType=DROP` (149)
+and `… | LIVE` (5).
+
+**What the card's string represents:** the board's own combined label. It is NOT the same
+vocabulary — `"Live/Drop"` and `"LTL/Live/Drop"` describe the handling across the whole load,
+not one stop.
+
+**What PAT sent BEFORE vs NOW** — measured by running `resolveLoadingType()`:
+
+| card string | BEFORE (from the card) | NOW (from the record) |
+|---|---|---|
+| `"Drop"` | `["DROP"]` | `["DROP"]` — same |
+| `"Live"` | `["LIVE"]` | `["LIVE"]` — same |
+| `"Live/Drop"` | **`["LIVE","DROP"]`** | **`["DROP"]`** — ⚠ CHANGED |
+| `"LTL/Live/Drop"` | **null → PAT refused to post** | `["DROP"]` — ⚠ now posts where it used to block |
+
+**Both directions matter and neither is ours to choose.** The record can only ever express ONE
+value, so `["LIVE","DROP"]` is no longer reachable. Conversely a load PAT used to refuse now
+posts. **Question for Ihor: for a load the board labels "Live/Drop", should the post carry
+`["LIVE","DROP"]` or `["DROP"]`?** Nothing on disk answers it — the upsert captures only ever
+show `["LIVE"]` or `["DROP"]`, never both.
+
+### 0h-FIXED. Post-a-Truck re-sourced from the captured record — 2026-08-19, awaiting Ihor's re-test
+
+The PLAN 29a regression is fixed in code. PAT reads `getLoadRecord(loadId)` and nothing else: no
+card DOM, no detail sheet. D1 (−30 min), D2 (+3 h), D3 (`stopCount`), D4 (ISO instant + IANA zone)
+implemented as specified; ×1.10 markup and ±25-mile window unchanged. 154/154 captured records
+resolve with nothing missing.
+
+**🔴 Smoke item (e) remains FAIL until Ihor re-tests on a real board.** See TC-PAT-RECORD.
+
+**Open items this created, none blocking:**
+
+1. **Two equipment enums have no mapping and cannot get one from disk.**
+   `FORTY_FOOT_CONTAINER` and `TWENTY_SIX_FOOT_BOX_TRUCK` are in `patApi.js` but appear in no
+   capture. They now route to the unsupported-equipment modal with the raw enum logged.
+   **Needs from Ihor: a capture of a board carrying 40' Container or 26' Truck.** (`samples/` is
+   gitignored, so this cannot be recovered from the repo.)
+2. **`Live/Drop` may no longer be expressible.** The old card path could produce
+   `['LIVE','DROP']` from a "Live/Drop" label. The record's last-stop `unloadingType` is a single
+   enum, and no mixed case appears in any capture. If Ihor ever sees a load the board labels
+   "Live/Drop", PAT will now report an unresolved loading type rather than guess. **Send that
+   load's id.**
+3. **Manual time edits still use one offset for the session.** `patZoneAt()` resolves the offset at
+   the load's own instant — correct for the load — but if a dispatcher drags the time across a DST
+   boundary by hand, the offset applied is the load's, not the edited time's. Pre-existing
+   behaviour, unchanged, and now at least starting from the right offset.
+4. **`stopCount` semantics still unconfirmed against the old sheet value.** PAT posts it as
+   `maxNumberOfStops`. D3 says it must equal the card's stop count — step 6 of TC-PAT-RECORD is
+   the check.
+
+### 0h. 🔴 POST-A-TRUCK IS BROKEN — regression from PLAN 29a. Analysis 2026-08-19, NOT fixed.
+
+**Confirmed live by Ihor 2026-08-19. Smoke item (e) FAILS. The docs previously implied PAT works;
+they were wrong.** The modal opens, the STOPS field and both date/time fields are empty, the two
+warnings "Load times could not be read" and "Stop count could not be read" are shown, and Confirm
+never enables.
+
+**Cause: PLAN 29a (Stage A) removed the detail-sheet scrape that PAT read those fields from.**
+The removal itself was correct and is not to be reverted. What is missing is the re-sourcing.
+
+⚠ **NOT this bug:** the other modal, "Post creation for this equipment type is not supported yet —
+53' Container, 53' Trailer and Chassis". That is **PLAN 8** (R-type / unsupported equipment),
+blocked on a captured manual upsert payload. Different modal, different cause. Do not conflate.
+
+#### P1/P2 — field inventory and coverage
+
+`openPostModal(loadId)` reads two stores: **Phase 1** (`loadStore`, written by
+`loadParser.js` from the CARD DOM — untouched by Stage A) and **detail** (`loadUnit.detail`,
+now written by `inlinePanel.js:1200` as `recordToPanelData(record)`).
+
+| # | Field | Read today from | After Stage A | In the projection? | Path |
+|---|---|---|---|---|---|
+| 1 | equipment | `loadUnit.equipment` (card) | **INTACT** | PRESENT (as an enum, not the label) | `loads[].equipmentType` |
+| 2 | payout | `loadUnit.payoutNum` / `.payout` (card) | **INTACT** | PRESENT | `payout.value` |
+| 3 | distance | `loadUnit.distance` (card) | **INTACT** | PRESENT | `totalDistance.value` |
+| 4 | loadingType | `loadUnit.loadingType` (card) | **INTACT** | PRESENT (per stop) | `loads[].stops[].loadingType` |
+| 5 | boardStops (origin/dest fallback) | `loadUnit.boardStops` (card) | **INTACT** | PRESENT | `loads[].stops[].location.city/.state` |
+| 6 | origin city / state | `detail.segments[0].stops[0].address` | INTACT *(path survives)* | PRESENT | `loads[0].stops[0].location.city/.state` |
+| 7 | dest city / state | `detail.segments[N].stops[M].address` | INTACT *(path survives)* | PRESENT | last `loads[].stops[].location` |
+| 8 | **stop count** | `detail.header.stopsCount` | 🔴 **BROKEN** | PRESENT | `stopCount` |
+| 9 | **start time** | `detail.segments[0].stops[0].arrival` | 🔴 **BROKEN** | PRESENT | `loads[0].stops[0].checkIn` + `.tz` |
+| 10 | **end time** | `detail.segments[N].stops[M].arrival` | 🔴 **BROKEN** | PRESENT | last stop's `checkOut`/`checkIn` + `.tz` |
+
+**Row 8 — the path no longer exists.** `recordToPanelData()` returns `stopsCount` at the TOP
+level; PAT reads `detail.header.stopsCount`. There is **no `header` object at all**, so the
+expression yields `''`, `parseInt('')` is `NaN`, and the field is left empty by design.
+
+**Rows 9/10 — the path survives but the FORMAT changed.** PAT's `parsePatStopTime()` requires
+`M/D HH:MM TZ` (regex `/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})\s+([A-Z]{2,5})/` — it
+needs a **slash**). Stage B's `formatStopTime()` emits `"Mon Aug 17 17:30 EDT"`. Run against
+each other on the real source:
+
+| Stage B emits | `parsePatStopTime()` returns |
+|---|---|
+| `"Mon Aug 17 17:30 EDT"` | **null** |
+| `"Tue Aug 4 02:43 CDT"` | **null** |
+| `"Mon Aug 3 16:15 PDT"` | **null** |
+| `"8/17 17:30 EDT"` *(old scrape format)* | `2026-08-17T21:30:00Z` |
+
+#### Coverage, measured across 154 captured work opportunities
+
+`stopCount` 154/154 · `totalDistance.value` 154/154 · `payout.value` 154/154 ·
+`deadhead.value` 154/154 · `loads[].equipmentType` 240/240 · `loads[].distance.value` 240/240 ·
+`stops[].location.city/.state/.timeZone` 484/484 · `stops[].stopSequenceNumber` 484/484 ·
+**`CHECKIN.plannedTime` 484/484 · `CHECKOUT.plannedTime` 484/484.**
+
+**Every field PAT needs is PRESENT. Nothing is ABSENT. No new capture is required to fix the
+regression.**
+
+#### P3 — the one thing not in the captures
+
+Only two `equipmentType` values appear on disk: `FIFTY_THREE_FOOT_TRUCK` and
+`FIFTY_THREE_FOOT_CONTAINER`. `FORTY_FOOT_CONTAINER` and `TWENTY_SIX_FOOT_BOX_TRUCK` are in
+`patApi.js` but have **never been observed in a capture**. This does **not** block the fix —
+equipment still comes from the card (row 1, INTACT) — but it does mean an enum→PAT-constant map
+cannot be verified for those two from disk. **A capture of a 40' Container or 26' Truck board
+would be needed before switching equipment to the projection.** (`samples/` is gitignored.)
+
+#### P4 — binding
+
+No new plumbing is needed for the id. `openPostModal(loadId)` has exactly **one** caller,
+`inlinePanel.js:1292`, which passes `sheetLoadId` — the same id the panel is bound to. And
+because PAT is only reachable from the panel's action bar, **the panel must already have
+rendered**, which by `showInlinePanel()` gate 2 means `getLoadRecord(loadId)` returned a
+record. So the record is **guaranteed to exist** whenever PAT opens. `getLoadRecord()` is a
+global in the isolated world (`cityAssign.js`), callable from `patModal.js` directly.
+
+Two viable shapes, to be chosen when the fix is scheduled:
+- **(a)** PAT calls `getLoadRecord(loadId)` and reads the raw projection — no shared format, no
+  reliance on display strings.
+- **(b)** `recordToPanelData()` also emits `header.stopsCount` and machine-readable times, and
+  PAT keeps reading `loadUnit.detail`.
+
+**(a) is the safer direction** — see P5: it avoids parsing values that were formatted for display.
+
+#### P5 — risk, and one question for Ihor
+
+1. ⚠ **Times are posted to the live marketplace.** Today `parsePatStopTime()` **guesses the
+   year** (current year, rolled forward if >30 days past) and maps a 3-letter abbreviation to a
+   **fixed** offset. The projection carries a full ISO-8601 UTC instant and an IANA zone, so
+   re-sourcing removes both guesses — but it **changes the value sent to Amazon**. Across a DST
+   boundary a fixed offset and an IANA zone differ by an hour.
+2. ⚠ **Equipment label mismatch, concrete.** `PAT_EQUIPMENT_MAP` is keyed `"53' Container and
+   Chassis"`; `EQUIPMENT_LABELS` maps `FIFTY_THREE_FOOT_CONTAINER` → `"53' Container"`.
+   Routing equipment through the display label would send that load into the "unsupported
+   equipment" modal — a silent capability loss. Map **enum → PAT constant directly**, never via
+   the display string.
+3. ⚠ **Do not re-source payout or distance.** Both are INTACT from the card and PAT applies
+   `PAT_PAYOUT_MARKUP_RATE` (×1.10) to payout. Changing the base would change every posted
+   price. Out of scope for this regression.
+4. ⚠ **`stopCount` semantics are unverified.** PAT posts it as `maxNumberOfStops`. Amazon's
+   `stopCount` is the work opportunity's own count; the old value came from the sheet header.
+   Nobody has compared the two on the same load.
+
+**QUESTION FOR IHOR, and the fix should not go in without an answer:** on one load, does Amazon's
+`stopCount` equal the number the PAT modal used to prefill? And are the prefilled start/end times
+expected to be the **first stop's CHECKIN** and the **last stop's CHECKOUT** (rather than
+CHECKIN)? Both decide what goes out on a real post, so they are not ours to assume.
+
+### 0f-FIXED. Click-zone mismatch — CLOSED 2026-08-19
+
+A click whose `event.target` IS `div.load-card` (the container's own padding) is now ignored
+outright: no panel, no id resolution, no state change, no loop stop. Descendant clicks are
+untouched. The rule is target identity, never geometry, and it never tries to detect Amazon's
+React listener. See CHANGELOG 2026-08-19 and TC-CLICK-CONTAINER.
+
+**Still owed: a live confirmation.** Centre click must still open the panel with ids matching;
+top and bottom edge clicks must produce nothing and **no MISMATCH line**. If a centre click stops
+working, the rule is too wide — report it rather than adjusting it.
+
+**Left deliberately unfixed, and worth deciding separately:** `showInlinePanel()` resolves the
+load id as the **first** `div[id]` in the card with **no UUID-shape filter**, while cards also
+contain `div[id="STARTING_SOON"]`. CLICKDIAG C2 flags it when the resolved id is not a bare UUID.
+No live click has yet produced a non-UUID id, so there is nothing to fix from — watch C2.
+
+### 0f. ⛔ CLICK-ZONE MISMATCH — under measurement 2026-08-19, NOT fixed
+
+**Reported live.** Clicking the CENTRE of a card highlights it, opens Amazon's side sheet and
+expands our accordion. Clicking the very EDGE — a few pixels at the top or bottom — expands
+**only our accordion**: no highlight, no sheet update.
+
+**The hazard, and why this is not cosmetic:** the highlighted load and the load our panel is
+showing can be DIFFERENT loads, so a dispatcher can read one load's data believing it belongs to
+another.
+
+**What the source already shows.** `initManualToggle()` matches with
+`ev.target.closest('div.load-card, div.load-card__selected')` — the **card container**. That
+matches a click anywhere in the container's box, including its own padding and border. Amazon's
+own handler is React-synthetic and **cannot be enumerated from a content script**
+(`getEventListeners` is DevTools-only), so what it binds to is not readable — but
+`samples/paired-card.html` contains **0 anchors, 0 buttons, 5 `role="img"` and 2
+`tabindex="0"`**, so whatever Amazon binds is an inner element, not the container. A click on
+container padding therefore reaches us and not Amazon. **This is a hypothesis until Ihor's
+CLICKDIAG lines confirm it — do not fix from it.**
+
+CLICKDIAG (C1..C4, behind `CITY_ASSIGN_DEBUG`, passive capture-phase) measures it. See the
+2026-08-19 CHANGELOG entry for what to click and which lines to send back.
+
+⚠ Fix candidates exist but must be chosen from the measurement, not guessed: narrow our match to
+the same inner element Amazon uses; or require the highlight/sheet to agree before rendering; or
+render only when the resolved id matches the selected card. **A wrong choice here makes the
+mismatch silent instead of visible.**
+
+### 0g. Membership can exceed the dispatcher's Amazon search radius — PRODUCT DECISION for Ihor
+
+**Measured 2026-08-19:** a load with a **122.9 mi deadhead** was shown under **HEBRON, KY** while
+the Amazon search radius was set to **50**.
+
+**Cause:** `CITY_ASSIGN_MAX_MILES = 150` is a fixed constant, independent of the radius the
+dispatcher set in Amazon's own filters. Range membership therefore admits loads Amazon's own
+search would have excluded. Not a defect in the arithmetic — the two settings simply do not know
+about each other.
+
+**The decision is Ihor's, and it is a product decision, not a technical one:**
+1. Membership follows the Amazon search radius (read it, mirror it) — one setting, always
+   consistent with what the board is showing.
+2. Membership stays a separate setting — deliberately wider, so a driver willing to run further
+   still sees the load, at the cost of disagreeing with Amazon's own filter.
+3. Separate but **configurable**, defaulting to the search radius.
+
+Related to **PLAN 16**. ⚠ `CITY_ASSIGN_MAX_MILES` was NOT changed. Note this also interacts with
+BACKLOG 0 (out-of-range loads shown under every tab and absent from the All badge): raising or
+lowering the threshold changes how many loads land in that class.
+
+### 0a-FIXED. Filter feedback loop — CLOSED 2026-08-19 by making the deadhead substitution idempotent
+
+Was: every apply removed and re-inserted our deadhead node; those childList mutations woke the
+board observer, which re-applied the filter. Now a card already in the desired state receives no
+DOM write, and a changed value is written in place. The observer was **not** touched — no
+disconnect, no suspension, no re-entrancy flag. See CHANGELOG 2026-08-19 and TC-CITY-IDEMPOTENT.
+
+**Still owed: a live-board confirmation.** If `CITYDIAG Q6 WAKE` still repeats on an idle board
+with a city selected, idempotence was not sufficient and something else is mutating the observed
+subtree — that is a finding to report, not something to patch over with a guard.
+
+### 0d. 21 filter applies fire from a single city click — NOT fixed, out of scope 2026-08-19
+
+Measured live: one click on a city button produced **21 applies**. The loop accounted for the
+repeats, but the first click should produce **one** apply, not a burst. Now that each apply is
+cheap and write-free when nothing changed, this is a performance and clarity issue rather than a
+correctness one — but nobody has established where the 21 come from. Worth measuring with
+`CITYDIAG Q5 WRITES apply #N` before choosing a fix.
+
+### 0e. readMainCardElements has no dedupe — NOT fixed, out of scope 2026-08-19
+
+Measured live: **cards in DOM 60 vs assignment map 59**. `parseLoads()` keeps only the outermost
+match (`loadParser.js:197`, `!allCards.some(b => b !== a && b.contains(a))`);
+`readMainCardElements()` does not, so a card containing a nested `div[id]` with the same UUID is
+collected twice. Assignment is unaffected (the second write is identical) but `cards.length`
+overstates the working set, and `currentPageKey()` embeds that count — so a duplicate perturbs
+page detection. ⚠ The 2026-08-19 deadhead reconcile is **deliberately keyed on the value element,
+not the id**, precisely so that fixing or not fixing this cannot change what is rendered.
+
+### 0a. ⛔⛔ FILTER FEEDBACK LOOP — diagnosed 2026-08-19, NOT fixed. Fix this first.
+
+Selecting a city on a board with at least one multi-city load puts the extension into an unbounded
+loop at roughly one iteration per animation frame:
+
+    applyCityFilter -> restoreDeadheads/applyCityDeadheads -> insertBefore/removeChild
+      -> board MutationObserver {childList:true, subtree:true} wakes
+      -> onBoardRerender -> reapplyCityFilter -> applyCityFilter -> ...
+
+Pre-existing since **869cfc2 (2026-08-15)**, not caused by the diagnostics. Invisible until now
+because every log was taken with filter = ALL, where both ends of the loop are closed.
+
+**Candidate fixes — Ihor's call, and it should be made from the CITYDIAG Q5/Q6 numbers:**
+1. Suspend the observer around the filter apply (`disconnect()` / re-`observe()`).
+2. Skip the apply when nothing would change — an idempotence check on the computed hidden set.
+3. Move the deadhead substitution out of the apply path so the filter writes attributes only,
+   restoring the original "cannot retrigger itself" premise.
+4. Have `onBoardRerender` ignore mutations whose nodes carry `data-testid="ext-city-deadhead"`.
+
+⚠ Also update `onBoardRerender`'s header comment: it still claims the filter cannot retrigger
+itself because it "only writes style.display". The deadhead substitution made that false.
+
+### 0b. `readMainCardElements()` has no dedupe — found 2026-08-18, NOT fixed
+
+`parseLoads()` keeps only the outermost match (`loadParser.js:197`,
+`!allCards.some(b => b !== a && b.contains(a))`). `readMainCardElements()` does not, so a card
+containing a nested `div[id]` with the same UUID is collected twice. Harmless to assignment (the
+second write is identical) but it makes `cards.length` overstate the working set, and
+`currentPageKey()` embeds that count — so a duplicate perturbs page detection. It is also why
+"61 collected, 60 in the map" looks like a lost card and is not one.
+
+### 0c. `currentPageKey()` mixes two different populations — found 2026-08-18, NOT fixed
+
+The key is `range | count | firstId | lastId`. The **range** counts `/search` results only; the
+**count/first/last** cover the rendered list, which also holds `/recommendations` cards. So the
+recommendations block re-rendering on its own flips the key and is read as a PAGE CHANGE, which
+REPLACES the assignment map. Measured harmless today because the merged coords map re-derives
+everything — but the signal is not measuring what its name claims.
+
+### 0. ⛔ THE >50 DEGRADATION — diagnosed 2026-08-18, NOT fixed (product decision needed)
+
+A load beyond `CITY_ASSIGN_MAX_MILES` (150) of every active chip is **unassigned**, therefore
+**never hidden**, therefore **visible under every city tab** — and `publishUnassignedCount()`
+publishes only `result.unresolved`, so `result.outOfRange` **never reaches the All badge**. The
+dispatcher sees wrong-city loads with nothing on screen contradicting them. This is the same class
+of failure the badge was built to prevent, in the one branch the badge does not cover.
+
+It tracks board size because Amazon's own deadhead does: 0 loads over 150 mi on the small captures,
+**21 of 50 on the 338-result one**. Our threshold is a fixed constant; Amazon's search radius is
+Ihor's to set. Nothing reconciles them.
+
+**Four candidate fixes, all needing Ihor's call — do not pick one unilaterally:**
+1. Publish `outOfRange` on the badge too (honest, smallest, does not change what is shown).
+2. Hide out-of-range loads instead of showing them (breaks "never hide what we could not place").
+3. Raise `CITY_ASSIGN_MAX_MILES`, or derive it from the search radius.
+4. Trust Amazon's `deadhead` for membership instead of our haversine.
+
+Turn `CITY_ASSIGN_DEBUG` on and filter the console for `CITYDIAG` to read the whole chain.
+
+### 1. Auto-open shows no panel — PLAN 29c
+The manual click renders the panel; **auto-open does not**. Stage C is written but not started.
+This is the most visible gap for a dispatcher: the loop opens the best new load and he still has
+to click it to see our breakdown.
+
+### 2. Night mode still zebra-stripes the panel
+Light mode's alternating row fill was removed; `nightMode.js` holds a dark counterpart that
+survives. **Blocked by the standing "do not edit nightMode.js" constraint** — one rule, removable
+on Ihor's word.
+
+### 3. The surge branch has no filter awareness
+The new-load path partitions by the active city filter; the **price-surge path does not**. It can
+still auto-open a card the filter has hidden. Deliberately left alone when filter-awareness was
+added — decide separately.
+
+### 4. Panel fields present in the payload but not shown — PLAN 29f
+All measured and available: cost breakdown (Base Rate / Fuel Surcharge / Toll Charge),
+`specialServices` (SWING_DOOR, SLIDE_TANDEMS, STRAPS, LUMPER), layover, equipment type, trailer
+owner, per-stop instructions and weight, deadhead, arrival windows. Each needs a projection field
+**and** a render slot.
+
+### 5. The trailer id does not exist in this payload
+`trailerDetails[].assetId`, `.assetType`, `.assetSource` and `.trailerLoadingStatus` are
+**null in all 253 captured entries**. Only `.assetOwner` is populated, and it is a carrier code.
+**Do not go looking for a trailer number again** — it is not sent.
+
+### 6. Equipment label style — open question for Ihor
+Amazon prints a compact `53' Trailer P`, where `P` is `PRELOADED`'s initial (established by
+pairing a captured card against its response). We render the full word — `53' Trailer · Preloaded`
+— because the letter is confirmed for PRELOADED only; LIVE and DROP have no captured card, and
+inventing `L`/`D` would be a guess. **One line to switch to initials if he prefers the exact
+match.**
+
+### 7. `samples/` is gitignored
+Every "measured from disk" fact in these docs depends on files a fresh clone will not have.
+Worth deciding whether a redacted subset should be committed.
+
+### 8. Testing gap, closed but worth remembering
+**1220 checks were green while clicking a card did nothing** — Stage A removed the render call,
+Stage B never restored it, and one green check asserted the absence. `wiring-suite` now
+dispatches a real click and asserts a panel appears. **Prefer end-to-end wiring tests over more
+unit assertions.**
+
+---
+
 ## 🧭 POST-LAUNCH / UNSCHEDULED — Single-Tab Multi-Driver Monitor
 
 **Status: concept defined, data verified, NOTHING BUILT.** Not scheduled before the Chrome Web

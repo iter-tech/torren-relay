@@ -281,6 +281,85 @@
     }
   }
 
+  // ── THE PANEL'S PROJECTION (STAGE B, 2026-08-14) ────────────────────────────────────────
+  //
+  // Turns one work opportunity into the SMALLEST record the inline panel needs. An explicit
+  // allow-list, never a copy: what is not named here does not leave this world.
+  //
+  // Segment order is loads[] order — verified four independent ways across all 71 multi-load
+  // records on disk (chained stop codes, non-decreasing first CHECKIN, non-decreasing last
+  // CHECKOUT, rising stopSequenceNumber). See the Stage B report.
+  //
+  // Times are emitted as the payload's own UTC ISO strings, PAIRED WITH EACH STOP'S OWN
+  // timeZone. Formatting happens in the isolated world, per stop — 31% of the captured records
+  // have stops in more than one zone, so a single conversion for the whole load would be wrong
+  // on nearly a third of them.
+  function projectRecord(item, id) {
+    try {
+      var loads = [];
+      var srcLoads = item.loads || [];
+      for (var li = 0; li < srcLoads.length; li++) {
+        var l = srcLoads[li];
+        var stops = [];
+        var srcStops = (l && l.stops) || [];
+        for (var si = 0; si < srcStops.length; si++) {
+          var st = srcStops[si] || {};
+          var lo = st.location || {};
+          var acts = st.actions || [];
+          var tin = null, tout = null;
+          for (var ai = 0; ai < acts.length; ai++) {
+            if (acts[ai] && acts[ai].type === 'CHECKIN'  && !tin)  tin  = acts[ai].plannedTime || null;
+            if (acts[ai] && acts[ai].type === 'CHECKOUT')          tout = acts[ai].plannedTime || null;
+          }
+          stops.push({
+            seq:      st.stopSequenceNumber,
+            label:    lo.label || lo.stopCode || null,
+            line1:    lo.line1 || null,
+            city:     lo.city || null,
+            state:    lo.state || null,
+            zip:      lo.postalCode || null,
+            tz:       lo.timeZone || null,
+            loadingType:   st.loadingType || null,
+            unloadingType: st.unloadingType || null,
+            checkIn:  tin,
+            checkOut: tout
+          });
+        }
+        loads.push({
+          distance: (l && l.distance && typeof l.distance.value === 'number') ? l.distance.value : null,
+          distanceUnit: (l && l.distance && l.distance.unit) || null,
+          loadType: (l && l.loadType) || null,
+          equipmentType: (l && l.equipmentType) || null,
+          stops: stops
+        });
+      }
+      return {
+        id: id,
+        // 2026-08-19, DIAGNOSTIC (PATDIAG DRIVER). The only field on the work opportunity whose
+        // NAME or VALUE could distinguish a team load from a solo one — established by scanning
+        // every key path in all 159 captured records. It reads "SINGLE_DRIVER" in 159/159, i.e.
+        // no captured load is a team load, so the TEAM VALUE IS UNKNOWN and nothing may be
+        // inferred from it yet. An operational enum, not PII; the allow-list contract holds.
+        transitOperatorType: (typeof item.transitOperatorType === 'string')
+          ? item.transitOperatorType : null,
+        stopCount: (typeof item.stopCount === 'number') ? item.stopCount : null,
+        totalDistance: (item.totalDistance && typeof item.totalDistance.value === 'number')
+          ? item.totalDistance.value : null,
+        distanceUnit: (item.totalDistance && item.totalDistance.unit) || null,
+        payout: (item.payout && typeof item.payout.value === 'number') ? item.payout.value : null,
+        payoutUnit: (item.payout && item.payout.unit) || null,
+        loads: loads
+      };
+    } catch (e) {
+      // A malformed record must not cost the whole response. Reported, then skipped.
+      reportDrop('project-record-threw', 'projectRecord', 0, {
+        detail: (e && e.message) ? e.message : 'unknown'
+      });
+      return { id: id, transitOperatorType: null, stopCount: null, totalDistance: null,
+               distanceUnit: null, payout: null, payoutUnit: null, loads: [] };
+    }
+  }
+
   // Shared extractor. `parsed` is an ALREADY-PARSED object; `bodyText` is the original string
   // when one exists and null when it does not.
   //
@@ -305,6 +384,7 @@
       }
       var pairs = [];
       var noCoordIds = [];
+      var records = [];
       for (var i = 0; i < wo.length; i++) {
         var item = wo[i];
         if (!item || !item.id) continue;
@@ -312,6 +392,15 @@
         var loads = item.loads;
         var stop  = (loads && loads[0] && loads[0].stops && loads[0].stops[0]) || null;
         var loc   = (stop && stop.location) || null;
+
+        // STAGE B (2026-08-14): a CURATED PROJECTION for the inline panel.
+        //
+        // ⚠ THE RAW BODY STILL NEVER CROSSES. This is an explicit field list — every value the
+        // panel renders and nothing else. Measured on the captures: 757 bytes per record, 37 KB
+        // for a 50-record page against a 299 KB raw body, i.e. 12%. No contacts, no instructions,
+        // no shipper references, no purchase orders, no carrier accounts, no cost items.
+        records.push(projectRecord(item, id));
+
         if (!loc || typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') {
           // Sent explicitly rather than just omitted. Without this the receiver could not tell
           // "this response had the load but no usable coordinates" from "this response never
@@ -327,6 +416,8 @@
         woCount:    wo.length,
         pairs:      pairs,
         noCoordIds: noCoordIds,
+        // The panel's data source (STAGE B). See projectRecord() for the exact field list.
+        records:    records,
         // Added 2026-08-08 for the unmatched-card diagnostic. Both are plain counters already
         // emitted by summariseAndDiscard() — no new class of data crosses the boundary. They
         // are carried on THIS message so they stay correlated with the ids from the SAME

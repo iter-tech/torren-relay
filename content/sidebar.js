@@ -53,6 +53,15 @@ function buildSidebar() {
     // active — see sidebar.js renderSharedRateStatus()). SIDEBAR_ROW2_HEIGHT in sidebar.js
     // must match this height (20px) — kept as two discrete states rather than a measured
     // getBoundingClientRect() so body padding can be set synchronously, no reflow timing.
+    '#ext-sidebar [data-testid="ext-rate-pause-msg"]{' +
+      'display:none;padding:6px 20px 8px;margin-top:-2px;' +
+      'font-size:11px;font-weight:400;letter-spacing:normal;line-height:1.45;' +
+      'color:var(--ext-n700);background:var(--ext-n100);' +
+      'border-top:1px solid var(--ext-n200);' +
+    '}' +
+    '#ext-sidebar [data-testid="ext-rate-pause-title"]{' +
+      'display:block;font-weight:600;color:var(--ext-n900);margin-bottom:2px;' +
+    '}' +
     '#ext-sidebar [data-testid="ext-shared-rate-status"]{' +
       'display:none;height:20px;padding:0 20px 6px;margin-top:-4px;' +
       'font-size:11px;font-weight:400;letter-spacing:normal;color:var(--ext-n500);' +
@@ -280,6 +289,62 @@ function buildSidebar() {
   const sharedRateStatus = document.createElement('div');
   sharedRateStatus.setAttribute('data-testid', 'ext-shared-rate-status');
 
+  // ── D3 (2026-08-20, Ihor): the throttling message, IN THE TOP BAR ──────────────────────
+  //
+  // It goes here, not in the popup: the dispatcher is already looking at this bar for the
+  // refresh interval, and a message he has to open a popup to find is a message he will not
+  // see when it matters.
+  //
+  // ⚠ TONE IS A REQUIREMENT, NOT A DETAIL. Ihor's dispatchers hit this repeatedly: Amazon
+  // throttles the IP for 10-15 minutes and then everything works again. NOBODY'S ACCOUNT IS AT
+  // RISK. The wording must never say error, blocked, banned or violation, and there is
+  // deliberately NO warning icon, NO red styling and NO alarm sound — a calm neutral surface
+  // built from existing --ext-* tokens only. If you are tempted to make this louder, don't:
+  // alarming a dispatcher over a routine 10-minute pause is the failure mode being avoided.
+  //
+  // textContent only, never innerHTML — and none of this text comes from the page.
+  const ratePauseMsg = document.createElement('div');
+  ratePauseMsg.setAttribute('data-testid', 'ext-rate-pause-msg');
+  const ratePauseTitle = document.createElement('span');
+  ratePauseTitle.setAttribute('data-testid', 'ext-rate-pause-title');
+  ratePauseTitle.textContent = 'Amazon is taking a short technical pause';
+  const ratePauseBody = document.createElement('span');
+  ratePauseBody.setAttribute('data-testid', 'ext-rate-pause-body');
+  ratePauseBody.textContent = 'The server has paused new loads because of frequent requests. ' +
+    'Pause auto-refresh for 5-10 minutes and it will return to normal on its own.';
+  ratePauseMsg.appendChild(ratePauseTitle);
+  ratePauseMsg.appendChild(ratePauseBody);
+
+  // Its own visibility state, deliberately NOT isRateLimitPaused(). background.js keeps
+  // rateLimited true until a 2xx is observed, which is the honest record of the block — but the
+  // MESSAGE must clear the moment the dispatcher restarts the loop (D3), which happens before
+  // any request has been made. Two different questions, two different flags.
+  var _ratePauseMsgVisible = false;
+
+  function renderRatePauseMessage() {
+    logger.log('sidebar', 'renderRatePauseMessage called');
+    try {
+      ratePauseMsg.style.display = _ratePauseMsgVisible ? 'block' : 'none';
+      syncBodyPadding(false);
+    } catch (e) {
+      logger.error('sidebar', 'renderRatePauseMessage failed — leaving the bar as it is',
+        { error: e, visible: _ratePauseMsgVisible });
+    }
+  }
+
+  function showRatePauseMessage() {
+    logger.log('sidebar', 'showRatePauseMessage called');
+    _ratePauseMsgVisible = true;
+    renderRatePauseMessage();
+  }
+
+  function hideRatePauseMessage() {
+    logger.log('sidebar', 'hideRatePauseMessage called');
+    _ratePauseMsgVisible = false;
+    renderRatePauseMessage();
+  }
+  container._showRatePauseMessage = showRatePauseMessage;
+
   // Build DOM — row 1 (existing controls, now grouped so row 2 can sit below them)
   const row1 = document.createElement('div');
   row1.className = 'ext-sidebar-row1';
@@ -291,6 +356,7 @@ function buildSidebar() {
   row1.appendChild(memoryInfo);
   container.appendChild(row1);
   container.appendChild(sharedRateStatus);
+  container.appendChild(ratePauseMsg);   // D3 — throttling message, hidden until it fires
   container.appendChild(scanline);
 
   document.body.appendChild(container);
@@ -340,6 +406,10 @@ function buildSidebar() {
       }
     }
     tabState.set('running', nowRunning);
+    // D3: the message clears when the dispatcher restarts. Deliberately NOT tied to
+    // isRateLimitPaused() — background.js keeps rateLimited true until a 2xx is actually
+    // observed, which cannot happen until the loop runs again.
+    if (nowRunning) hideRatePauseMessage();
     logger.log('sidebar', 'playpause toggled', { running: nowRunning });
   }
 
@@ -443,7 +513,11 @@ function buildSidebar() {
   // active-tab registry (see that file) — this is a read of the single source of truth,
   // not a second counter. Defaults to 1 so a fresh/unseeded sidebar shows a sane "1 active
   // tab" rather than "0 active tabs" before the first storage read resolves.
-  var _sharedLimitEnabled = true;
+  // D1 (2026-08-20): ships OFF — see the block in content.js. The label therefore reads the
+  // honest "Refresh every 2.0s" and row 2 ("Active tabs: N -> ...") never shows, because we no
+  // longer count tabs or slow anyone down. The code below is untouched and still works if the
+  // feature is re-enabled later.
+  var _sharedLimitEnabled = false;
   var _activeTabCount     = 1;
 
   // Bar height is two discrete states (row1 only, or row1+row2), not a measured
@@ -522,7 +596,8 @@ function buildSidebar() {
       applyScanSpeed(initSpeedSec);
 
       if (data[RATE_LIMITER_KEY]) adoptRateLimitState(data[RATE_LIMITER_KEY]);
-      _sharedLimitEnabled = data[STORAGE_KEYS.SHARED_LIMIT_ENABLED] !== false; // true-default
+      // D1: clamped off. The stored key is still read so nothing else has to change.
+      _sharedLimitEnabled = false;
       var atc = data[ACTIVE_TAB_COUNT_KEY];
       if (atc && typeof atc.count === 'number') _activeTabCount = atc.count;
 
@@ -585,12 +660,36 @@ function buildSidebar() {
     if (changes[RATE_LIMITER_KEY] !== undefined) {
       adoptRateLimitState(changes[RATE_LIMITER_KEY].newValue);
       updateRateLimitDisplay();
+      // ── D2 + D3 (2026-08-20, Ihor) ──────────────────────────────────────────────────────
+      //
+      // background.js writes this key on every reported result, and chrome.storage.onChanged
+      // fires in EVERY tab — so one 429/502/503/504 anywhere stops the loop everywhere. That is
+      // the whole of D2's "in every tab", with no polling and no second timer.
+      //
+      // D2: STOP, do not merely pause between cycles. tabState.set('running', false) is the same
+      // stop the play/pause button performs, so the button reflects reality immediately.
+      //
+      // ⚠ AND IT MUST NOT AUTO-RESTART. There is deliberately no "backoff cleared" branch here:
+      // when the pause lifts, the loop stays stopped until the dispatcher presses play. He stays
+      // in control and always knows whether he is scanning. Adding an auto-restart would undo
+      // the point of the decision.
+      if (isRateLimitPaused()) {
+        if (tabState.get('running')) {
+          logger.warn('sidebar', 'rate limit reported — stopping the auto-refresh loop in this ' +
+            'tab. It will NOT restart by itself; the dispatcher restarts it.', {
+            backoffUntil: _rateLimitState.backoffUntil,
+            backoffStepIndex: _rateLimitState.backoffStepIndex
+          });
+          tabState.set('running', false);
+        }
+        showRatePauseMessage();
+      }
     }
     // 2026-07-30: toggling "Shared refresh limit" in the popup must relabel the slider and
     // show/hide the status line immediately, in every open tab — no reload, same live-sync
     // mechanism as everything else in this listener.
     if (changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED] !== undefined) {
-      _sharedLimitEnabled = changes[STORAGE_KEYS.SHARED_LIMIT_ENABLED].newValue !== false;
+      _sharedLimitEnabled = false; // D1: clamped off
       renderModeLabel();
       renderSharedRateStatus();
       logger.log('sidebar', 'sharedRefreshLimitEnabled synced from another tab', { value: _sharedLimitEnabled });

@@ -1,5 +1,393 @@
 # Test Cases
 
+## TC-RATE-PAUSE — throttling stops the loop and shows the calm message (2026-08-20)
+
+Replaces the four-tab aggregate test: with the shared limit shipping OFF there is no aggregate
+behaviour left to check. **One tab is enough.**
+
+### Steps
+
+1. Start the auto-refresh loop.
+2. Run `__EXT_DEBUG.simulateRateLimit()` — it injects a **429/503-class status into the real
+   backoff path**, the same one Amazon's response reaches.
+3. **PASS:** the loop **stops by itself** (play/pause flips to stopped), and the top bar shows:
+   *"Amazon is taking a short technical pause / The server has paused new loads because of frequent
+   requests. Pause auto-refresh for 5-10 minutes and it will return to normal on its own."*
+   **FAIL:** the loop keeps refreshing, or the message appears only in the popup.
+4. Wait for the backoff to clear (or run `__EXT_DEBUG.simulateRecovery()`).
+   **PASS:** the loop stays **stopped** and the message stays up.
+   **FAIL:** it restarts on its own — that is the behaviour D2 forbids.
+5. Press play.
+   **PASS:** the loop runs and **the message clears**.
+6. Open the popup.
+   **PASS:** there is **no "Shared refresh limit" toggle**, and the bar reads
+   *"Refresh every X.Xs"* (never "Shared rate:").
+
+### Tone check — this is a requirement, not decoration
+
+The message must contain no "error", "blocked", "banned" or "violation", show **no warning icon**,
+use **no red**, and play **no sound**. If it reads as an account threat, it is wrong.
+
+## TC-RATE-4TAB — the cross-tab rate limit (PLAN 10) — the last pre-launch blocker
+
+**Needs four real tabs and a human.** No automation exists for it. ⚠ Turn on
+`CITY_ASSIGN_DEBUG = true` and `DEBUG_LEVEL = 3` for the per-request lines; the summary command
+works at any level. **Console filter: `RATEDIAG`.**
+
+### Part A — the aggregate rate
+
+1. One tab. `__EXT_DEBUG.rateDiagOn()`, start the loop, wait ~60 s, `__EXT_DEBUG.rateDiag()`.
+   **PASS:** mean interval ≈ the configured interval, verdict **AGREES**.
+2. Open three more tabs on the board, start the loop in each. Wait ~60 s.
+3. In **any one** tab: `__EXT_DEBUG.rateDiag()`.
+   **PASS:** `requests across ALL tabs` roughly quadruples, the **mean interval stays the same**,
+   verdict **AGREES**, and PER TAB shows all four contributing.
+   **FAIL:** mean interval drops toward interval÷4 — that is the 4× defect this test exists for.
+
+### Part B — pause and resume across all four
+
+4. In any one tab: `__EXT_DEBUG.simulateRateLimit()`. It injects a 503 into the **real** backoff path.
+5. Watch **all four** consoles.
+   **PASS:** every tab logs `no permit — rate limiter active`, and `rateDiag()` shows
+   `backoffUntil` set, `backoffStepIndex` advanced, `rateLimited true`.
+   **FAIL:** any tab keeps refreshing.
+6. `__EXT_DEBUG.simulateRecovery()`.
+   **PASS:** all four resume together; `backoffUntil none`, `backoffStepIndex -1`,
+   `rateLimited false`.
+
+⚠ **Do NOT use DevTools request blocking for this.** It produces a failed request with **no HTTP
+status**, which is not in `RATE_LIMIT_STATUSES`, so it takes a different branch and is a complete
+no-op. It would look like a failure when nothing was wrong.
+
+⚠ **What step 4 does NOT prove:** that a genuine Amazon 503 arrives as status 503. Only a real 503
+exercises the networkObserver → content.js relay.
+
+### Copy back
+
+The `RATEDIAG AGGREGATE`, `RATEDIAG PER TAB` and `RATEDIAG STATE` lines from step 3, and the
+`RATEDIAG STATE` lines from steps 5 and 6.
+
+## TC-PAT-TRAILER — trailer ownership from the P/R badge (2026-08-20)
+
+⚠ **This is the ONLY DOM-sourced field in the PAT payload.** It is an authorised interim
+exception to the "one id plus one API record" directive. See BACKLOG 0p.
+
+**Automated:** `pattrailer-suite` (58 checks), invoking `openPostModal()` end to end.
+
+### Steps
+
+1. Open PAT on a load whose card badge is **P** → the summary reads **(Provided)**, Confirm
+   **ENABLED**.
+2. Open PAT on a load whose card badge is **R** → the summary reads **(Required)**, Confirm
+   **ENABLED**.
+3. ⚠ **The R branch has never been verified against a real post.** After confirming an R post,
+   check on Amazon that the posted trailer type really is carrier-owned.
+4. A card with no badge, or an unexpected letter, leaves **Confirm DISABLED** with the raw value
+   named — never defaulted to Provided.
+
+### Label collection (PART 2)
+
+5. Work the board normally, then run in the extension's console context:
+
+   ```
+   __EXT_DEBUG.dumpTrailerLabels()
+   ```
+
+   It prints a count of P and R labels and the collected pairs between
+   `----- BEGIN TRAILER LABELS -----` / `----- END TRAILER LABELS -----`. **Works at the shipped
+   `DEBUG_LEVEL`** — it uses `console.*`, not `logger.*`.
+6. The label survives a normal board re-render, and `teardownCityAssign()` clears it.
+
+### Fails if
+
+- An R card posts **Provided**, or the summary still reads "(Provided)" for it.
+- A card with no badge posts anything at all rather than blocking.
+- `dumpTrailerLabels` prints nothing after working a board with cards on it.
+
+## TC-PAT-PAYLOAD — the posted values match a real captured upsert (2026-08-19)
+
+**Why it exists.** Ihor captured a genuine Post-a-Truck upsert (DevTools Offline — built, never
+sent). It settled four values, one of which the extension was getting **wrong**.
+
+**Automated:** `patalign-suite` (54 checks), end to end through `openPostModal()`.
+
+### Steps — open PAT on three loads
+
+| load | Driver must read | Confirm |
+|---|---|---|
+| a **team** load (e.g. `d075a306`) | **Team** | **enabled** |
+| a **solo** load (e.g. `743eaba0`) | **Solo** | **enabled** |
+| an **R** load (carrier-owned badge) | Solo or Team per the record | enabled |
+
+On all three: **Loading Type reads "Live or Drop & Hook"**, and the summary shows the equipment
+label.
+
+### Expected payload values
+
+| field | value | backed by |
+|---|---|---|
+| `loadingTypeList` | `["LIVE"]` | capture §7a |
+| `driverTypes` (solo) | `["SOLO"]` | capture §3 |
+| `driverTypes` (team) | `["TEAM"]` | capture §7 |
+| `equipmentTypes` | ARRAY | capture §7 |
+| `visibleEquipmentTypes` | STRING, same value | capture §7 |
+| `providedTrailerType` | `"AMAZON_PROVIDED"` | capture §3 |
+
+⚠ **The R load will still post `AMAZON_PROVIDED`.** Both constants are known, but nothing in the
+record says which a load is — BACKLOG 0n. That is expected today, not a new fault.
+
+### Fails if
+
+- Loading Type posts `["LIVE","DROP"]` → the correction was reverted. That shape has never been
+  observed.
+- A team load posts `["SOLO"]`, or Confirm is disabled on a team load.
+- A 26' Truck load is refused as unsupported → the L3 mapping is missing.
+- A **40' Container** load is *accepted* → it must still be refused; it is not capture-backed.
+
+## TC-PAT-DRIVER — the posted driver type comes from the LOAD (2026-08-19)
+
+**Why it exists.** `driverTypes` was hardcoded `['SOLO']`, so a TEAM load posted silently as
+solo. Measured live: load `743eaba0` `SINGLE_DRIVER` → `["SOLO"]` (correct by luck) and load
+`d075a306` `TEAM_DRIVER` → `["SOLO"]` (wrong, and nothing blocked it).
+
+**Product rule:** the driver type is a property of the LOAD, not a choice. Strictly one to one, no
+default, no fallback, **no dispatcher override** — the field is read-only by design.
+
+**Automated:** `patdriver-suite` (57 checks), invoking `openPostModal()` end to end and asserting
+the **rendered** value and the Confirm state.
+
+### Steps
+
+1. `CITY_ASSIGN_DEBUG = true`, `DEBUG_LEVEL = 3`. Reload.
+2. Open PAT on **load 743eaba0 (SOLO)** → Driver reads **Solo**, Confirm **ENABLED**.
+3. Open PAT on **load d075a306 (TEAM)** → Driver reads **Team**, Confirm **DISABLED**, with the
+   message *"This is a TEAM load. Posting it is blocked until the Team driver value is
+   confirmed…"*.
+4. In both cases the Driver field is plain text — **no dropdown, no way to change it.**
+
+### Expected
+
+| record `transitOperatorType` | modal shows | posts | Confirm |
+|---|---|---|---|
+| `SINGLE_DRIVER` | Solo | `["SOLO"]` | enabled |
+| `TEAM_DRIVER` | **Team** | `["TEAM"]` | enabled *(unblocked 2026-08-19 by a real capture)* |
+| anything else, null, or absent | the raw value | nothing — blocked | disabled |
+
+🔴 **Why TEAM is blocked rather than posted.** The upsert's `driverTypes` value for a team post
+appears in **no capture and no doc** — `api-samples.md` records only `["SOLO"]`, and the board's
+`TEAM_DRIVER` belongs to a different API. Posting a guessed enum to the live marketplace is
+exactly what this task forbids. **Send a manual Post-a-Truck upsert captured with Team selected**
+and it becomes a one-line change.
+
+### Fails if
+
+- A team load shows **Solo** → the derivation is not on the path. **This is the dangerous case.**
+- Any load posts `["SOLO"]` when the record does not say `SINGLE_DRIVER`.
+- A dropdown or override appears on the Driver field → the product rule was broken.
+
+## TC-PAT-STATE — a full state NAME must resolve like a state CODE (2026-08-19)
+
+**Why it exists.** `resolvePATCity()` matches Amazon's cities API on its two-letter
+`stateCode`. The record's `stops[].location.state` carries **both forms in the same field** —
+measured 454/506 code, 52/506 full name. Every full-name stop failed on every match path, so the
+modal showed *"Could not resolve city: «MONROE, Ohio»"* and Confirm stayed disabled.
+
+**Automated:** `patstate-suite` (48 checks), which **invokes `openPostModal()` end to end** and
+asserts a modal node exists — 52/52 full-name stops normalise, 154/154 records open a modal.
+
+### Steps
+
+1. Open the **MONROE, Ohio** load. Click **Post a Truck**.
+2. **No "Could not resolve city" message appears.**
+3. Origin reads **MONROE, OH** (code, not "Ohio").
+4. **Confirm is ENABLED.**
+5. Repeat on a load that already used a code (e.g. **LAFAYETTE, IN**) — unchanged behaviour.
+6. Repeat on **INDIANAPOLIS, Indiana**, **BRISTOL, Indiana**, **SPARROWS POINT, Maryland**.
+
+### An unrecognised state must fail loudly
+
+There is no way to force this from the board, but the behaviour is asserted automatically: an
+unknown value (e.g. "Freedonia") is **not** guessed, the console logs
+`UNRECOGNISED state value … Add this value to PAT_STATE_CODE_BY_NAME` **with the raw value**, the
+on-screen message names it, and **Confirm stays disabled**. If Ihor ever sees that log line, send
+the raw value — it is the signal to extend the table.
+
+### Fails if
+
+- "Could not resolve city" still appears for a full-name load → the normalisation is not on the path.
+- A city resolves to the **wrong state** → the table is wrong. **Report it; do not add a fuzzy
+  fallback** — first-two-letters would map "New York" to NE (Nebraska).
+- A previously-working code load stops resolving → the pass-through broke.
+
+## TC-PAT-MODAL-OPENS — the modal must actually appear (2026-08-19)
+
+**Why it exists. This is the THIRD time a green suite coexisted with a broken flow** — inline panel
+Stage B, then PAT re-sourcing. `patsource-suite` had 62 green checks on
+`patSourceFromRecord()` while clicking Post A Truck threw `ReferenceError: equipment is not
+defined` and produced nothing at all. **Unit-testing the helpers is exactly what misses this.**
+
+**Automated:** `patmodal-suite` (54 checks) — it INVOKES `openPostModal()` and asserts a modal
+node is in the DOM, including for all **154/154** captured records.
+
+### Steps
+
+1. Open a load card so the panel renders. Click **Post a Truck**.
+2. **The modal appears.** (Before this fix: nothing, with a clean console.)
+3. **Loading Type reads "Live or Drop & Hook"** — on every load, whatever the board's own label says.
+4. Every field is filled: Payout, Min/Max Miles, Stops, Start, End, origin, destination.
+5. **Confirm is enabled.**
+6. Summary line reads `Equipment: 53' Trailer (Provided) Loading Type: Live or Drop & Hook`.
+
+### The three sub-cases for loading type
+
+Post a Truck on a load the board labels **Drop**, one labelled **Live**, and one labelled
+**LTL/Live/Drop**. All three must show **"Live or Drop & Hook"**. The third used to be refused
+outright — it must now open and post.
+
+### Failure must never be silent
+
+If the modal cannot be built, a dialog saying **"Post a Truck could not be opened for this load /
+Nothing was sent"** must appear, and the console must carry `openPostModal FAILED` with message,
+stack and loadId. **A dead button with a clean console is the bug this test exists to prevent.**
+
+### Fails if
+
+- Nothing happens on click and the console is clean → the F2 wrapper is not in the path.
+- Loading Type shows anything other than "Live or Drop & Hook" → F3 regressed to being
+  load-dependent. **Do not "fix" it back — it is a product decision (see CHANGELOG 2026-08-19).**
+- Confirm stays disabled → note WHICH field the modal names as missing.
+
+## TC-PAT-RECORD — Post-a-Truck builds from the captured record alone (2026-08-19)
+
+**Why it exists.** PAT was broken by PLAN 29a: it read `detail.header.stopsCount` (a path that no
+longer exists) and re-parsed rendered time strings with an `M/D` regex that cannot match what
+Stage B emits. Smoke item (e) FAILED live. PAT now sources every field from the captured record.
+
+**Automated:** `patsource-suite` (62 checks, incl. 154/154 captured records resolving with nothing
+missing). **Live-board status: NOT RUN — (e) stays FAIL until Ihor re-tests.**
+
+### Steps
+
+1. `CITY_ASSIGN_DEBUG = true`, `DEBUG_LEVEL = 3`. Reload. Open a load card so the panel renders.
+2. Click **Post a Truck**.
+3. **Every field must be filled** — Payout, Min/Max Miles, Stops, Start, End, origin, destination.
+4. **Start time = the pickup's CHECKIN minus 30 minutes.** Compare against the first stop's time
+   in the inline panel.
+5. **End time = the last delivery's CHECKOUT plus 3 hours.**
+6. **Stops equals the number shown on the load card.**
+7. **Confirm is ENABLED.**
+8. Read the `PATDIAG SOURCE` line: `record=` and `card=` must **agree** for payout, distance,
+   equipment and loading type. Disagreement is a finding — the card value is never used, so a
+   mismatch means the record and the board disagree and Ihor should send the line to the PM.
+
+### Expected
+
+| Field | Source | Check |
+|---|---|---|
+| Stops | `record.stopCount` | equals the card's stop count |
+| Start | first stop `checkIn` − 30 min | 30 min before pickup |
+| End | last stop `checkOut` + 3 h | 3 h after last delivery |
+| Payout | `record.payout` × 1.10 | markup unchanged |
+| Min/Max Miles | `record.totalDistance` ± 25 | window unchanged |
+| Equipment | `loads[].equipmentType` enum → PAT constant | never via the display label |
+| Loading type | last stop `unloadingType` | `DROP` → `["DROP"]` |
+
+### Fails if
+
+- Any field is still empty, or Confirm stays disabled → note WHICH field the modal names.
+- An **unmapped equipment enum**: the console logs `UNMAPPED equipment enum` with the raw value at
+  error level and the unsupported-equipment modal appears. **That is correct behaviour, not a
+  bug** — send the PM a capture of that board. Only `FIFTY_THREE_FOOT_TRUCK` and
+  `FIFTY_THREE_FOOT_CONTAINER` are mapped, because only those two are on disk.
+- Start/end differ from the −30 min / +3 h rule → report; do not adjust the constants.
+
+## TC-CLICK-CONTAINER — a click on the card's own padding must do nothing (2026-08-19)
+
+**Why it exists.** Measured live with CLICKDIAG: when `event.target` was a DESCENDANT of the
+card, Amazon highlighted the card and our panel rendered with **matching ids**. When
+`event.target` **was `div.load-card` itself** — the container's own padding, a few pixels along
+the top and bottom of a 72 px card — Amazon did **not** highlight, but our panel rendered anyway.
+All three such clicks logged `*** MISMATCH — the highlighted load and the panel's load are
+DIFFERENT ***`. A dispatcher could read one load's data believing it belonged to another.
+
+**Automated:** `container-suite` (39 checks) + `wiring-suite`. **Live-board status: NOT RUN.**
+
+### Steps
+
+1. `CITY_ASSIGN_DEBUG = true`, `DEBUG_LEVEL = 3`. Reload. Filter the console to `CLICKDIAG`.
+2. **Card centre** — click the middle of a load card.
+   - Amazon highlights the card, its side sheet updates, our accordion expands.
+   - `CLICKDIAG C4 IDS` reports the same id for `highlighted card` and `our panel`, and says
+     `match`.
+3. **Top edge** — click the first 2-3 px at the top of a card.
+   - **Nothing happens.** No panel, no highlight.
+   - `CLICKDIAG C2 OURS` says `** THE CARD CONTAINER ITSELF **`.
+   - The log carries `click ignored — landed on the card container itself`.
+   - **No `*** MISMATCH ***` line appears.**
+4. **Bottom edge** — click the last 2-3 px. Same as step 3.
+5. **The loop is not disturbed:** if auto-refresh was running before an edge click, it is still
+   running after. Only a real card click stops it.
+
+### Expected
+
+| Click | Panel | Amazon highlight | MISMATCH line |
+|---|---|---|---|
+| centre / any descendant | opens, bound to that load | yes | none — ids match |
+| top edge (container) | **none** | none | **none** |
+| bottom edge (container) | **none** | none | **none** |
+
+### Fails if
+
+- An edge click still opens the panel — the guard is not reached.
+- A **centre** click stops opening the panel — the guard is too wide. **Report it; do not widen or
+  narrow the rule.**
+- A `MISMATCH` line appears at all — the hazard is still live.
+
+## TC-CITY-IDEMPOTENT — the filter's deadhead substitution writes nothing when nothing changed (2026-08-19)
+
+**Why it exists.** Every filter apply used to remove and re-insert our deadhead `<span>` on every
+substituted card. Those are childList mutations, which is exactly what the board MutationObserver
+watches, so each apply woke it and the wake re-applied the filter. Measured live on Ihor's board:
+24 `removeChild` + 24 `insertBefore` per apply, 20 wakes in 741 ms, unbounded.
+
+**Automated:** `idempotent-suite` (26 checks). **Live-board status: NOT RUN — no browser.**
+
+### Steps — run on a board with at least one MULTI-CITY load (2+ active cities in range)
+
+1. Set `CITY_ASSIGN_DEBUG = true` in `utils/constants.js`, `DEBUG_LEVEL = 3`. Reload.
+2. Open the load board with 2+ origin cities selected. Filter the console to `CITYDIAG`.
+3. Click a city button. Confirm `CITY DEADHEAD ... inserted N` with N > 0 — the substitution
+   happened.
+4. **THE TEST:** wait with the board idle and no Amazon re-render.
+   - `CITYDIAG Q5 WRITES` for the second apply must show **no `childList` entries** — either
+     `** ZERO WRITES **` or attribute-only writes.
+   - `CITY DEADHEAD` must read `... substitution(s) ALREADY CORRECT, no DOM write performed`.
+   - `CITYDIAG Q6 WAKE` must **stop**, not repeat every 20-25 ms.
+   - `CITYDIAG Q56 SUMMARY` must **not** appear — the 20-wake budget is never exhausted.
+5. **Rendered result unchanged:** the deadhead figure on each multi-city card reads the same
+   before and after, and equals the distance to the SELECTED city (not Amazon's original).
+6. **A real change is still written:** switch to another city. `CITY DEADHEAD` must report
+   `updated in place N` with N > 0, the figures must change, and no card may still show the
+   previous city's number.
+7. **Restore:** click the active city again to return to All. Every card must show Amazon's own
+   deadhead again, with no `[data-testid="ext-city-deadhead"]` node left in the DOM.
+
+### Expected
+
+| | |
+|---|---|
+| Second identical apply | zero childList writes; observer does not re-wake |
+| Rendered figures | identical to the first apply |
+| City switch | values updated **in place**, no node churn |
+| Board with no multi-city load | nothing substituted, as before |
+
+### Fails if
+
+- `CITYDIAG Q6 WAKE` keeps firing while the board is idle — idempotence did not close the loop,
+  and something else is mutating the observed subtree. **Report it; do not add a loop guard.**
+- The deadhead figure changes between two identical applies — the reconcile is not stable.
+- Any card shows the previous city's number after a switch — rule 5 broken.
+
 > ## 🔴 OUTSTANDING AS OF 2026-07-31 — run these first
 >
 > Every change in the 2026-07-31 session was verified by **Node harness only**. No agent has run
