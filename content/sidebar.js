@@ -53,8 +53,12 @@ function buildSidebar() {
     // active — see sidebar.js renderSharedRateStatus()). SIDEBAR_ROW2_HEIGHT in sidebar.js
     // must match this height (20px) — kept as two discrete states rather than a measured
     // getBoundingClientRect() so body padding can be set synchronously, no reflow timing.
+    // U5 (2026-08-20): a TOAST, not a static banner — it fades in, holds, and fades out by
+    // itself. opacity+visibility are transitioned (never display, which cannot animate), so the
+    // fade actually renders and the element leaves the layout when hidden.
     '#ext-sidebar [data-testid="ext-rate-pause-msg"]{' +
-      'display:none;padding:6px 20px 8px;margin-top:-2px;' +
+      'display:none;opacity:0;transition:opacity 320ms ease;' +
+      'padding:6px 20px 8px;margin-top:-2px;' +
       'font-size:11px;font-weight:400;letter-spacing:normal;line-height:1.45;' +
       'color:var(--ext-n700);background:var(--ext-n100);' +
       'border-top:1px solid var(--ext-n200);' +
@@ -307,11 +311,17 @@ function buildSidebar() {
   ratePauseMsg.setAttribute('data-testid', 'ext-rate-pause-msg');
   const ratePauseTitle = document.createElement('span');
   ratePauseTitle.setAttribute('data-testid', 'ext-rate-pause-title');
-  ratePauseTitle.textContent = 'Amazon is taking a short technical pause';
+  // U5: "Server", not "Amazon" — neutral, and it does not name the dispatcher's employer in
+  // something that could be misread as an account problem.
+  ratePauseTitle.textContent = 'Server is taking a short technical pause';
   const ratePauseBody = document.createElement('span');
   ratePauseBody.setAttribute('data-testid', 'ext-rate-pause-body');
   ratePauseBody.textContent = 'The server has paused new loads because of frequent requests. ' +
     'Pause auto-refresh for 5-10 minutes and it will return to normal on its own.';
+
+  // U5: how long the toast stays before fading. Long enough to read two lines unhurried.
+  var RATE_TOAST_VISIBLE_MS = 7000;
+  var _ratePauseToastTimer  = null;
   ratePauseMsg.appendChild(ratePauseTitle);
   ratePauseMsg.appendChild(ratePauseBody);
 
@@ -324,7 +334,18 @@ function buildSidebar() {
   function renderRatePauseMessage() {
     logger.log('sidebar', 'renderRatePauseMessage called');
     try {
-      ratePauseMsg.style.display = _ratePauseMsgVisible ? 'block' : 'none';
+      if (_ratePauseMsgVisible) {
+        ratePauseMsg.style.display = 'block';
+        // One frame between display and opacity, or the transition has no start value to run
+        // from and the toast simply appears.
+        requestAnimationFrame(function () { ratePauseMsg.style.opacity = '1'; });
+      } else {
+        ratePauseMsg.style.opacity = '0';
+        // Leave it in the layout until the fade finishes, then take it out.
+        setTimeout(function () {
+          if (!_ratePauseMsgVisible) ratePauseMsg.style.display = 'none';
+        }, 360);
+      }
       syncBodyPadding(false);
     } catch (e) {
       logger.error('sidebar', 'renderRatePauseMessage failed — leaving the bar as it is',
@@ -334,14 +355,36 @@ function buildSidebar() {
 
   function showRatePauseMessage() {
     logger.log('sidebar', 'showRatePauseMessage called');
-    _ratePauseMsgVisible = true;
-    renderRatePauseMessage();
+    try {
+      _ratePauseMsgVisible = true;
+      renderRatePauseMessage();
+      // ⚠ THE TOAST FADING CHANGES NOTHING BEHIND IT. The loop is already stopped by the time
+      // this runs and it does NOT auto-restart; this timer only takes the words off the screen.
+      // The play/pause control remains the standing, non-transient indication that the loop is
+      // stopped, so the dispatcher can still see the state after the toast is gone.
+      if (_ratePauseToastTimer !== null) clearTimeout(_ratePauseToastTimer);
+      _ratePauseToastTimer = setTimeout(function () {
+        _ratePauseToastTimer = null;
+        hideRatePauseMessage();
+      }, RATE_TOAST_VISIBLE_MS);
+    } catch (e) {
+      logger.error('sidebar', 'showRatePauseMessage failed — the loop is still stopped and the ' +
+        'play/pause control still shows it', { error: e });
+    }
   }
 
   function hideRatePauseMessage() {
     logger.log('sidebar', 'hideRatePauseMessage called');
-    _ratePauseMsgVisible = false;
-    renderRatePauseMessage();
+    try {
+      if (_ratePauseToastTimer !== null) {
+        clearTimeout(_ratePauseToastTimer);
+        _ratePauseToastTimer = null;
+      }
+      _ratePauseMsgVisible = false;
+      renderRatePauseMessage();
+    } catch (e) {
+      logger.error('sidebar', 'hideRatePauseMessage failed', { error: e });
+    }
   }
   container._showRatePauseMessage = showRatePauseMessage;
 
@@ -481,6 +524,56 @@ function buildSidebar() {
   // rateLimited starts null (= "not read yet / field absent"), which is distinct from
   // false; isRateLimitPaused() relies on that distinction for its legacy fallback.
   var _rateLimitState = { backoffUntil: null, backoffStepIndex: -1, rateLimited: null };
+
+  // ── STOP THRESHOLD (2026-08-20, Ihor) ─────────────────────────────────────────────────
+  //
+  // Auto-refresh must NOT stop on the smallest one-off server error. Amazon returns the odd
+  // isolated 502 with no throttling behind it; stopping on that costs the dispatcher money
+  // while other dispatchers take the loads. Stopping slightly late costs nothing, because the
+  // IP throttle lasts 10-15 minutes either way. So: stop on the THIRD CONSECUTIVE rate-limit
+  // response, not the first.
+  //
+  // 🔑 THE COUNTER ALREADY EXISTS — backoffStepIndex. No new field was added, because a second
+  // counter would be a second source of truth. Read from background.js reportResult():
+  //     success            -> backoffStepIndex = -1          (reset)
+  //     rate-limit status  -> backoffStepIndex = prev + 1     (advance)
+  //     anything else      -> returns WITHOUT setState        (untouched)
+  // so it is already exactly "consecutive rate-limit responses, reset by any success", already
+  // in the limiter state, and already shared across tabs by the same storage key that carries
+  // the stop. CONSECUTIVE, never cumulative: three scattered 502s across an hour cannot add up,
+  // because each intervening success resets it to -1.
+  //
+  // The index is 0-based, so the Nth consecutive response leaves it at N-1.
+  var RATE_STOP_AFTER_CONSECUTIVE = 3;
+
+  // How many consecutive rate-limit responses the limiter has seen. -1 means none.
+  function consecutiveRateLimits() {
+    logger.log('sidebar', 'consecutiveRateLimits called');
+    try {
+      var i = _rateLimitState.backoffStepIndex;
+      return (typeof i === 'number' && i >= 0) ? i + 1 : 0;
+    } catch (e) {
+      logger.error('sidebar', 'consecutiveRateLimits failed — treating it as zero so a read ' +
+        'error can never stop the loop', { error: e });
+      return 0;
+    }
+  }
+
+  // ⚠ BACKOFF AND STOP ARE NOW DECOUPLED, deliberately.
+  //   BACKOFF  fires on the FIRST rate-limit response, in background.js. Unchanged — it is the
+  //            pacing mechanism and it is correct.
+  //   STOP + MESSAGE fire only here, on the THIRD. The dispatcher is never told about a pause
+  //            that did not happen.
+  function shouldStopForRateLimit() {
+    logger.log('sidebar', 'shouldStopForRateLimit called');
+    try {
+      return isRateLimitPaused() && consecutiveRateLimits() >= RATE_STOP_AFTER_CONSECUTIVE;
+    } catch (e) {
+      logger.error('sidebar', 'shouldStopForRateLimit failed — NOT stopping, because a false ' +
+        'stop costs the dispatcher loads and a late stop costs nothing', { error: e });
+      return false;
+    }
+  }
 
   // Reads background.js's sticky `rateLimited` flag — deliberately NOT backoffUntil.
   // backoffUntil expiring only means "we may retry now"; the block is lifted only once a
@@ -673,16 +766,28 @@ function buildSidebar() {
       // when the pause lifts, the loop stays stopped until the dispatcher presses play. He stays
       // in control and always knows whether he is scanning. Adding an auto-restart would undo
       // the point of the decision.
-      if (isRateLimitPaused()) {
+      // THRESHOLD (2026-08-20): not the first rate-limit response — the third CONSECUTIVE one.
+      // Backoff has already engaged in background.js on the first; only the stop waits.
+      if (shouldStopForRateLimit()) {
         if (tabState.get('running')) {
           logger.warn('sidebar', 'rate limit reported — stopping the auto-refresh loop in this ' +
             'tab. It will NOT restart by itself; the dispatcher restarts it.', {
             backoffUntil: _rateLimitState.backoffUntil,
-            backoffStepIndex: _rateLimitState.backoffStepIndex
+            backoffStepIndex: _rateLimitState.backoffStepIndex,
+            consecutiveRateLimits: consecutiveRateLimits(),
+            threshold: RATE_STOP_AFTER_CONSECUTIVE
           });
           tabState.set('running', false);
         }
         showRatePauseMessage();
+      } else if (isRateLimitPaused()) {
+        // Backoff is engaged but the threshold is not met: the loop keeps running and the
+        // dispatcher is told NOTHING. This is the one-off 502 case the threshold exists for.
+        logger.log('sidebar', 'rate-limit response seen but below the stop threshold — the loop ' +
+          'keeps running and no message is shown', {
+          consecutiveRateLimits: consecutiveRateLimits(),
+          threshold: RATE_STOP_AFTER_CONSECUTIVE
+        });
       }
     }
     // 2026-07-30: toggling "Shared refresh limit" in the popup must relabel the slider and

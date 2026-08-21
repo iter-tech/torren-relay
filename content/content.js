@@ -137,7 +137,21 @@ if (typeof window !== 'undefined') {
   window.__EXT_DEBUG.rateDiagOff       = function () { return _rd('off'); };
   window.__EXT_DEBUG.rateDiagClear     = function () { return _rd('clear'); };
   window.__EXT_DEBUG.rateDiag          = function () { return rateDiagReport(); };
-  window.__EXT_DEBUG.simulateRateLimit = function (s) { return _rd('simulate', { status: s || 503 }); };
+  // simulateRateLimit(status, times) — fires `times` CONSECUTIVE rate-limit responses through
+  // the real path. The loop stops on the THIRD; one or two leave it running.
+  //   __EXT_DEBUG.simulateRateLimit()          one event
+  //   __EXT_DEBUG.simulateRateLimit(503, 3)    three at once — this one stops the loop
+  //   __EXT_DEBUG.simulateRecovery()           a success — resets the counter to zero
+  window.__EXT_DEBUG.simulateRateLimit = function (s, times) {
+    return _rd('simulate', { status: s || 503, times: times || 1 }).then(function (r) {
+      if (r && r.ok) {
+        console.log('[EXT] consecutive rate-limit responses: ' + r.consecutive + ' of ' + r.stopsAt +
+          '  ->  ' + (r.willStop ? 'THRESHOLD REACHED — the loop stops and the message shows'
+                                 : 'below the threshold — the loop keeps running, no message'));
+      }
+      return r;
+    });
+  };
   window.__EXT_DEBUG.simulateRecovery  = function () { return _rd('recover'); };
 }
 

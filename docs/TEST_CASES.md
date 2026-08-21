@@ -1,5 +1,246 @@
 # Test Cases
 
+## TC-ALL-ONLY — an unassigned load appears under "All" and under NO city tab (2026-08-20)
+
+**Why:** a YORK, PA load appeared under the HEBRON, KY tab. Ihor: a dispatcher who thinks he is
+booking near Hebron and is 450 miles away is a money problem, not a cosmetic one.
+
+⚠ **Rule 9 is REFINED, not overturned.** Both halves must hold in the same run: **hidden under
+every city**, and **visible AND counted under All**. Checking only one half proves nothing.
+
+### A. A load beyond the max distance from every active city
+1. Board with several origin cities and at least one load far from all of them (the YORK case).
+2. Click each city tab in turn.
+   **PASS:** that load appears under **none** of them.
+   **FAIL:** it shows under any city tab — the defect is back.
+3. Click **All**. **PASS:** the load is visible **and carries a badge reading "Origin not
+   determined"**. **FAIL:** visible but unmarked — the dispatcher cannot tell it is unplaced.
+
+### B. A load with no captured coordinates
+Repeat A with a load the capture never saw. **PASS:** identical behaviour — All only, marked.
+**FAIL:** the two categories behave differently; they must not.
+
+### C. Both are counted on the All badge
+4. Count the marked cards under All. **PASS:** the number on the **All** badge equals that count.
+   **FAIL:** the badge is lower — it is probably counting only the never-captured ones, which is
+   the bug this fixed.
+5. Click the badge. **PASS:** the unmatched-only view shows exactly those cards, still marked.
+
+### D. A load in range of TWO cities still appears under both
+6. Find a load whose origin is within the max distance of two active cities.
+   **PASS:** it appears under **both** tabs and is **not** marked.
+   **FAIL:** it appears under only one — membership has become nearest-wins, which it must not.
+
+### E. Nothing flickers
+7. Sit on **All** for a minute while the loop refreshes.
+   **PASS:** the markers stay put; no flashing, no reflow.
+   **FAIL:** they blink each cycle — the reconcile has stopped being idempotent, which is what
+   caused the ~27 wakes/sec observer loop in 2026-08-19.
+
+## TC-WHY-UNASSIGNED — the diagnostic names the cause (2026-08-20)
+
+**Setup:** `CITY_ASSIGN_DEBUG = true`.
+
+1. Load the board and let one assignment cycle run.
+2. Look for `CITY WHY-UNASSIGNED`.
+   **PASS:** one line per unassigned load, plus a header naming the active cities and the 150 mi
+   limit.
+3. For the YORK load, the line should read **`OUT OF RANGE`** with its coordinates, the nearest
+   city and the distance, and the distance to **every** active city.
+   **FAIL (different cause):** it reads `NO COORDINATES` — then the load was never captured, and
+   the line says which lookup came back empty and which endpoint listed it.
+4. **PASS:** the header states that `CITY_ASSIGN_MAX_MILES` was not changed. Whether 150 is right
+   is PLAN 16 and is Ihor's call, not something to infer from these lines.
+
+## TC-RECENT-CARD — a recently-added card renders the panel (2026-08-20)
+
+**Why:** measured failure 1. The recently-added card has **no `div.load-card` ancestor**, so the
+panel's class-based lookup found nothing: Amazon opened its own sheet and we rendered nothing.
+
+⚠ **Three separate lookups had the same defect** — the click handler, the load id, and the
+ANCHOR check. Testing only "does it resolve" would have passed while the panel still refused to
+render, so this case is written end to end.
+
+### Steps
+1. Load board, loop running, so a "recently added" card appears (it is the highlighted one at the
+   top — ⚠ identify it by its highlight, **never** by the words "Recently added", which are not
+   always rendered).
+2. Click that card **on an inner element** — a city name, a price, a time. Not its outer padding.
+   **PASS:** Amazon highlights the card **and our panel renders below it**.
+   **FAIL:** Amazon highlights it and no panel appears — the old failure.
+3. Check the panel is bound to **that** load: its stops must match the card above it.
+   **FAIL:** it shows another load's stops — it bound to the wrong id.
+4. Click an **ordinary** card the same way. **PASS:** unchanged, panel renders, ids match.
+5. Click the recently-added card on its **outer padding** (the few pixels at its very top or
+   bottom edge). **PASS:** **nothing happens** — no panel, no highlight. The 2026-08-19 container
+   guard is deliberately unchanged, and Amazon ignores that click too.
+
+## TC-ZERO-BOX — a card with no layout box DEFERS instead of clicking (2026-08-20)
+
+**Why:** measured failure 2 — `card is 0x0`, `highlight=FALSE`, and Amazon did not react either,
+because the click was dispatched at an element with no box.
+
+### Steps
+1. `CITY_ASSIGN_DEBUG = true`. Start the loop and let several auto-opens happen.
+2. Watch the console for `card has no layout box yet — deferring the click one frame`.
+   **PASS:** if it appears, the very next auto-open block still ends `OPENED` — it waited and
+   then clicked, rather than clicking into the void.
+   **FAIL:** it appears and is followed by a `NOT OPENED` on a card that is plainly on screen.
+3. If a card never lays out, the log reads `still had a 0x0 box after 10 frames — no click was
+   sent`. **PASS:** that is the clean give-up. **FAIL:** the message repeats forever — the retry
+   is meant to be bounded at 10.
+4. **Every AUTODIAG block now prints `card box:` and `target box:`.** **PASS:** `laid out`.
+   **FAIL:** `** 0x0, NOT LAID OUT **` on a card you can see — that is a different bug.
+
+## TC-CLICK-COORDS — the dispatched click carries a point inside the target (2026-08-20)
+
+**Why:** all five measured attempts logged `click (0,0) ** OUTSIDE ** the innermost interactive
+element's box`. Amazon tolerated it three times out of five.
+
+### Steps
+1. `CITY_ASSIGN_DEBUG = true`, loop running, let an auto-open happen.
+2. Read the `X1 EVENT` line.
+   **PASS:** `MouseEvent type=click`, and `client=(x,y)` with **x and y non-zero**.
+   **FAIL:** `client=(0,0)` — the dispatch has regressed to `HTMLElement.click()`, which cannot
+   carry coordinates.
+3. Read `C3 ZONE` in the CLICKDIAG block for the same click.
+   **PASS:** the point is reported **INSIDE** the innermost interactive element's box.
+   **FAIL:** `** OUTSIDE **`.
+4. **PASS:** exactly ONE click event per attempt. **FAIL:** any `pointerdown` / `mousedown` /
+   `mouseup` alongside it — none was added and none may be.
+
+## TC-AUTODIAG — capturing why auto-open sometimes does not open the sheet (2026-08-20)
+
+**Diagnostic run, not a pass/fail test.** The point is to collect blocks, including from
+attempts that WORK — X5 can only name what differed if it has a successful attempt to compare
+against.
+
+### Setup
+
+`CITY_ASSIGN_DEBUG = true` in `utils/constants.js`. `DEBUG_LEVEL` does **not** matter — AUTODIAG
+prints with `console.log` precisely so it works at the stock level.
+
+### Steps
+
+1. Load board, Auto-Open ON, loop started. Leave the tab in the **FOREGROUND**.
+2. Let **three or four** auto-opens happen. Do not touch the mouse — a manual click is a
+   different path and will not produce an AUTODIAG block.
+3. Switch to another tab and leave the board in the **BACKGROUND** for at least **six minutes**,
+   so Chrome's *intensive* timer throttling has time to engage. Let several more auto-opens
+   happen.
+4. Come back and run `__EXT_DEBUG.dumpAutoOpenDiag()`.
+
+### What to send back
+
+Every `[AUTODIAG]` line, plus the table. The blocks that matter most are **a pair**: one reading
+`X5 VERDICT   OPENED` and one reading `X5 VERDICT   ** NOT OPENED **`. A failure with no success
+beside it cannot be diagnosed — X5 will say so rather than guess.
+
+### How to read it before sending
+
+| line | what it settles |
+|---|---|
+| `X1 WHERE ... target === div.load-card container: ** YES **` | the click went to the container — Amazon ignores those |
+| `X1 RESOLVE ... ** FELL BACK to the card element **` | why it went there |
+| `X1 RESOLVE ... COVERED BY OUR OWN UI` | our own bar or panel was over the point |
+| `X1 EVENT ... isTrusted=false ... NO preceding pointerdown` | what a synthetic click does and does not send |
+| `X2 GUARD ... returns early: ** YES **` | our panel would not render — but Amazon still got the click |
+| `X3 TIMER ... ** LATE **` | background-tab timer throttling, measured |
+| `NO CLICK WAS SENT` | nothing was clicked at all — a different failure entirely |
+
+⚠ **`X2 REACH` is printed on every block on purpose.** Our guard cannot swallow the click; it
+only decides whether our panel renders. If X5 blames X2, the mechanism is Amazon ignoring a
+container-targeted click, not the guard intercepting anything.
+
+### Before shipping
+
+Set `CITY_ASSIGN_DEBUG` back to `false`. With it off, AUTODIAG prints nothing and registers no
+listener at all — asserted by `autodiag-suite`.
+
+## TC-U1-INDICATOR-CLEARS — the tab indicator must DISAPPEAR after viewing (2026-08-20)
+
+**Why:** this is the defect U1 fixed, not a cosmetic preference. Removing our `<link>` does not
+make the browser re-read the page's own icon, so the tab kept our mark after the alert stopped.
+
+### Steps
+1. Tab Alert ON in the popup. Start the loop on a load board, then switch to **another tab**.
+2. Wait for a new load. **PASS:** the board tab title alternates with `• New load` (or
+   `• N new loads`) and its favicon breathes softly — one hue, two alphas, about one pulse a
+   second. **FAIL:** a solid red or yellow square, or a fast strobe.
+3. Switch **back** to the board tab.
+   **PASS:** the title returns to Amazon's own AND **the favicon returns to Amazon's own**.
+   **FAIL:** the favicon stops moving but our dot is still sitting there — the defect is back.
+4. Repeat 2–3 twice more without reloading. **PASS:** it restores every time.
+
+⚠ Watch the favicon, not just the title. The title always restored; the favicon was the bug.
+
+## TC-U2-BUTTON-HEIGHT — every city button is the same height, badge or no badge (2026-08-20)
+
+**Why:** the "All" button was visibly shorter. 🔑 **The badge is NOT the cause** — the reserved
+badge slot keeps badges permanently in the DOM. The cause was `display`.
+
+### Steps
+1. Open a board with several origin cities, at least one carrying a new-load badge and at least
+   one without.
+2. Sight along the top and bottom edges of the row.
+   **PASS:** "All" and every city pill are the **same height** — including cities whose badge is
+   empty, and including "All", which never carries a count.
+   **FAIL:** any button is short — check it resolves `min-height:var(--ext-city-btn-h)` and has
+   `display:flex`; a button laid out as a block line box computes its height differently.
+3. Let a city gain a badge while you watch (a new load arrives).
+   **PASS:** **nothing moves** — no reflow, no jump. The slot was already reserved.
+
+## TC-U5-TOAST — the toast dismisses while the loop STAYS STOPPED (2026-08-20)
+
+**Why:** the message now fades by itself. The danger is that its disappearance gets read as
+"everything resumed". It must not be.
+
+### Steps
+1. Loop running. `__EXT_DEBUG.simulateRateLimit(503, 3)` — three consecutive, so the threshold is
+   reached. **PASS:** the loop stops and the top-bar toast **fades in** reading
+   **"Server is taking a short technical pause"**. **FAIL:** it says "Amazon", or it appears
+   instantly with no fade.
+2. Do nothing for about 7 seconds. **PASS:** the toast **fades out** by itself.
+3. Now look at the play/pause control. **PASS:** it still shows **stopped**, and no requests are
+   going out. **FAIL:** the loop is running again — nothing may auto-restart it, least of all a
+   display timer.
+4. Press play. **PASS:** the loop restarts and the toast does not reappear.
+5. Fire step 1 again and press play **while the toast is still visible**.
+   **PASS:** the toast clears immediately and does **not** reappear 7s later — the timer was
+   cleared on the explicit hide.
+
+## TC-RATE-THRESHOLD — one or two rate-limit responses must NOT stop the loop (2026-08-20)
+
+**Why:** Amazon returns the odd isolated 502 with no throttling behind it. Stopping on that costs
+the dispatcher loads. The stop waits for **three consecutive** responses.
+
+⚠ **Backoff still engages on the first** — that is the pacing mechanism and is correct. Only the
+**stop and the message** wait for the threshold.
+
+### Steps — one tab, loop running
+
+1. `__EXT_DEBUG.simulateRateLimit()` — **one** event.
+   **PASS:** the loop keeps running, **no message**, console reports `1 of 3`.
+   **FAIL:** the loop stops — the threshold is not being applied.
+2. `__EXT_DEBUG.simulateRateLimit()` again — **two** consecutive.
+   **PASS:** still running, still no message, `2 of 3`.
+3. `__EXT_DEBUG.simulateRateLimit()` a third time — **three** consecutive.
+   **PASS:** the loop **stops** and the top-bar message appears. `3 of 3`, `THRESHOLD REACHED`.
+4. Press play to restart (the message clears). Then:
+   `__EXT_DEBUG.simulateRateLimit()` → `__EXT_DEBUG.simulateRecovery()` →
+   `__EXT_DEBUG.simulateRateLimit()` → `__EXT_DEBUG.simulateRecovery()` →
+   `__EXT_DEBUG.simulateRateLimit()`
+   **PASS:** the loop is **still running** — each success reset the count, so three *scattered*
+   events never add up. Every simulate reports `1 of 3`.
+   **FAIL:** it stops — the counter is cumulative, which is the bug this guards.
+5. Shortcut: `__EXT_DEBUG.simulateRateLimit(503, 3)` fires all three at once and must stop the
+   loop immediately.
+
+### Also still true
+
+No auto-restart when the backoff clears; the message clears only on restart; no "Shared refresh
+limit" toggle in the popup.
+
 ## TC-RATE-PAUSE — throttling stops the loop and shows the calm message (2026-08-20)
 
 Replaces the four-tab aggregate test: with the shared limit shipping OFF there is no aggregate

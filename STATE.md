@@ -19,9 +19,12 @@ plausibly affects it — and say which one and why.
 | a | popup opens without console errors | ✅ PASS |
 | b | logged-out popup shows only the login block | ✅ PASS |
 | c | full login flow (email → code → features) | ✅ PASS |
-| d | sidebar/panel activates on the load board | ✅ PASS |
+| d | sidebar/panel activates on the load board | ✅ PASS — ⚠ **re-test after U1–U5**: the top
+  bar and the inline panel both changed (rate-limit toast, city-button heights, stop-row
+  backgrounds) |
 | e | **PAT modal opens and Confirm enables** | ✅ **PASS** — Ihor, 2026-08-20, on both a P and an R load |
-| f | no errors in the page console | ✅ PASS |
+| f | no errors in the page console | ✅ PASS — ⚠ **re-test after U1–U5**: three files gained
+  new runtime code paths (canvas favicon painting, a toast timer, unconditional Similar-hide) |
 
 ⚠ **(f) passing is itself evidence** for the PAT bug below: the failure throws an unhandled promise
 rejection that never reaches `logger.error`, so the console stays clean while nothing happens.
@@ -174,8 +177,17 @@ Everything from 2026-08-13 onward:
 - **Merged top bar** — the city row is no longer a floating panel; the bar is draggable and
   re-docks on double-click; load-board only
 - Three panel visual fixes: heading treatment (15.79:1), full-width table, no zebra striping
+- **U1–U5, 2026-08-20** — the tab indicator restores the page favicon (a real defect, not a
+  cosmetic change) and breathes one accent hue instead of strobing red/yellow; every city
+  button holds one height (`--ext-city-btn-h`); accordion stop rows carry an explicit
+  `--ext-surface` background; "Similar matches" hides always and its toggle is gone; the
+  rate-limit message is a self-dismissing toast reading "**Server** is taking a short technical
+  pause". ⚠ The toast fading does **not** restart the loop — play/pause stays the standing
+  indication of the stopped state
 
-**1345 checks across 20 suites, 0 red.**
+**1905 checks green.** The single red is the standing true positive that `DEBUG_LEVEL = 3` and
+`CITY_ASSIGN_DEBUG = true` are set in the working tree — **both must return to `1` / `false`
+before shipping**.
 
 ---
 
@@ -216,6 +228,31 @@ when the flag is off.
 
 ---
 
+## Open diagnostics
+
+- **UNASSIGNED LOADS ARE "ALL" ONLY — fixed 2026-08-20, awaiting Ihor's board run.** A YORK, PA
+  load was appearing under the HEBRON, KY tab. Both unassigned categories are now hidden from
+  every city tab, shown under **All** with an *"Origin not determined"* marker, and **both**
+  counted on the All badge (only one was before). 🔑 **Rule 9 is REFINED, not overturned** —
+  HANDOFF §4 rule 9a. ⚠ `CITY_ASSIGN_MAX_MILES` untouched (PLAN 16 is Ihor's call). A new
+  flag-gated `CITY WHY-UNASSIGNED` line says why each load was unplaced.
+
+
+- **AUTO-OPEN — FIXED 2026-08-20, awaiting Ihor's board run.** Two measured failures, both fixed:
+  a recently-added card has **no `div.load-card` ancestor** (resolved through cityAssign's
+  id-shape rule now, in **three** places — handler, id, and anchor), and a **0x0 card** was being
+  clicked before layout (bounded one-frame retry, then a clean give-up). The click also carries
+  real coordinates now — `.click()` could not. 📏 **Tab visibility is NOT the cause and that
+  hypothesis is closed.** ⚠ The 2026-08-19 container guard is deliberately unchanged.
+
+- **AUTODIAG (2026-08-20)** — auto-open sometimes fails to open Amazon's sheet.
+  `content/detailOpener.js` is instrumented behind `CITY_ASSIGN_DEBUG`; nothing is fixed.
+  🔑 Already settled from source: **our click-zone guard cannot be the cause** — it calls neither
+  `preventDefault` nor `stopPropagation`. ⚠ But a fallback in `detailOpener.js` dispatches at the
+  **card container**, and Amazon was measured to ignore those. **Awaiting Ihor's board run**
+  (TC-AUTODIAG): several foreground auto-opens and several background ones, then
+  `__EXT_DEBUG.dumpAutoOpenDiag()`.
+
 ## Blockers
 
 | blocker | waiting on |
@@ -223,7 +260,7 @@ when the flag is off.
 | 🔴 **Smoke item (e) — PAT — re-test** (PLAN 30 / BACKLOG 0h, 0i) | **Ihor.** Record-sourcing, the modal crash and the silent-failure class are all fixed in code; 54 new end-to-end checks, 154/154 captured records open a modal. Nobody has seen it work. **Blocks launch until re-tested.** TC-PAT-MODAL-OPENS has the steps. |
 | ⚠ **`["LIVE","DROP"]` never captured** (BACKLOG 0k) | **a capture from Ihor** of a manual PAT upsert with "Live or Drop & Hook" selected. Every posted value is verified except this array. |
 | ⚠ **Two equipment enums have no mapping** (BACKLOG 0h item 1) | **a capture from Ihor** of a board carrying 40' Container or 26' Truck. Until then those loads route to the unsupported-equipment modal with the raw enum logged — deliberately, rather than guessing. |
-| ✅ ~~Cross-tab rate limiting, live multi-tab test~~ (PLAN 10) | **CLOSED 2026-08-20 by product decision.** The shared limit ships OFF — the toggle is removed and slowing refreshes silently would read as broken, not as protection. **No aggregate-rate behaviour remains to test across tabs, so the four-tab run is retired.** Replaced by: the loop auto-stops on a real 429/502/503/504 in every tab and never auto-restarts, and a calm message appears in the top bar. Machinery deferred, not deleted (BACKLOG 0s). |
+| ✅ ~~Cross-tab rate limiting, live multi-tab test~~ (PLAN 10) | **CLOSED 2026-08-20 by product decision.** The shared limit ships OFF — the toggle is removed and slowing refreshes silently would read as broken, not as protection. **No aggregate-rate behaviour remains to test across tabs, so the four-tab run is retired.** Replaced by: the loop auto-stops on **three CONSECUTIVE** 429/502/503/504 responses in every tab and never auto-restarts, and a calm message appears in the top bar. ⚠ **Backoff still fires on the FIRST response — only the stop waits**, so an isolated 502 no longer costs the dispatcher his board. The counter is the existing `backoffStepIndex`; no second counter exists. Machinery deferred, not deleted (BACKLOG 0s). |
 | ⚠ **`DEBUG_LEVEL` is `3`** in `utils/constants.js` | must be `1` before shipping. One line. The other four debug flags are already off; `CITY_FILTER_ENABLED` is a **product** flag and stays `true`. |
 | PLAN 6 / 7 — filtering and button wiring | **Only Ihor's eyes can close these.** Built and believed working. |
 | PLAN 8 — PAT R-type support | a **captured manual R upsert payload**. Cannot be guessed. |

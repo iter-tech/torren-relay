@@ -95,8 +95,16 @@ var _hideSimilarAuthed = false;
 function activateFilterSimilar() {
   if (_hideSimilarAuthed) return;
   _hideSimilarAuthed = true;
-  storage.get(STORAGE_KEYS.HIDE_SIMILAR, false).then(function (on) {
-    applyHideSimilar(on === true);
+  // U4 (2026-08-20, Ihor): ALWAYS ON once the extension is active. The stored preference is no
+  // longer consulted and the popup toggle is gone — with per-city filtering the Similar-matches
+  // block has nowhere sensible to appear, so a switch for it only added confusion.
+  //
+  // ⚠ THE BLOCK IS FOUND STRUCTURALLY, NEVER BY ITS TEXT. "Similar matches" is localised across
+  // all 11 Relay domains. The rule this file already implements (see its header): the MAIN
+  // results are the FIRST div.load-list following #search-results-summary-panel, and a SECOND
+  // div.load-list on the page is the Similar-matches block. That is unchanged here.
+  Promise.resolve().then(function () {
+    applyHideSimilar(true);
   }).catch(function (e) {
     logger.warn('filterSimilar', 'activateFilterSimilar failed', { error: e });
   });
@@ -131,8 +139,9 @@ if (typeof onAuthGateChange === 'function') {
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== 'local') return;
   if (!_hideSimilarAuthed) return;
+  // U4: the key is no longer a control. The listener is left in place, inert, so nothing else
+  // has to change and re-introducing the toggle is a one-line revert.
   if (!changes[STORAGE_KEYS.HIDE_SIMILAR]) return;
-  applyHideSimilar(changes[STORAGE_KEYS.HIDE_SIMILAR].newValue === true);
 });
 
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};

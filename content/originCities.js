@@ -158,8 +158,37 @@ function injectOriginPanelStyle() {
     '}' +
     // Hidden entirely until there are cities to show, so the bar does not grow an empty strip.
     '#ext-origin-cities[data-empty="true"]{display:none;}' +
+    // U2: one constant row height, defined once. 14px text at line-height 1.25 is 17.5px, plus
+    // 8px padding top and bottom and 1px border each side = 35.5px; 36px is that rounded up, so
+    // nothing is clipped and no button can disagree with another.
+    '#ext-origin-cities{--ext-city-btn-h:36px;}' +
     // THE "ALL" BUTTON (2026-08-13). Was a static caption; it is now the filter's reset control,
     // so it is styled as a pill like the cities rather than as a heading.
+    // ── U2 (2026-08-20): THE ALL BUTTON WAS SHORTER, AND THE BADGE WAS NOT THE CAUSE ───────
+    //
+    // MEASURED FROM THE BOX MODEL, not guessed. Both buttons are <div>s with IDENTICAL
+    // font-size 14px, font-weight 600, padding 8px 14px, 1px border and line-height 1.25.
+    // The one difference was the DISPLAY:
+    //   city pill : display:flex  -> children are flex items; height = the tallest child
+    //   All button: NO display declared -> blockified as a flex item of the row, but its own
+    //               children fall into an INLINE formatting context, so its height is a LINE
+    //               BOX built by baseline-aligning 14px/1.25 text against an inline-block badge
+    //               with line-height:16px. A different box model, therefore a different height.
+    // The 'flex-direction:row;align-items:center' rule further down applied to it was INERT for
+    // exactly the same reason — no flex display for it to act on.
+    //
+    // ⚠ THE BADGE IS NOT THE CAUSE, and this is checkable: the RESERVED BADGE SLOT (2026-08-14)
+    // means both badges are ALWAYS in the DOM and merely transparent when empty. They are never
+    // added or removed, so a count appearing cannot change any button's size. That was fixed six
+    // days ago; what remained was this display asymmetry.
+    //
+    // THE FIX: same display for both, plus one explicit min-height so the row is a constant
+    // height whatever any child does.
+    '#ext-origin-cities [data-testid="ext-origin-cities-all"],' +
+    '#ext-origin-cities [data-testid="ext-origin-city"]{' +
+      'display:flex;flex-direction:row;align-items:center;' +
+      'min-height:var(--ext-city-btn-h);box-sizing:border-box;' +
+    '}' +
     '#ext-origin-cities [data-testid="ext-origin-cities-all"]{' +
       'flex-shrink:0;' +
       'font-size:14px;font-weight:600;color:var(--ext-n700);white-space:nowrap;' +

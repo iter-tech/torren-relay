@@ -5,6 +5,56 @@ One task at a time, in this order. Detail lives in STATE.md / BACKLOG.md; sequen
 
 ---
 
+## 30. AUTO-OPEN — FIXED 2026-08-20  **done**
+
+Two measured failures, both closed. Evidence in CHANGELOG and BACKLOG 0y-FIXED.
+
+1. **The recently-added card carries NO `div.load-card` class.** The panel resolved cards by that
+   class in **THREE** places — the click handler, the load id, and the anchor check — and all
+   three now use cityAssign's established **id-shape** rule via `resolveCardForNode()`.
+   🔑 The rule is **REUSED, not copied**. ⚠ It does **not** anchor on
+   `wo-card-header--highlighted`, which is a STATE class, not a card class.
+
+2. **A card with a 0x0 box was being clicked before layout.** `hasLayoutBox()` gates the
+   dispatch, with a bounded one-frame retry (`AUTO_OPEN_LAYOUT_ATTEMPTS = 10`) and a clean
+   give-up. ⚠ rAF is suspended in background tabs, so the retry falls back to a 16 ms timer —
+   without that, this fix would have hung every hidden tab silently.
+
+Also: the dispatch is a constructed `MouseEvent` carrying the target's centre coordinates.
+`HTMLElement.click()` takes no arguments, so every synthetic click had been landing at (0,0),
+outside the target box. Still ONE click, same gates — `docs/SAFETY.md` Click 2 updated.
+
+⚠ **PLAN 7b ordering is preserved exactly:** `openTopNewLoad()` still returns synchronously and
+the retry lives inside the already-scheduled callback, so the loop still stops before any await.
+
+📏 **TAB VISIBILITY IS NOT THE CAUSE** — measured in both foreground and background tabs, with
+successes and failures in each. **Do not re-open that hypothesis.**
+
+---
+
+## 31. UNASSIGNED LOADS ARE "ALL" ONLY — 2026-08-20  **done**
+
+A YORK, PA load appeared under the HEBRON, KY tab. Ihor: *a dispatcher who believes he is booking
+near Hebron and is actually in New York is a serious problem, not a cosmetic one.*
+
+Both categories of unassigned — never-captured and captured-but-out-of-range — are now hidden
+from every city tab, shown under **All** with an *"Origin not determined"* marker, and **both**
+counted on the All badge. The counter previously omitted the out-of-range category entirely.
+
+🔑 **RULE 9 IS REFINED, NOT OVERTURNED.** Unassigned loads are still visible and still counted;
+"visible" now means *in All*. See HANDOFF §4 rule **9a** for Ihor's reasoning. A future change
+that restores "never hidden" re-creates this defect.
+
+⚠ **`CITY_ASSIGN_MAX_MILES` was NOT changed — that is PLAN 16 and Ihor has not decided it.**
+City membership is also unchanged: every active city within the max, **not** nearest-wins, so a
+load in range of two cities still appears under both.
+
+A flag-gated `CITY WHY-UNASSIGNED` line now reports, per unassigned load, its coordinates, the
+distance to **every** active city, the nearest and by how much it misses — or, with no
+coordinates, which lookup came back empty and which endpoint listed it.
+
+---
+
 ## Before launch
 
 1. **Live DOM capture — main vs similar list.** **done** (2026-08-13). Structure recorded in `AMAZON_SELECTORS.md`: the summary panel is a **sibling** of the results, not a container.
@@ -21,7 +71,7 @@ One task at a time, in this order. Detail lives in STATE.md / BACKLOG.md; sequen
 7f. **Per-page working set — assignment and filtering follow the rendered page.** built, **awaiting live confirmation** (2026-08-13). Ihor's rule: work only with the loads currently rendered. Fixes filtering degrading past 50 results, where the re-render path's MERGE left the previous page's assignments in the map while the board showed different loads. A page change now replaces the map; an ordinary re-render still merges. Detected from the "Showing 51 - 100 of 145" range plus the first/last rendered ids — never from the page controls, which we never touch. Coordinates persist across pages, so returning to page 1 re-filters from memory with no new request. Observer re-attach added: a detached observer would stop noticing pagination silently. Established from captures: **one /search response = one page** (max 50 records), so page 2 needs its own request. 59 new checks; 868 green. *Live-verify: on a 3-page board, each page filters correctly and coverage reads N/N per page.*
 8. **Post-a-Truck: R-type (own-trailer) support.** ✅ **CLOSED 2026-08-20** — Ihor confirmed PAT working on both a P and an R load; smoke item (e) PASSES. The one caveat is not a blocker and is tracked separately: trailer ownership is an authorised INTERIM DOM DEPENDENCY (BACKLOG 0p), to be replaced when the record-based rule is found. — PRIOR: **IMPLEMENTED 2026-08-20, NOT CLOSED.** PAT now posts `CARRIER_OWNED` for an R load and `AMAZON_PROVIDED` for a P load, derived from the card's badge letter. **It stays OPEN for two reasons:** (1) the R branch is UNVERIFIED — "R" appears in no captured card, so Ihor must confirm a real R post on Amazon; and (2) the source is an authorised INTERIM DOM DEPENDENCY, the only non-record field in the payload, which must be replaced when the record-based rule is found (label collection is now running to find it) or when Ihor's backend supplies ownership directly. Closing this task means both are done. — PRIOR STATE: **blocked on DETECTION (2026-08-19).** Eleven real upserts (api-samples 8) settled the enums: providedTrailerType is exactly "AMAZON_PROVIDED" or "CARRIER_OWNED", always equal to visibleProvidedTrailerType. **The payload side is done.** What blocks it is that the search response does not say which a load is: measured across 159 work opportunities / 506 stops, no path carries either enum or a bare P/R, and the PLAN 29f candidate `trailerDetails[].assetOwner` is DISQUALIFIED because 42 of 159 loads carry two different owners across their own stops (api-samples 9). **Needs: the /search response for an R-badge load and for a P-badge load.** See BACKLOG 0p. ✅ The 53' Trailer gap is CLOSED (2026-08-19): the expanded array was captured twice and is byte-identical to PAT_EQUIPMENT_TYPES_53, so no change was needed (BACKLOG 0r). PLAN 8's remaining blocker is DETECTION alone. ⚠ FIFTY_THREE_FOOT_REEFER_TRUCK is still uncaptured and refuses to post. *Verify: PAT footer on an R load no longer says "(Provided)", and a real R post goes through.*
 9. **Correct stale claims in `api-samples.md` §6.5 / §6.7.** **done** (2026-08-17). §6.5's "page size 50" and §6.7's "paginates at 5" were BOTH wrong: measured across every capture, page size is not fixed — 4, 5 and 50 all observed. What is stable is "at most 50 per response, and never hardcode it — read the rendered range". Corrected in `api-samples.md` and `AMAZON_SELECTORS.md`, and recorded in HANDOFF §7. *Verify: nothing on screen — docs only.*
-10. ✅ **CLOSED 2026-08-20 BY PRODUCT DECISION — the four-tab test is NO LONGER REQUIRED.** Ihor removed the "Shared refresh limit" toggle and the feature now ships OFF: silently slowing refreshes while the bar says "Refresh every 2.5s" reads as broken, not as protection. **With the shared limit off there is no aggregate-rate behaviour left to test across tabs**, so the four-tab aggregate requirement is retired. The machinery is intact and unreachable (BACKLOG 0s), one constant re-enables it, and ⚠ backoff is untouched and still pauses every tab. What replaced the test: **D2** the loop now STOPS by itself on a real 429/502/503/504, in every tab, and never auto-restarts; **D3** a calm message appears in the TOP BAR and clears when the dispatcher restarts. Covered by TC-RATE-PAUSE in one tab. — PRIOR: **[INSTRUMENTED 2026-08-20 — ready for Ihor's four-tab run.]** The mechanism was read from source first and it is sound: one global `lastGrantedAt` floor in `chrome.storage.local`, FIFO through `permitQueueTail`, re-read after every wait, with backoff checked BEFORE the shared-limit toggle so a rate-limit status pauses every tab either way. **The aggregate rate CAN hold as built — no defect.** There is no token/lease/turn: it is a permit with a global floor, first-come-first-served. Diagnostics added (flag-gated, no behaviour change) so the aggregate is visible from ANY ONE console: `__EXT_DEBUG.rateDiagOn()` / `rateDiag()` / `rateDiagOff()`. The 503 pause is triggered ONLY by an HTTP status in `RATE_LIMIT_STATUSES = [429,502,503,504]` inside `reportResult()` — ⚠ **DevTools request blocking does NOT trigger it** (no status, different branch, and aborts are not reported at all), so `__EXT_DEBUG.simulateRateLimit()` was added: it calls the REAL `reportResult()`, proving pause/backoff/propagation/resume but NOT the networkObserver→content relay. `WATCH_PATH` confirmed still search-only. See CHANGELOG 2026-08-20 and TEST_CASES TC-RATE-4TAB. — ORIGINAL: **Cross-tab rate limiting — live multi-tab test (🚫 pre-launch blocker).** next. *Verify: 4 tabs open, aggregate request rate equals the global interval, not 4×; a forced 503 pauses and resumes all tabs together.*
+10. ✅ **CLOSED 2026-08-20 BY PRODUCT DECISION — the four-tab test is NO LONGER REQUIRED.** Ihor removed the "Shared refresh limit" toggle and the feature now ships OFF: silently slowing refreshes while the bar says "Refresh every 2.5s" reads as broken, not as protection. **With the shared limit off there is no aggregate-rate behaviour left to test across tabs**, so the four-tab aggregate requirement is retired. The machinery is intact and unreachable (BACKLOG 0s), one constant re-enables it, and ⚠ backoff is untouched and still pauses every tab. What replaced the test: **D2** the loop now STOPS by itself on **three CONSECUTIVE** 429/502/503/504 responses (2026-08-20 follow-up — an isolated 502 must not stop the board), in every tab, and never auto-restarts. Backoff still engages on the FIRST response: backoff and stop are deliberately decoupled. The counter is the existing `backoffStepIndex`, not a new field; **D3** a calm message appears in the TOP BAR and clears when the dispatcher restarts. Covered by TC-RATE-PAUSE in one tab. — PRIOR: **[INSTRUMENTED 2026-08-20 — ready for Ihor's four-tab run.]** The mechanism was read from source first and it is sound: one global `lastGrantedAt` floor in `chrome.storage.local`, FIFO through `permitQueueTail`, re-read after every wait, with backoff checked BEFORE the shared-limit toggle so a rate-limit status pauses every tab either way. **The aggregate rate CAN hold as built — no defect.** There is no token/lease/turn: it is a permit with a global floor, first-come-first-served. Diagnostics added (flag-gated, no behaviour change) so the aggregate is visible from ANY ONE console: `__EXT_DEBUG.rateDiagOn()` / `rateDiag()` / `rateDiagOff()`. The 503 pause is triggered ONLY by an HTTP status in `RATE_LIMIT_STATUSES = [429,502,503,504]` inside `reportResult()` — ⚠ **DevTools request blocking does NOT trigger it** (no status, different branch, and aborts are not reported at all), so `__EXT_DEBUG.simulateRateLimit()` was added: it calls the REAL `reportResult()`, proving pause/backoff/propagation/resume but NOT the networkObserver→content relay. `WATCH_PATH` confirmed still search-only. See CHANGELOG 2026-08-20 and TEST_CASES TC-RATE-4TAB. — ORIGINAL: **Cross-tab rate limiting — live multi-tab test (🚫 pre-launch blocker).** next. *Verify: 4 tabs open, aggregate request rate equals the global interval, not 4×; a forced 503 pauses and resumes all tabs together.*
 11. **Full manual smoke pass + outstanding TEST_CASES.** blocked (on Ihor running it). **Never run for this entire phase** — every change since 2026-08-13 reports the six items as NOT RUN. This is the single highest-value thing Ihor can do next. *Verify: all six smoke items pass — popup opens clean, logged-out popup shows only login, full login flow, sidebar activates, PAT modal Confirm enables, no page-console errors.*
 12. **All five debug flags back OFF, final build check.** blocked (on 11). ⚠ **`DEBUG_LEVEL` is currently `3` and must return to `1`.** The other four flags are already off; `CITY_FILTER_ENABLED` is a PRODUCT flag and stays `true`. *Verify: at stock level the console shows no CITY / capture lines at all.*
 13. **Store submission package** — manifest description copy, icons 16/32/48/128, privacy policy page, listing materials, data disclosure, version bump, zip. next (non-code). *Verify: I load the zipped build unpacked and it behaves exactly like the working tree.*

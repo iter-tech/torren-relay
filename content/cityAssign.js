@@ -194,6 +194,12 @@ function getLoadRecord(loadId) {
 // same outcome but very different problems, and Ihor cannot report a pattern from a number.
 var _cityNoCoordIds = {};
 
+// Which captured endpoint last mentioned an id — 'search' | 'recommendations' | 'similar', the
+// labels networkObserver.js already assigns. DIAGNOSTICS ONLY (2026-08-20): it answers "from
+// which endpoint did the record come" for an unassigned load, and nothing reads it to make a
+// decision. Deliberately a SIDE map: the merged coordinate map is not changed.
+var _cityIdEndpointById = {};
+
 // The third filter state, alongside null (All) and a city name: show ONLY the cards that could
 // not be matched to any city. Carried inside _cityFilterActive as a sentinel rather than as a
 // fourth variable, so re-apply-after-refresh, restore-on-teardown and the panel-anchor check
@@ -236,6 +242,10 @@ function mergePickupCoords(pairs) {
     // the record it describes (PART 2).
     if (Object.prototype.hasOwnProperty.call(_cityTrailerLabelById, old)) {
       delete _cityTrailerLabelById[old];
+    }
+    // Same for the diagnostic endpoint note (2026-08-20): one eviction, one order list.
+    if (Object.prototype.hasOwnProperty.call(_cityIdEndpointById, old)) {
+      delete _cityIdEndpointById[old];
     }
     if (!Object.prototype.hasOwnProperty.call(_cityPickupById, old)) continue;
     delete _cityPickupById[old];
@@ -1128,6 +1138,23 @@ function readMainCardElements() {
 var DEADHEAD_LABEL_SELECTOR = 'span[title="Deadhead"]';
 var DEADHEAD_TESTID         = 'ext-city-deadhead';
 
+// ── THE UNASSIGNED MARKER (2026-08-20, Ihor) ──────────────────────────────────────────────
+//
+// A load whose origin we could not determine now appears under "All" ONLY, and says so on the
+// card. Before this, an unassigned load was shown under EVERY city tab — and a YORK, PA load
+// appeared under the HEBRON, KY tab. Ihor: a dispatcher who believes he is booking near Hebron
+// and is actually 450 miles away is a money problem, not a cosmetic one.
+//
+// ⚠ THIS REFINES SETTLED RULE 9, IT DOES NOT OVERTURN IT. Rule 9 keeps unassigned loads VISIBLE
+// and counted, because a silently broken assignment once looked exactly like a working filter.
+// That still holds. What changed is where "visible" means: visible IN "All", not visible under
+// every city. See docs/HANDOFF.md, rule 9.
+var UNASSIGNED_TESTID       = 'ext-city-unassigned';
+var UNASSIGNED_TEXT         = 'Origin not determined';
+var UNASSIGNED_TITLE        = 'Torren Relay could not determine this load\'s origin city, so it ' +
+                              'is shown only under All. Check the load before booking.';
+var _unassignedMarked       = [];   // [{ cardEl, ourEl }] — exactly what we inserted
+
 // One record per patched card, so the restore is exact rather than a best guess.
 var _deadheadPatched = [];
 
@@ -1372,6 +1399,128 @@ function formatMiles(miles) {
 // Undoes every hide we performed, exactly. Also sweeps the main list for a stray display:none
 // we may have orphaned (an extension reload leaves the DOM styled but our tracker empty), which
 // is what makes applyCityFilter(null) a reliable one-step way back to a normal board.
+// Removes every marker we inserted, and sweeps any stray one a previous script instance left.
+// Mirrors restoreDeadheads() exactly, for the same reasons.
+function clearUnassignedMarkers() {
+  logger.log('cityAssign', 'clearUnassignedMarkers called');
+  var removed = 0, swept = 0;
+  try {
+    for (var i = 0; i < _unassignedMarked.length; i++) {
+      var rec = _unassignedMarked[i];
+      if (!rec || !rec.ourEl || !rec.ourEl.parentNode) continue;
+      if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'removeChild unassigned-marker', rec.ourEl, 'attached', 'detached');
+      rec.ourEl.parentNode.removeChild(rec.ourEl);
+      removed++;
+    }
+    _unassignedMarked = [];
+
+    var stray = document.querySelectorAll('[data-testid="' + UNASSIGNED_TESTID + '"]');
+    for (var j = 0; j < stray.length; j++) {
+      if (stray[j].parentNode) { stray[j].parentNode.removeChild(stray[j]); swept++; }
+    }
+    if (swept > 0) {
+      logger.warn('cityAssign', 'swept orphaned unassigned markers — likely left by a previous ' +
+        'script instance', { swept: swept });
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'clearUnassignedMarkers failed — a marker may be left on a card',
+      { error: e, removed: removed, swept: swept });
+  }
+  return { removed: removed, swept: swept };
+}
+
+// Marks the unassigned cards that are VISIBLE in this view, and unmarks everything else.
+//
+// ⚠ IDEMPOTENT, FOR THE REASON THE DEADHEAD SUBSTITUTION IS. Inserting and removing nodes are
+// childList mutations, which is exactly what the board observer watches; a mark-then-unmark
+// on every apply would wake it, and the wake would re-apply. Measured at ~27 wakes/sec when the
+// deadhead code had that shape (2026-08-19). A card already carrying our marker is left
+// COMPLETELY untouched: no removeChild, no insertBefore, no attribute write.
+function applyUnassignedMarkers(cards, shouldMark) {
+  logger.log('cityAssign', 'applyUnassignedMarkers called', { mark: shouldMark === true });
+  var added = 0, kept = 0, dropped = 0;
+  try {
+    // ── PASS 1: the DESIRED set. Read-only. Keyed on the CARD ELEMENT, not the id, because
+    //    readMainCardElements() has no dedupe and a duplicate id means two real elements.
+    var desired = [];
+    if (shouldMark === true) {
+      for (var i = 0; i < cards.length; i++) {
+        var assigned = Object.prototype.hasOwnProperty.call(_cityAssignByCard, cards[i].id)
+          ? _cityAssignByCard[cards[i].id] : null;
+        if (assigned && assigned.length) continue;         // assigned — nothing to say
+        if (!cards[i].el) continue;
+        desired.push({ el: cards[i].el, done: false });
+      }
+    }
+
+    // ── PASS 2: judge what is already there.
+    var survivors = [];
+    for (var k = 0; k < _unassignedMarked.length; k++) {
+      var rec = _unassignedMarked[k];
+      if (!rec) continue;
+      var want = null;
+      for (var w = 0; w < desired.length; w++) {
+        if (!desired[w].done && desired[w].el === rec.cardEl) { want = desired[w]; break; }
+      }
+      var attached = !!(rec.ourEl && rec.ourEl.parentNode);
+      if (want && attached) {
+        want.done = true; survivors.push(rec); kept++;     // ZERO DOM writes
+        continue;
+      }
+      try {
+        if (attached) {
+          if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'removeChild unassigned-marker', rec.ourEl, 'attached', 'detached');
+          rec.ourEl.parentNode.removeChild(rec.ourEl);
+        }
+        dropped++;
+      } catch (e1) {
+        logger.error('cityAssign', 'one unassigned-marker undo failed — continuing', { error: e1 });
+      }
+    }
+    _unassignedMarked = survivors;
+
+    // ── PASS 3: insert what is missing.
+    for (var d = 0; d < desired.length; d++) {
+      if (desired[d].done) continue;
+      var cardEl = desired[d].el;
+      if (!cardEl || typeof cardEl.appendChild !== 'function') continue;
+
+      // textContent only — never innerHTML, and nothing is read back off Amazon's markup.
+      // Colours come from --ext-* tokens; no literal, no css-<hash> anchor.
+      var ours = document.createElement('div');
+      ours.setAttribute('data-testid', UNASSIGNED_TESTID);
+      ours.setAttribute('title', UNASSIGNED_TITLE);
+      ours.setAttribute('role', 'note');
+      ours.setAttribute('aria-label', UNASSIGNED_TEXT);
+      ours.style.display      = 'inline-block';
+      ours.style.margin       = '4px 0 0 0';
+      ours.style.padding      = '2px 8px';
+      ours.style.borderRadius = 'var(--ext-radius-pill)';
+      ours.style.border       = '1px solid var(--ext-accent)';
+      ours.style.background   = 'var(--ext-accent-bg)';
+      ours.style.color        = 'var(--ext-accent-text)';
+      ours.style.fontSize     = '11px';
+      ours.style.fontWeight   = '600';
+      ours.style.lineHeight   = '1.4';
+      ours.textContent        = UNASSIGNED_TEXT;
+
+      if (cityVerboseDiagnostics()) cityDiagWrite('childList', 'appendChild unassigned-marker', ours, 'detached', 'attached');
+      cardEl.appendChild(ours);
+      _unassignedMarked.push({ cardEl: cardEl, ourEl: ours });
+      added++;
+    }
+
+    if (added || dropped) {
+      logger.log('cityAssign', 'CITY UNASSIGNED MARK  added: ' + added + '  kept: ' + kept +
+        '  removed: ' + dropped);
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'applyUnassignedMarkers failed — leaving the cards as they are',
+      { error: e, added: added, kept: kept, dropped: dropped });
+  }
+  return { added: added, kept: kept, dropped: dropped };
+}
+
 function restoreAllCards() {
   logger.log('cityAssign', 'restoreAllCards called');
   var restored = 0, swept = 0;
@@ -1446,13 +1595,23 @@ function applyCityFilter(cityKey) {
     _cityFilterActive = (cityKey === undefined || cityKey === null) ? null : String(cityKey);
 
     if (_cityFilterActive === null) {
-      logger.log('cityAssign', 'CITY FILTER  cleared — showing all');
+      // ALL: everything visible, and every unassigned card MARKED so the dispatcher knows its
+      // origin was not determined. This is the only view where an unassigned load appears.
+      var allCards = readMainCardElements();
+      var markedAll = applyUnassignedMarkers(allCards, true);
+      logger.log('cityAssign', 'CITY FILTER  cleared — showing all  |  unassigned marked: ' +
+        (markedAll.added + markedAll.kept));
       if (cityVerboseDiagnostics()) { cityDiagEndWrites('cleared to ALL'); logCityDiagOrphans('filter cleared to ALL'); }
-      return { applied: true, city: null, hidden: 0, shown: 0, unassignedShown: 0 };
+      return { applied: true, city: null, hidden: 0, shown: 0, unassignedShown: 0,
+               unassignedMarked: markedAll.added + markedAll.kept };
     }
 
     var cards = readMainCardElements();
-    var hidden = 0, shown = 0, unassignedShown = 0;
+    var hidden = 0, shown = 0, unassignedHidden = 0;
+
+    // The unmatched view is the other place an unassigned card is visible, so it is marked there
+    // too. Under a real city they are all hidden, so the pass simply clears every marker.
+    applyUnassignedMarkers(cards, _cityFilterActive === CITY_FILTER_UNMATCHED);
     var shownCards = [];       // the cards left VISIBLE, for the deadhead substitution below
     for (var i = 0; i < cards.length; i++) {
       var assigned = Object.prototype.hasOwnProperty.call(_cityAssignByCard, cards[i].id)
@@ -1469,10 +1628,22 @@ function applyCityFilter(cityKey) {
       } else {
         // `assigned` is the SET of cities this card is in range of. An empty or missing set
         // means unassigned.
+        //
+        // ⚠ CHANGED 2026-08-20 (Ihor). This used to `continue` — leaving the card VISIBLE, which
+        // meant an unassigned load appeared under EVERY city tab. A YORK, PA load showed under
+        // HEBRON, KY. It now falls through to the hide below, so an unassigned load appears under
+        // "All" ONLY, marked.
+        //
+        // BOTH categories behave identically here, deliberately: "never captured" and "captured
+        // but beyond CITY_ASSIGN_MAX_MILES of every city" both leave assignByCard without an
+        // entry, and both are equally capable of putting a load 450 miles away under a city tab.
+        //
+        // ⚠ THIS REFINES RULE 9, IT DOES NOT OVERTURN IT — unassigned loads are still visible and
+        // still counted, in "All". See docs/HANDOFF.md.
         if (isUnassigned) {
-          unassignedShown++;                 // rule 2: never hide what we could not assign
-          continue;
-        }
+          unassignedHidden++;
+          // deliberately NOT `continue` — fall through to the hide
+        } else
         // Shown when the active city is ONE OF the card's cities — a load in range of two cities
         // appears under both.
         if (assigned.indexOf(_cityFilterActive) !== -1) {
@@ -1493,7 +1664,8 @@ function applyCityFilter(cityKey) {
     logger.log('cityAssign', 'CITY FILTER  ' +
       (_cityFilterActive === CITY_FILTER_UNMATCHED ? 'UNMATCHED ONLY' : _cityFilterActive) +
       '  shown: ' + shown + '  hidden: ' + hidden +
-      '  unassigned kept visible: ' + unassignedShown + '  of ' + cards.length + ' cards');
+      '  unassigned HIDDEN (All-only since 2026-08-20): ' + unassignedHidden +
+      '  of ' + cards.length + ' cards');
 
     // PER-CITY DEADHEAD, on the cards this filter left visible. Only for a real city — never on
     // "All" (which returned above) and never in the unmatched view, where there is no active city
@@ -1514,14 +1686,14 @@ function applyCityFilter(cityKey) {
     if (cityVerboseDiagnostics()) { cityDiagEndWrites('applied: ' + _cityFilterActive); logCityDiagOrphans('filter applied: ' + _cityFilterActive); }
     if (typeof enforcePanelAnchor === 'function') enforcePanelAnchor('city filter changed');
     return { applied: true, city: _cityFilterActive, hidden: hidden, shown: shown,
-             unassignedShown: unassignedShown };
+             unassignedShown: 0, unassignedHidden: unassignedHidden };
   } catch (e) {
     logger.error('cityAssign', 'applyCityFilter failed — restoring to a visible board', {
       error: e, requested: cityKey
     });
     // Any failure ends with everything visible AND every original number back. Never leave the
     // board partly hidden, and never leave our figure on a card the filter has abandoned.
-    try { restoreAllCards(); restoreDeadheads(); _cityFilterActive = null; } catch (e2) {
+    try { restoreAllCards(); restoreDeadheads(); clearUnassignedMarkers(); _cityFilterActive = null; } catch (e2) {
       logger.error('cityAssign', 'restore after applyCityFilter failure ALSO failed', { error: e2 });
     }
     return { applied: false, reason: 'error' };
@@ -1554,9 +1726,11 @@ function citiesOfLoad(loadId) {
 
 // True only when this load is CURRENTLY hidden by the active filter.
 //
-// Deliberately mirrors applyCityFilter's rule exactly, including the most important part: an
-// UNASSIGNED load is never hidden, so it never counts as hidden here either. If these two ever
-// disagreed, the pipeline would either skip a visible card or open an invisible one.
+// Deliberately mirrors applyCityFilter's rule exactly, including the most important part:
+// ⚠ AS OF 2026-08-20 an UNASSIGNED load IS hidden under a city tab (it appears under "All"
+// only). If these two ever disagreed, the pipeline would either skip a visible card or open an
+// invisible one — and this one is what decides whether auto-open may open a load, so a stale
+// copy of the old rule here would put the dispatcher on a card he cannot see.
 function cityFilterHidesLoad(loadId) {
   try {
     if (typeof CITY_FILTER_ENABLED === 'undefined' || !CITY_FILTER_ENABLED) return false;
@@ -1564,7 +1738,10 @@ function cityFilterHidesLoad(loadId) {
     var assigned = citiesOfLoad(loadId);
     // In the unmatched view the test inverts: an ASSIGNED load is the one being hidden.
     if (_cityFilterActive === CITY_FILTER_UNMATCHED) return assigned.length > 0;
-    if (assigned.length === 0) return false;           // unassigned is always visible
+    // CHANGED 2026-08-20 with applyCityFilter: unassigned is visible in "All" only, so under a
+    // real city it IS hidden. _cityFilterActive === null returned false above, so reaching here
+    // means a real city is active.
+    if (assigned.length === 0) return true;
     // Hidden only when the active city is NOT among the card's cities.
     return assigned.indexOf(_cityFilterActive) === -1;
   } catch (e) {
@@ -1660,6 +1837,77 @@ function computeAssignment(cards, resolved) {
 
   return { assignByCard: assignByCard, counts: counts, unmatched: unmatched,
            unresolved: unresolved, outOfRange: outOfRange };
+}
+
+// ── PART 2 (2026-08-20): WHY did this load get no city? ───────────────────────────────────
+//
+// Hiding an unassigned load from the city tabs stops it misleading anyone; it does not say why
+// the assignment failed. One line per unassigned load, readable at a glance:
+//
+//   CITY WHY-UNASSIGNED  1/2  <id>  OUT OF RANGE  @39.963,-76.728  nearest HEBRON, KY 442 mi
+//                             > 150 mi max  |  HEBRON, KY 442 mi · COLUMBUS, OH 318 mi
+//   CITY WHY-UNASSIGNED  2/2  <id>  NO COORDINATES  listed in a captured response from
+//                             [recommendations] but it carried no latitude/longitude
+//
+// Flag-gated: nothing runs in a shipped build. Never feeds a decision.
+function logUnassignedDiagnostics(cards, resolved, result) {
+  logger.log('cityAssign', 'logUnassignedDiagnostics called');
+  try {
+    if (!cityVerboseDiagnostics()) return;
+    var list = (result && result.unmatched) ? result.unmatched : [];
+    if (!list.length) {
+      logger.log('cityAssign', 'CITY WHY-UNASSIGNED  none — every rendered card was assigned');
+      return;
+    }
+    logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + list.length + ' unassigned of ' +
+      cards.length + ' rendered  ||  active cities: ' +
+      (resolved.length ? resolved.map(function (r) { return r.name; }).join(', ') : '(none)') +
+      '  ||  limit ' + CITY_ASSIGN_MAX_MILES + ' mi (CITY_ASSIGN_MAX_MILES — NOT changed here; ' +
+      'whether 150 is right is PLAN 16 and Ihor has not decided it)');
+
+    for (var i = 0; i < list.length; i++) {
+      var id = list[i].id;
+      var pickup = Object.prototype.hasOwnProperty.call(_cityPickupById, id)
+        ? _cityPickupById[id] : null;
+
+      if (!pickup) {
+        // ── CATEGORY: NO COORDINATES. Say WHICH lookup came back empty, and from where.
+        var listedNoCoord = Object.prototype.hasOwnProperty.call(_cityNoCoordIds, id);
+        var ep = Object.prototype.hasOwnProperty.call(_cityIdEndpointById, id)
+          ? _cityIdEndpointById[id] : null;
+        logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + (i + 1) + '/' + list.length + '  ' + id +
+          '  NO COORDINATES  ' +
+          (listedNoCoord
+            ? 'listed in a captured response from [' + (ep || 'unknown endpoint') + '] but it ' +
+              'carried no latitude/longitude — _cityPickupById has no entry, _cityNoCoordIds does'
+            : 'never seen in ANY captured response — neither _cityPickupById nor _cityNoCoordIds ' +
+              'has this id, so no watched endpoint ever listed it' +
+              (ep ? ' (last endpoint that mentioned it: [' + ep + '])' : '')) +
+          '  ||  merged map holds ' + _cityPickupOrder.length + ' ids from ' +
+          _cityAssignBuffers.length + ' buffered response(s)');
+        continue;
+      }
+
+      // ── CATEGORY: OUT OF RANGE. Distance to EVERY active city, and the nearest named.
+      var parts = [];
+      var bestDist = Infinity, nearest = null;
+      for (var m = 0; m < resolved.length; m++) {
+        var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
+        if (d < bestDist) { bestDist = d; nearest = resolved[m].name; }
+        parts.push(resolved[m].name + ' ' + Math.round(d) + ' mi');
+      }
+      logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + (i + 1) + '/' + list.length + '  ' + id +
+        '  OUT OF RANGE  @' + pickup.lat.toFixed(3) + ',' + pickup.lng.toFixed(3) +
+        (nearest
+          ? '  nearest ' + nearest + ' ' + Math.round(bestDist) + ' mi > ' +
+            CITY_ASSIGN_MAX_MILES + ' mi max'
+          : '  ** NO ACTIVE ORIGIN CITY RESOLVED — nothing to measure against **') +
+        (parts.length ? '  ||  ' + parts.join(' · ') : ''));
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'logUnassignedDiagnostics failed — diagnostics only, the filter is ' +
+      'unaffected', { error: e });
+  }
 }
 
 // Distances for a handful of cards, so a dispatcher can check the arithmetic against a map he
@@ -2231,19 +2479,26 @@ function logCityPageDiagnostics(ctx) {
         missing.slice(0, 5).join(' ') : '  |  every rendered card is joinable'));
 
     // 5. ASSIGN — memberships per city (a load in range of two cities counts in both), then the
-    //    TWO kinds of unassigned. They are kept apart deliberately: only the first is published
-    //    to the All button, so the second is invisible to the dispatcher.
+    //    TWO kinds of unassigned. They are still reported SEPARATELY because they point at
+    //    different problems — "we never saw this load" is a capture-path fault, "we saw it and it
+    //    is 450 miles away" is not a fault at all — but as of 2026-08-20 they BEHAVE identically:
+    //    both are hidden from every city tab, both appear under All with a marker, and both are
+    //    on the All badge. This diagnostic used to say the second was off the badge and shown
+    //    under every tab; that was true, and it is what the YORK/HEBRON defect was made of.
     var parts = [];
     for (var c = 0; c < resolved.length; c++) {
       parts.push(resolved[c].name + ': ' + (result.counts[resolved[c].name] || 0));
     }
     logger.log('cityAssign', 'CITYDIAG 5 ASSIGN    ' + (parts.length ? parts.join(' | ') : '(no city resolved)') +
-      '  ||  unassigned: ' + result.unresolved + ' never captured (THIS is what the All badge shows)' +
+      '  ||  unassigned: ' + result.unresolved + ' never captured' +
       '  +  ' + result.outOfRange + ' captured but beyond ' + CITY_ASSIGN_MAX_MILES +
-      ' mi of every city (NOT on the badge, and shown under every tab)');
+      ' mi of every city  =  ' + unassignedTotal(result) +
+      ' on the All badge, All-ONLY on the board, each marked on its card (2026-08-20)');
 
     // 6. VISIBLE — measured from the settled DOM, not from what the filter believes it did. The
     //    split is the point: a card visible under a city it is not assigned to is the symptom.
+    //    ⚠ Since 2026-08-20 the two unassigned buckets must read ZERO under a city filter. A
+    //    non-zero there is the YORK-under-HEBRON defect returning.
     var active = _cityFilterActive;
     var vis = 0, visAssigned = 0, visUnassignedNeverSeen = 0, visUnassignedOutOfRange = 0, visOther = 0;
     for (var v = 0; v < cards.length; v++) {
@@ -2265,8 +2520,12 @@ function logCityPageDiagnostics(ctx) {
       (active === null ? 'ALL' : (active === CITY_FILTER_UNMATCHED ? 'UNMATCHED-ONLY' : active)) +
       '  |  visible ' + vis + '/' + cards.length +
       '  =  ' + visAssigned + ' assigned to it' +
-      '  +  ' + visUnassignedOutOfRange + ' unassigned/too-far shown anyway' +
-      '  +  ' + visUnassignedNeverSeen + ' unassigned/never-captured shown anyway' +
+      '  +  ' + visUnassignedOutOfRange + ' unassigned/too-far' +
+      (active === null || active === CITY_FILTER_UNMATCHED
+        ? '' : (visUnassignedOutOfRange ? ' ** SHOWN UNDER A CITY — MUST BE 0 **' : '')) +
+      '  +  ' + visUnassignedNeverSeen + ' unassigned/never-captured' +
+      (active === null || active === CITY_FILTER_UNMATCHED
+        ? '' : (visUnassignedNeverSeen ? ' ** SHOWN UNDER A CITY — MUST BE 0 **' : '')) +
       (visOther ? '  +  ' + visOther + ' ** VISIBLE BUT ASSIGNED ELSEWHERE — filter did not hide these **' : ''));
 
     // 7. CAPTURE — every buffered response still held, and how much of it is on screen. A
@@ -2467,6 +2726,10 @@ async function runCityAssignCycle() {
         unmatched[ui].id + '  —  ' + unmatched[ui].why);
     }
 
+    // PART 2 (2026-08-20): WHY each unassigned load got no city. One readable line each —
+    // coordinates, distance to every active city, and the category. Flag-gated inside.
+    logUnassignedDiagnostics(cards, resolved, result);
+
     // logUnmatchedProvenance() is NOT called any more. It classified an unmatched card against
     // the SELECTED BUFFER, and there is no selected buffer any more — the map is merged from all
     // of them. Left in place with the rest of the capture path; see the dead-weight list.
@@ -2475,7 +2738,7 @@ async function runCityAssignCycle() {
     // Amazon just re-rendered. Both are no-ops on a normal board: reapplyCityFilter returns
     // immediately unless a filter is active AND the feature flag is on.
     _cityAssignByCard = assignByCard;
-    publishUnassignedCount(result.unresolved);
+    publishUnassignedCount(unassignedTotal(result));
     reapplyCityFilter();
     // Last, after the filter has settled: the cards this cycle describes may not be the ones the
     // open panel belongs to. reapplyCityFilter runs its own check, but only when a filter is
@@ -2635,7 +2898,7 @@ function onBoardRerender() {
       }
       _cityAssignByCard = merged;
     }
-    publishUnassignedCount(result.unresolved);
+    publishUnassignedCount(unassignedTotal(result));
     reapplyCityFilter();
 
     logger.log('cityAssign', 'CITY REFILTER  ' + (pageChanged ? 'PAGE CHANGE' : 're-render') +
@@ -2728,11 +2991,33 @@ function stopBoardRenderObserver() {
 
 // Hands the unassigned count to the panel. Kept behind a typeof check so cityAssign never
 // depends on originCities having loaded — the filter must work with or without the badge.
+//
+// ⚠ THE COUNT IS BOTH CATEGORIES AS OF 2026-08-20, and callers pass unassignedTotal(result).
+// It used to be `result.unresolved` alone — "never captured" — while "captured but beyond
+// CITY_ASSIGN_MAX_MILES of every city" was left out. Both are now hidden from every city tab and
+// shown only under All, so both must be counted: a badge reading 0 beside a board carrying
+// out-of-range loads told the dispatcher nothing was missing when something was.
 function publishUnassignedCount(n) {
   try {
     if (typeof markUnassignedLoads === 'function') markUnassignedLoads(n);
   } catch (e) {
     logger.error('cityAssign', 'publishUnassignedCount failed', { error: e, count: n });
+  }
+}
+
+// Everything the filter treats as unassigned, which is what the All badge must show. ONE
+// definition, used by every caller, so the badge and the filter cannot drift apart.
+function unassignedTotal(result) {
+  logger.log('cityAssign', 'unassignedTotal called');
+  try {
+    if (!result) return 0;
+    var a = (typeof result.unresolved === 'number') ? result.unresolved : 0;
+    var b = (typeof result.outOfRange === 'number') ? result.outOfRange : 0;
+    return a + b;
+  } catch (e) {
+    logger.error('cityAssign', 'unassignedTotal failed — reporting 0 rather than a wrong number',
+      { error: e });
+    return 0;
   }
 }
 
@@ -2769,10 +3054,19 @@ function onCityCoordsMessage(ev) {
     // and each cycle reads the buffer that matches the board — see the header note. The two
     // reset signals that used to live here were both disproven live: searchAuditId changes per
     // request, and the origin-city set changes during the normal staged load of the SAME search.
+    // DIAGNOSTICS ONLY (2026-08-20): remember which endpoint last mentioned each id, so an
+    // unassigned load can be told "listed by [recommendations] with no coordinates" rather than
+    // just "no coordinates". Written for ids WITH coordinates too, a few lines below. Nothing
+    // reads this to make a decision, and the merged coordinate map is untouched.
+    for (var pe = 0; pe < pairs.length; pe++) {
+      if (pairs[pe] && pairs[pe].id) _cityIdEndpointById[pairs[pe].id] = data.endpoint;
+    }
+
     var noCoord = {};
     var nc = data.noCoordIds || [];
     for (var j = 0; j < nc.length; j++) {
       noCoord[nc[j]] = true;
+      _cityIdEndpointById[nc[j]] = data.endpoint;
       // Persisted alongside the pickup map so an unmatched card can be told apart from one we
       // simply never saw. Bounded by the same reasoning: it only ever holds ids a response
       // actually listed, and teardown clears it.
@@ -2976,7 +3270,9 @@ function teardownCityAssign() {
     // same profile can never inherit the previous one's loads or their coordinates.
     _cityPickupById  = {};
     _cityPickupOrder = [];
+    clearUnassignedMarkers();
     _cityNoCoordIds  = {};
+    _cityIdEndpointById = {};
     _cityRecordById  = {};
     _cityTrailerLabelById = {};
     // The page signature too, so a re-activation treats the first board it sees as a new working

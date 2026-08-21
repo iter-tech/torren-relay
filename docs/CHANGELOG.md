@@ -2,6 +2,477 @@
 
 ## [Unreleased]
 
+### 2026-08-20 (later still) — an unassigned load is "All" ONLY, marked, and honestly counted
+
+**Files:** `content/cityAssign.js`.
+
+#### 🔴 THE DEFECT, reported live: a YORK, PA load under the HEBRON, KY tab
+
+Ihor: *if a dispatcher believes he is booking a load near Hebron and it is actually in New York,
+that is a serious problem — not a cosmetic one.*
+
+#### 🔑 THIS REFINES SETTLED RULE 9. IT DOES NOT OVERTURN IT.
+
+Rule 9 keeps unassigned loads **visible and counted**, because a silently broken assignment once
+looked exactly like a working filter. **That still holds.** What changed is where "visible"
+means: **visible IN "All", not visible under every city.** A city tab that shows a load 450 miles
+away is lying to the dispatcher in a way that costs him money. Recorded in HANDOFF beside rule 9
+so the next reader does not read it as a contradiction.
+
+#### WHICH CATEGORY THE YORK LOAD FALLS INTO — read from the source, and honestly bounded
+
+`computeAssignment()` produces exactly two kinds of unassigned, and **neither** gets an entry in
+`assignByCard`:
+
+| category | test | counted before? | shown before? |
+|---|---|---|---|
+| **never captured** (`unresolved`) | no `_cityPickupById` entry | ✅ on the All badge | under **every** tab |
+| **captured, beyond 150 mi of every city** (`outOfRange`) | has coordinates, `inRange.length === 0` | ❌ **not counted at all** | under **every** tab |
+
+⚠ **The source narrows the YORK load to "unassigned", but cannot by itself say WHICH of the two**
+— an assigned load was already hidden correctly, so only an unassigned one can leak. The likelier
+answer is **out-of-range**: Amazon's response carries `stops[0].location.latitude/.longitude` for
+every work opportunity (measured 50/50 on the captures, a full 30/30 join live), so a load on the
+board almost certainly has coordinates. **The definitive check is Ihor's:** if the All badge read
+**0** while the YORK load was on screen, it was out-of-range, because that category was not
+counted. The new PART 2 diagnostic answers it outright.
+
+#### THE FIX
+
+Both categories now behave identically: **hidden under every city tab, visible under "All", and
+marked there**. `applyCityFilter()`'s unassigned branch no longer `continue`s past the hide — it
+falls through to it. `cityFilterHidesLoad()` mirrors it exactly (`return true`), which matters
+because that function is what decides whether auto-open may open a load.
+
+**The marker** is a `data-testid="ext-city-unassigned"` badge reading **"Origin not determined"**,
+`textContent` only, coloured from `--ext-accent` / `--ext-accent-bg` / `--ext-accent-text` — no
+literal, no `css-<hash>` anchor. ⚠ **It is IDEMPOTENT for the reason the deadhead substitution
+is:** insert/remove are childList mutations, which is exactly what the board observer watches. A
+mark-then-unmark on every apply would wake it and the wake would re-apply — measured at ~27
+wakes/sec when the deadhead code had that shape (2026-08-19). A card already carrying the marker
+is left completely untouched.
+
+#### THE COUNTER, MADE HONEST
+
+It published `result.unresolved` alone — **the out-of-range category was not counted at all**. A
+badge reading 0 beside a board carrying out-of-range loads told the dispatcher nothing was
+missing when something was. One new definition, `unassignedTotal(result)`, is used by every cycle
+call site, so the badge and the filter cannot drift apart.
+
+#### ⚠ A CONSEQUENCE IHOR SHOULD KNOW ABOUT
+
+Because `cityFilterHidesLoad()` now returns true for an unassigned load, a **new** unassigned load
+arriving while a city filter is active is routed to `hiddenByFilter` — so it is **not auto-opened**
+(correct: `content.js` only ever opens something on screen) and **not city-badged** (it has no
+city to badge). The signal he does get is the **All badge**, whose unassigned count rises. That
+follows necessarily from the rule; it was not a separate decision.
+
+#### PART 2 — why did this load get no city?
+
+One flag-gated line per unassigned load per cycle:
+
+```
+CITY WHY-UNASSIGNED  1/2  <id>  OUT OF RANGE  @39.963,-76.728  nearest HEBRON, KY 442 mi
+                          > 150 mi max  ||  HEBRON, KY 442 mi · COLUMBUS, OH 318 mi
+CITY WHY-UNASSIGNED  2/2  <id>  NO COORDINATES  listed in a captured response from
+                          [recommendations] but it carried no latitude/longitude
+```
+
+The no-coordinate case names **which lookup came back empty** (`_cityPickupById` vs
+`_cityNoCoordIds`) and **which endpoint** listed it — read from a new diagnostics-only side map,
+`_cityIdEndpointById`, populated from the `endpoint` label `networkObserver.js` already assigns.
+⚠ **The merged coordinate map itself is untouched;** the side map shares its eviction and its
+teardown so it can never outlive the record it describes.
+
+⚠ **`CITY_ASSIGN_MAX_MILES` is NOT changed.** Whether 150 is the right number is PLAN 16 and
+Ihor has not decided it. The diagnostic header says so, so nobody reads the line as an argument
+for changing it.
+
+#### Unchanged, deliberately
+
+City membership is still **every** active city within the max, not nearest-wins — a load in range
+of two cities still appears under both, asserted. The merged coordinate map, the per-page working
+set, the deadhead substitution and detection are untouched.
+
+**Tests.** New `allonly-suite`, **62 checks**, driving the real filter against a board carrying
+both unassigned categories, a two-city load and an assigned-elsewhere load — with YORK, PA's real
+coordinates. **31 assertions across 6 existing suites pinned the old rule** and were updated;
+each now asserts BOTH halves of the refined rule (hidden under the city, back under All), so a
+future revert to "never hidden" fails rather than half-passes. CITYDIAG 5 and 6 were reworded —
+left alone they would have told the next reader that out-of-range loads are shown under every tab
+and off the badge, both now false. **2199 green**; the one red is the standing `DEBUG_LEVEL` /
+`CITY_ASSIGN_DEBUG` true positive.
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here.**
+
+### 2026-08-20 (later) — auto-open FIXED: two distinct failures, both measured, plus the coordinates
+
+**Files:** `content/inlinePanel.js`, `content/detailOpener.js`, `docs/SAFETY.md`.
+
+#### 📏 TAB VISIBILITY IS NOT THE CAUSE — hypothesis CLOSED
+
+Ihor, five attempts with CLICKDIAG: successes and failures occurred in **both** foreground and
+background tabs (`foreground worked` · `background worked` · `background worked` ·
+`foreground FAILED` · `background FAILED`). **Do not re-open it.** The three successes were
+identical: target a `<p>` six hops below `div.load-card`, card box 1440x72, `highlight=true`,
+`panel=true`, ids matching.
+
+#### FAILURE 1 — the recently-added card has NO `div.load-card` ancestor
+
+```
+C1 PATH ^6  <div> class="wo-card-header--highlighted ext-new-load"
+C1 PATH     (no div.load-card ancestor — our handler would NOT treat this as a card click)
+C2 OURS     no match — initManualToggle() returns early
+outcome:    highlight=true, panel=FALSE
+```
+
+Amazon opened its own sheet; we rendered nothing.
+
+🔑 **This exact fact already drove cityAssign.** A measured 9-result board found **8 cards by
+class and 9 by UUID-shaped id**, which is why `readRenderedCardIds()` counts BY ID SHAPE, NOT BY
+CARD CLASS. The panel never got the same treatment.
+
+**The rule is REUSED, not reimplemented.** `resolveCardForNode()` calls cityAssign's
+`readMainCardElements()` — already "every bare-UUID `div[id]` in the main list →
+`cardContainerFor()`". A second copy here would be a second thing to keep in step, and the
+2026-08-13 measurement says the class list is the part that goes stale.
+
+⚠ **It does NOT anchor on `wo-card-header--highlighted`.** That is a STATE class — it marks a
+card as recently added, not as a card — and a rule built on it breaks the moment Amazon stops
+highlighting. The anchor is the id SHAPE, which every card carries.
+
+**⚠ THERE WERE THREE INSTANCES OF THIS DEFECT, NOT ONE.** Fixing only the first two would have
+looked like the fix had failed:
+
+| # | where | symptom |
+|---|---|---|
+| 1 | `initManualToggle()` — the click handler | the card did not RESOLVE |
+| 2 | `showInlinePanel()` — the id | the first `div[id]` can be a badge such as `STARTING_SOON`, so the panel BOUND to a badge id, found no record, and declined |
+| 3 | **`findLiveOutermostCard()` — the anchor** | the card resolved and the id bound, and the panel **still** refused: `PANEL GATE 4 STOPPED — no visible anchor` |
+
+Number 3 was found only because the new suite renders **end to end** instead of asserting that a
+function is called. `cardLoadIdFor()` covers number 2 by selecting on UUID shape — cityAssign
+calls that same filter "load-bearing" for exactly this reason.
+
+#### FAILURE 2 — the card had ZERO GEOMETRY at click time
+
+```
+C3 ZONE  distance from the CARD edges: top+0 bottom+0 left+0 right+0  (card is 0x0)
+outcome: highlight=FALSE, panel=false — Amazon did not react either
+```
+
+The element existed and was attached; it had simply not been laid out. `elementFromPoint` on a
+0x0 box resolves whatever sits at the top-left of the viewport, so the click went there instead.
+
+`hasLayoutBox()` now gates the dispatch — on the card **and** on the resolved target. No box ⇒
+wait one animation frame and retry, **bounded to `AUTO_OPEN_LAYOUT_ATTEMPTS = 10`**; if the box
+never arrives, log it and **give up cleanly rather than clicking into the void**. No unbounded
+loop, no fixed sleep.
+
+⚠ **`requestAnimationFrame` is SUSPENDED in a background tab.** Since failures occur in
+background tabs too, a pure-rAF retry would have converted "sometimes does not open" into "never
+opens, and logs nothing" when hidden — worse than the bug. `autoOpenNextFrame()` uses rAF when
+visible and a 16 ms timer when hidden.
+
+**PLAN 7b is preserved exactly:** `openTopNewLoad()` still returns synchronously and the retry
+lives inside the already-scheduled callback, so `tabState.set('running', false)` in `content.js`
+still runs before any await, as before.
+
+#### THE COORDINATES
+
+**What the dispatch constructed before the change, read from the source: nothing.** It was a bare
+`target.click()` — `HTMLElement.click()`, not a constructed event. That API takes no arguments,
+so `clientX/clientY` are 0 **by definition** and cannot be set; all five attempts logged
+`click (0,0) ** OUTSIDE ** the innermost interactive element's box`, and Amazon tolerated it
+three times out of five. Getting coordinates onto the event therefore **requires** constructing a
+`MouseEvent` — there is no way to do it through `.click()`.
+
+It is now `new MouseEvent('click', {...})` + `dispatchEvent`, with `clientX/clientY` (and
+`screenX/screenY`) at the **centre of the resolved target's own box**, `detail: 1`, `button: 0`,
+`buttons: 0`. **Still exactly ONE click event on ONE element, through every existing gate, with
+no `pointerdown`/`mousedown`/`pointerup`/`mouseup` sequence added.** `docs/SAFETY.md` Click 2 is
+updated.
+
+#### Unchanged, deliberately
+
+The 2026-08-19 container-target guard (still `ev.target === card`, still identity not geometry),
+which load auto-open selects, the stop-the-loop ordering, auto-switch, Fast Book, and the
+CLICKDIAG/AUTODIAG diagnostics — all asserted. CLICKDIAG C2 and `clickDiagOurLoadId` were updated
+to resolve the card and id the SAME way the handler now does; a diagnostic reporting the old rule
+would have lied about what the panel binds to.
+
+#### ⚠ A CORRECTION TO MY OWN EARLIER REPORTS IN THIS SESSION
+
+My regression loop skipped suites that **crashed** rather than failing, because it keyed on a
+summary line that a crashing suite never prints. Three suites were silently not running, so the
+"1981 green" and "1905 green" figures reported earlier were over-counted. `panelstyle-suite` had
+been crashing since my own U3 patch referenced an undefined `css`. The runner now reports
+**CRASHED** loudly and fails, and all three suites are fixed. `clickdiag-suite` sections 2 and 3
+were separately stale — they dispatched AT the card container and asserted a panel, which the
+2026-08-19 guard correctly refuses; they now dispatch at a descendant, as a real click does.
+
+**Tests.** New `recentcard-suite`, **32 checks**, running `cityAssign.js` **and**
+`inlinePanel.js` in one sandbox so the reuse is exercised, not grepped. `autodiag-suite` grew to
+**100** with the zero-box deferral, the bounded give-up, and the coordinate assertions.
+`panelanchor-suite`, `stagea-suite`, `clickdiag-suite`, `panelstyle-suite` updated. **2125
+green**, 0 crashed; the one red is the standing `CITY_ASSIGN_DEBUG` / `DEBUG_LEVEL` true positive.
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here.**
+
+### 2026-08-20 (later) — AUTODIAG: instrumenting why AUTO-OPEN sometimes does not open the sheet
+
+**DIAGNOSTIC ONLY. Nothing was fixed.** File: `content/detailOpener.js` (plus a new
+`autodiag-suite`). Ihor, live board: manual mouse clicks open the detail sheet every time; the
+programmatic click sometimes does not, especially — but not only — when the tab is in the
+background.
+
+#### 🔑 READ FROM SOURCE BEFORE ANY BOARD RUN — Cause A, as stated, is impossible
+
+The click-zone guard **cannot** swallow the auto-open click. `initManualToggle()` calls
+`preventDefault` and `stopPropagation` **nowhere** — the only occurrences of either word in
+`content/inlinePanel.js` are comments saying so. Amazon receives the event either way. The guard
+decides one thing only: whether **our** panel renders. And on the auto-open path our panel does
+not render at all, because `content/content.js` contains zero `showInlinePanel` calls (Stage C
+was never done).
+
+**But the same CONDITION is real, by a different mechanism.** `content/detailOpener.js` resolves
+its target with `document.elementFromPoint(left + width*0.3, top + height*0.5)` and then:
+
+```js
+if (!el.contains(target) && target !== el) {
+  target = el;          // <- the card CONTAINER
+}
+target.click();
+```
+
+When that fallback fires, the click is dispatched **at the card container**. The CLICKDIAG
+measurement of 2026-08-19 established that when the target IS `div.load-card`, **Amazon does not
+select the card** — that is why the guard exists. So a fallback-hit auto-open produces exactly
+the reported symptom. ⚠ **The cause would be Amazon ignoring a container-targeted click, not our
+guard swallowing it.** Not fixed — Ihor decides whether to narrow the guard or change the
+dispatch target.
+
+#### Three paths send NO CLICK AT ALL, and used to look identical to a click that was ignored
+
+`elementFromPoint` returning `null` (the point was outside the viewport); the card being detached
+during the 250 ms scroll settle; and the three entry gates. Each now prints a **NO CLICK WAS
+SENT** block, so "the sheet did not open" can be separated from "nothing was ever clicked".
+
+#### What Cause B has to work with
+
+The 250 ms settle is a `setTimeout`. Chrome clamps background-tab timers to **≥1 s**, and to
+**≥60 s** under intensive throttling after ~5 minutes hidden. AUTODIAG prints the **actual**
+elapsed time for that timer and for both outcome checkpoints, so throttling becomes a number
+instead of a suspicion — and the longer the settle runs late, the more chances React has to
+replace the card node underneath it.
+
+#### What we dispatch — now MEASURED, not quoted from a spec
+
+`target.click()` is `HTMLElement.click()`: **one** `click` event, `isTrusted=false`, coordinates
+`(0,0)`, `detail=0`, and **no preceding `pointerdown` / `mousedown` / `pointerup` / `mouseup`**
+and no focus change. The probe reads these off the real dispatched event rather than asserting
+them. If Amazon's React handler is bound to pointer events rather than `click`, the `X1 EVENT`
+line is what will show it.
+
+#### ⚠ A third possibility the source raises, which neither A nor B covers
+
+`content/loadParser.js:195` accepts `div.wo-card-header--highlighted` as a card in its own right
+and drops only *nested* matches. A highlighted header that is **not** inside a `div.load-card`
+therefore survives as a "card", and `load._element` would not match
+`div.load-card, div.load-card__selected` at all. `X1 CARD?` reports this per attempt.
+
+#### How it is built
+
+One block per attempt — X1 what we dispatch · X2 did our guard see it · X3 tab visibility and
+timer lateness · X4 outcome at two checkpoints · X5 a one-line verdict naming what differed from
+the last attempt that worked. Nothing per frame. `__EXT_DEBUG.dumpAutoOpenDiag()` prints the
+whole tab as one table.
+
+**Strictly passive.** The probe listens in the **capture** phase and calls neither
+`preventDefault` nor `stopPropagation` — the same construction CLICKDIAG uses. Correlation to our
+own click is exact rather than heuristic: `.click()` dispatches **synchronously**, so a flag set
+immediately before and cleared immediately after cannot mislabel a real mouse click as ours.
+
+⚠ **It prints with `console.log`, not `logger.log` — deliberate.** `logger.log` requires
+`DEBUG_LEVEL >= 3` (`utils/logger.js`), so a CLICKDIAG-style diagnostic is silent in a stock
+build even with `CITY_ASSIGN_DEBUG` on. The gate that matters is `CITY_ASSIGN_DEBUG`, which ships
+`false`, so a stock build still prints nothing and registers no listener. Same reasoning as
+`dumpTrailerLabels()`.
+
+**Tests.** New `autodiag-suite`, **76 checks**, which *drives the real file* in a sandbox against
+a stub DOM and reads the lines it emits — greps would not catch what this suite exists for. The
+first section asserts the diagnostic changed nothing: exactly one click, same element, no
+`preventDefault`, no `stopPropagation`, one `scrollIntoView`, and with the flag off **zero**
+output and **zero** listeners. It caught a real defect in the instrument itself — the
+"covered by our own UI" check was reading the **post-fallback** target instead of what
+`elementFromPoint` actually returned, which would have hidden the very cause the line exists to
+name. **1981 green**; the one red is the standing `DEBUG_LEVEL` / `CITY_ASSIGN_DEBUG` true
+positive.
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here.**
+
+### 2026-08-20 (evening) — five UI changes from Ihor's live testing, and a MEASURED throttling limit
+
+**Files:** `content/tabAlert.js`, `content/originCities.js`, `content/inlinePanel.js`,
+`content/filterSimilar.js`, `popup/popup.html`, `content/sidebar.js`.
+
+#### 📏 THE MEASURED FACT that makes the rate-limit work real — recorded before anything else
+
+Ihor ran the throttling deliberately on a live board:
+
+| tabs at 2.5s | result |
+|---|---|
+| **two** | ran **indefinitely**, no throttling at all |
+| **three** | **immediate 503**, block lasting **over 15 minutes** |
+
+So Amazon tolerates roughly **one request per 1.25s** and refuses at roughly **one per 0.83s**.
+This is a measurement, not an estimate — it is the only number of its kind we have, and it is why
+the auto-stop exists at all. The top-bar message appeared with the correct wording.
+**PLAN 10 is confirmed working on a real board.**
+
+#### U1 — the tab indicator: a real defect fixed, and the alarm taken out of it
+
+⚠ **The defect: the indicator never DISAPPEARED.** Stopping only removed our `<link>`, and
+browsers do **not** re-read the remaining icon links because one was detached — so the tab kept
+showing our block after the alert had "stopped". It stopped *animating* but stayed on screen.
+`extRestoreOriginalFavicon()` now captures the page icon first (`extCaptureOriginalFavicon()`),
+hands the browser that href **before** letting go of our element to force a re-read, then
+re-asserts the page's own `<link>` last.
+
+Appearance, on Ihor's Apple reference: solid **RED** alternating with solid **YELLOW** (two
+hardcoded literals) became **one hue at two alphas** — a soft accent dot, 0.35 → 0.90, breathing
+at **900ms** instead of strobing at 600. The colour is `--ext-accent` (fallback `--ext-n700`)
+**read at runtime** with `getComputedStyle`, because canvas needs a concrete value and the rule is
+tokens-only, no new literals. If neither token resolves the icons stay `null` and only the title
+alternates — it never invents a colour. The 🔴 emoji left the title; it is now `• 3 new loads` /
+`• New load`.
+
+#### U2 — the "All" button: MEASURED first, and the obvious guess was WRONG
+
+🔑 **THE BADGE IS NOT THE CAUSE.** The RESERVED BADGE SLOT (2026-08-14) keeps both badges
+permanently in the DOM and merely makes them transparent when empty, precisely so nothing resizes
+— a missing badge therefore cannot change a height. Measured from source, both buttons are
+`<div>`s with **identical** font-size 14px, weight 600, padding `8px 14px`, 1px border and
+line-height 1.25. **The only difference was `display`:** the city pill declared `display:flex`;
+the All button declared none, so its own `flex-direction`/`align-items` rule was **inert** and it
+laid out as a block line box — a different height calculation entirely (baseline line box vs
+tallest child).
+
+Fixed with one shared variable, `--ext-city-btn-h:36px`, plus `display:flex` and
+`box-sizing:border-box` on **both** selectors. The badge slot is untouched.
+
+#### U3 — accordion rows: the grey band was the panel showing through
+
+The light-mode zebra rule was already deleted (2026-08-17), which left `td` declaring **no
+background at all** — so the panel's own `#F1F3F5` surface showed through the lower rows and read
+as a grey band. `td` now declares `background:var(--ext-surface)` explicitly. No new zebra rule.
+
+⚠ **`content/nightMode.js` was NOT edited** — the constraint held. Its dark counterpart still
+exists and needs Ihor's go-ahead: `html.ext-night #ext-inline-panel tbody tr:nth-child(even) td{`
+at `content/nightMode.js:237`.
+
+#### U4 — "Similar matches" hides always; the toggle is gone
+
+With per-city filtering the block has nowhere sensible to appear, so a switch for it only added
+confusion. The popup row is removed (`<div>` 37 / `</div>` 37, balanced) and activation no longer
+consults the stored preference — it calls `applyHideSimilar(true)` unconditionally. The storage
+listener is left in place but **inert**, so re-introducing the toggle is a one-line revert.
+
+⚠ **The block is still found STRUCTURALLY, never by its text** — "Similar matches" is localised
+across all 11 Relay domains. The existing rule stands: the main results are the FIRST
+`div.load-list` after `#search-results-summary-panel`; a SECOND `div.load-list` is the Similar
+block.
+
+#### U5 — the rate-limit message becomes a self-dismissing toast, reworded
+
+"**Amazon** is taking a short technical pause" → "**Server** is taking a short technical pause" —
+neutral, and it cannot be misread as a problem with the dispatcher's Amazon account. Body copy
+unchanged. It now fades in, holds **7000ms**, and fades out, transitioning `opacity` (never
+`display`, which cannot animate) with one `requestAnimationFrame` between display and opacity so
+the transition has a start value to run from. An explicit hide clears the timer, so a restart
+cannot leave a stale one to double-fire.
+
+⚠ **THE TOAST FADING CHANGES NOTHING BEHIND IT.** The loop is already stopped when it appears, it
+does **not** auto-restart, and the timer only takes the words off the screen. The **play/pause
+control remains the standing, non-transient indication** that the loop is stopped — asserted by
+test, because "the message vanished so it must have resumed" is exactly the wrong conclusion to
+let anyone draw later.
+
+**Tests.** New `ui5-suite`, **51 checks**. Four assertions in `panelstyle-suite`, `plan10-suite`
+and `threshold-suite` pinned the pre-change state and were updated to the new expectation; one of
+my own `ui5-suite` regexes was too blunt — `innerHTML` followed by anything not a quote also
+matches a **newline**, so it flagged the pre-existing static play/pause SVG. Scoped, not silenced:
+the rule is no `innerHTML` **with page data**, and the two sidebar assignments are static literals
+we author. **1905 green.** The one remaining failure is the standing true positive:
+`DEBUG_LEVEL = 3` and `CITY_ASSIGN_DEBUG = true` are still set in the working tree and **both must
+go back to `1` / `false` before shipping**.
+
+**Verification.** **Nothing was exercised on a real board — there is no browser in this
+environment.** All five are visual changes; see HANDOFF for exactly what Ihor must look at.
+
+### 2026-08-20 (later) — the auto-stop now waits for THREE CONSECUTIVE rate-limit responses
+
+**Files:** `content/sidebar.js`, `background.js`, `content/content.js`.
+
+**The requirement arrived after the previous prompt was written, so it was not in the build.**
+Ihor: auto-refresh must not stop on the smallest one-off server error — let it refresh another two
+or three times first, and stop only when the throttling is real.
+
+**Why it matters:** Amazon returns the occasional isolated 502 with no throttling behind it. The
+previous build stopped the board on that single response, and the dispatcher sat watching a message
+while other dispatchers took the loads. **A false stop costs him money; a slightly late stop costs
+nothing**, because the IP throttle lasts 10-15 minutes either way.
+
+#### 🔑 NO NEW COUNTER WAS ADDED — the one that was needed already existed
+
+`backoffStepIndex` in the limiter state is already exactly "consecutive rate-limit responses".
+Read from `reportResult()`, which has only two writers:
+
+| outcome | effect on `backoffStepIndex` |
+|---|---|
+| success (2xx) | reset to `-1` |
+| status in `RATE_LIMIT_STATUSES` | `prev + 1` |
+| anything else (404, 401, status 0…) | **returns without `setState` — untouched** |
+
+It is already in the limiter state and already shared across tabs by the same storage key that
+carries the stop, so reusing it satisfies "do not introduce a second source of truth" better than a
+new field would. The index is 0-based, so the **third** consecutive response leaves it at **2** —
+hence `RATE_STOP_AFTER_CONSECUTIVE = 3` and a `>= 3` test on the derived count.
+
+**CONSECUTIVE, never cumulative** — asserted by running the real `reportResult()` against a fake
+`chrome.storage`: three *scattered* 502s with a success between each leave the index at 0 and
+never stop the loop.
+
+#### ⚠ BACKOFF AND STOP ARE NOW DECOUPLED — where each fires
+
+| | fires on | where |
+|---|---|---|
+| **Backoff** (pacing) | the **FIRST** rate-limit response | `background.js` `reportResult()` — **unchanged** |
+| **Stop + top-bar message** | the **THIRD CONSECUTIVE** | `content/sidebar.js`, the `RATE_LIMITER_KEY` storage listener |
+
+Below the threshold the loop keeps running and **the dispatcher is told nothing** — he must never
+be shown a message about a pause that did not happen. That case logs at `log` level only.
+
+On an internal error `shouldStopForRateLimit()` returns **false**: a false stop costs loads, a late
+stop costs nothing.
+
+#### The simulate hook drives the whole sequence
+
+`simulateRateLimit(status, times)` now fires `times` **consecutive** events by looping the **real**
+`reportResult()` — still the real path, not a mock — capped at 10 so a typo cannot spin. It reports
+the running count against the threshold, and `simulateRecovery()` reports the reset.
+
+**Unchanged from the previous task:** no auto-restart, the message clears on restart, the toggle
+stays removed, the shared limit stays off, and `RATE_LIMIT_STATUSES` / `WATCH_PATH` / the interval
+/ the backoff curve are untouched — all asserted.
+
+**Tests.** New `threshold-suite`, **39 checks**, section 1 of which *executes* `reportResult()`
+rather than grepping for it. One `plan10-suite` assertion described the pre-threshold gate and was
+updated. **1899 green**; the one failure is the standing true positive that `DEBUG_LEVEL = 3` and
+`CITY_ASSIGN_DEBUG = true` in the working tree — **both must go back before shipping**.
+
+**Verification.** Nothing exercised on a real board — no browser here.
+
 ### 2026-08-20 — PLAN 10 CLOSED by product decision: shared limit ships OFF, auto-stop + calm message
 
 **Files:** `content/content.js`, `content/sidebar.js`, `popup/popup.html`, `popup/popup.js`.

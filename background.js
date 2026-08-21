@@ -370,16 +370,30 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         // exercises that half.
         if (msg.action === 'simulate') {
           var st = (typeof msg.status === 'number') ? msg.status : 503;
-          console.log('[background] RATE_DIAG simulate — injecting status ' + st +
+          // 2026-08-20: `times` fires N CONSECUTIVE events so the stop threshold can be tested
+          // without waiting for real throttling. Each iteration is a separate real
+          // reportResult() call — this is still the real path, looped, not a mock.
+          var times = (typeof msg.times === 'number' && msg.times > 0) ? Math.min(msg.times, 10) : 1;
+          console.log('[background] RATE_DIAG simulate — injecting status ' + st + ' x' + times +
             ' into the REAL reportResult path');
-          var after = await reportResult(false, st);
-          sendResponse({ ok: true, simulated: st, state: after, diag: { on: diag.on, count: diag.grants.length } });
+          var after = null;
+          for (var i = 0; i < times; i++) { after = await reportResult(false, st); }
+          // backoffStepIndex IS the consecutive counter (see reportResult): 0-based, so the Nth
+          // consecutive response leaves it at N-1. Reported here so the console shows the count
+          // the sidebar is about to act on.
+          var consecutive = (after && typeof after.backoffStepIndex === 'number' && after.backoffStepIndex >= 0)
+            ? after.backoffStepIndex + 1 : 0;
+          sendResponse({ ok: true, simulated: st, times: times, consecutive: consecutive,
+                         stopsAt: 3, willStop: consecutive >= 3, state: after,
+                         diag: { on: diag.on, count: diag.grants.length } });
           return;
         }
         if (msg.action === 'recover') {
-          console.log('[background] RATE_DIAG recover — injecting a success into the REAL path');
+          console.log('[background] RATE_DIAG recover — injecting a success into the REAL path; ' +
+            'this RESETS the consecutive counter to zero');
           var ok = await reportResult(true, 200);
-          sendResponse({ ok: true, state: ok, diag: { on: diag.on, count: diag.grants.length } });
+          sendResponse({ ok: true, consecutive: 0, state: ok,
+                         diag: { on: diag.on, count: diag.grants.length } });
           return;
         }
         var state = await getState();

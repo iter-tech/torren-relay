@@ -44,6 +44,132 @@ Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.m
 
 ## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
 
+
+### 0z. ✅ UNASSIGNED LOADS ARE "ALL" ONLY — fixed 2026-08-20 (Ihor, safety)
+
+A YORK, PA load appeared under the HEBRON, KY tab. Both categories of unassigned —
+"never captured" and "captured but beyond 150 mi of every city" — were shown under **every** tab,
+and only the first was counted on the All badge.
+
+Now: hidden under every city tab, visible under **All** with a marker, and **both** counted.
+
+🔑 **RULE 9 IS REFINED, NOT OVERTURNED** — see HANDOFF §4 rule **9a**. Unassigned loads are still
+visible and still counted; "visible" now means *in All*. Restoring "never hidden" re-creates the
+defect.
+
+⚠ **`CITY_ASSIGN_MAX_MILES` was NOT touched.** Whether 150 is the right number is PLAN 16 and
+Ihor has not decided it. Do not treat the new WHY-UNASSIGNED lines as an argument for changing
+it — they exist to say *why*, not *what the limit should be*.
+
+### 0aa. ⏸ DEFERRED — the panel does not render on an abnormally wide card (2208px)
+
+Ihor has identified the likely cause himself: he keeps DevTools **docked to the right**, which
+changes the card width as he drags it. **This is not a board condition.**
+
+**Do not investigate.** Revisit only if it appears with **DevTools closed**.
+
+
+### 0y-FIXED. ✅ AUTO-OPEN — BOTH failures fixed 2026-08-20, and the tab-visibility theory is DEAD
+
+📏 **TAB VISIBILITY IS NOT THE CAUSE. CLOSED — do not re-open.** Ihor's five measured attempts:
+successes and failures in **both** foreground and background tabs (`fg worked` · `bg worked` ·
+`bg worked` · `fg FAILED` · `bg FAILED`). The three successes were identical — target a `<p>`
+six hops below `div.load-card`, card box 1440x72, highlight and panel both true.
+
+**FAILURE 1 — no `div.load-card` ancestor on the recently-added card.** Fixed by resolving the
+card through cityAssign's id-shape rule (`resolveCardForNode()` → `readMainCardElements()`).
+🔑 **The rule is REUSED, never copied.** ⚠ **It does not anchor on `wo-card-header--highlighted`**
+— that is a STATE class, not a card class.
+
+⚠ **THERE WERE THREE INSTANCES, NOT ONE:** the click handler (card did not resolve), the load id
+(the first `div[id]` can be a badge like `STARTING_SOON`), and **the anchor check
+`findLiveOutermostCard()`** — which still refused to render after the other two were fixed. Found
+only because the suite renders END TO END. If this defect family recurs, look for a **fourth**
+class-based lookup before assuming the rule is wrong.
+
+**FAILURE 2 — a 0x0 card.** `hasLayoutBox()` gates the dispatch on both the card and the target;
+no box ⇒ retry one frame, bounded at `AUTO_OPEN_LAYOUT_ATTEMPTS = 10`, then give up cleanly.
+⚠ **rAF is suspended in a background tab**, so the retry falls back to a 16 ms timer when hidden —
+otherwise this fix would have hung every hidden tab silently.
+
+**THE COORDINATES.** `target.click()` → a constructed `MouseEvent` at the target's centre.
+`.click()` takes no arguments, so coordinates were 0 by definition. Still ONE click, same gates,
+no pointer/mouse-down sequence added. `docs/SAFETY.md` Click 2 updated.
+
+### 0y-was. 🔬 AUTO-OPEN SOMETIMES DOES NOT OPEN THE SHEET — instrumented 2026-08-20, NOT fixed
+
+Ihor, live board: manual clicks open Amazon's detail sheet every time; the programmatic
+auto-open click sometimes does not, especially — but not only — in a background tab.
+
+**Read from source, before any board data:**
+
+🔑 **Our click-zone guard CANNOT be the cause as originally framed.** `initManualToggle()` calls
+neither `preventDefault` nor `stopPropagation` — Amazon gets the event regardless. The guard only
+decides whether OUR panel renders, and on this path it never renders anyway (zero
+`showInlinePanel` calls in `content.js`).
+
+⚠ **But `detailOpener.js` has a fallback that dispatches AT THE CARD CONTAINER:** when
+`elementFromPoint` resolves outside the card, `target = el`. Amazon was measured on 2026-08-19 to
+**ignore container-targeted clicks**. Same condition, different mechanism — Amazon's
+indifference, not our interception.
+
+⚠ **The 250 ms settle is a `setTimeout`,** which Chrome clamps to ≥1 s in a background tab and
+≥60 s under intensive throttling. Late settle ⇒ more chance React replaced the card ⇒ the detach
+bail fires and **no click is sent at all**.
+
+⚠ **A third possibility neither cause covers:** `loadParser.js:195` accepts
+`div.wo-card-header--highlighted` as a card, so `load._element` may not be a `div.load-card` at
+all.
+
+**Decision belongs to Ihor** — narrow the guard, change the dispatch target, or neither. Do not
+fix this from the source reading alone; the instrument exists to say which one actually happens.
+See TC-AUTODIAG for the run.
+
+### 📏 0w. MEASURED — how much refreshing Amazon actually tolerates (Ihor, 2026-08-20)
+
+**This is a measurement from a live board, not an estimate.** Ihor deliberately provoked the
+throttling with real tabs on a real account:
+
+| tabs at 2.5s | result |
+|---|---|
+| **two** | ran **indefinitely** — no throttling at all |
+| **three** | **immediate 503**, block lasting **over 15 minutes** |
+
+Derived: Amazon tolerates roughly **one request per 1.25s** and refuses at roughly **one per
+0.83s**. The block is long — **10–15 minutes and more** — which is precisely why a *late* stop
+costs nothing and a *false* stop costs loads.
+
+✅ **The auto-stop and the top-bar message are CONFIRMED WORKING on a real board** in the same
+run, with the correct wording. PLAN 10 is closed on evidence, not on argument.
+
+⚠ Do **not** turn these numbers into a pre-emptive warning about tab count or refresh speed —
+that is deliberately not built (see 0u). They are here so nobody re-derives them by getting a
+dispatcher blocked again.
+
+### 0x. ⏸ OUT OF SCOPE — the accordion does not open in a BACKGROUND tab (2026-08-20)
+
+Ihor saw the inline accordion fail to open while the tab was not focused. **Deliberately not
+diagnosed:** he will re-test it first, because the earlier PLAN 7b work (auto-open stops the
+refresh loop *before* it opens) changed the timing here and the observation may predate it.
+
+**Do not start on this until Ihor confirms it still happens.** When he does, the first questions
+are whether `flashTabAlert` / auto-open are gated on `document.hasFocus()` and whether a
+background tab is being throttled by Chrome, not by Amazon.
+
+### 0v. ✅ AUTO-STOP THRESHOLD — three consecutive, added 2026-08-20
+
+The stop waits for **three consecutive** rate-limit responses, not one. Ihor: a false stop costs
+money while other dispatchers take the loads; a late stop costs nothing because the throttle lasts
+10-15 minutes either way.
+
+🔑 **It reuses `backoffStepIndex`** — already "consecutive rate-limit responses, reset by any
+success", already in the limiter state, already shared across tabs. **No second counter exists and
+none should be added.**
+
+⚠ **Backoff and stop are decoupled:** backoff on the first response (`background.js`, unchanged),
+stop + message on the third (`content/sidebar.js`). Do not re-couple them — the dispatcher must
+never be shown a message about a pause that did not happen.
+
 ### 0s. ⏸ SHARED CROSS-TAB REFRESH LIMIT — deferred to a later release, NOT deleted
 
 Ihor's decision, 2026-08-20: the toggle is removed from the UI and the feature ships **off**.

@@ -194,13 +194,11 @@
       </div>
     </div>
 
-    <div class="popup-row">
-      <label class="popup-label popup-label--wide" for="popup-hide-similar">Hide Similar Matches</label>
-      <label class="toggle-switch">
-        <input type="checkbox" id="popup-hide-similar" data-testid="popup-hide-similar">
-        <span class="toggle-track"></span>
-      </label>
-    </div>
+    <!-- U4 (2026-08-20, Ihor): the "Hide Similar Matches" toggle was REMOVED. After START the
+         Similar-matches block is simply hidden, always. With per-city filtering the block has
+         nowhere sensible to appear and is already effectively gone, so a switch for it only
+         added confusion. content/filterSimilar.js is unchanged and still does the hiding; it
+         is just no longer asked whether to. popup.js keeps its null-guarded wiring. -->
 
     <div class="popup-divider"></div>
 

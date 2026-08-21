@@ -45,13 +45,39 @@ Gates on the card container (`el`):
 1. `el` exists
 2. `isForbiddenElement(el)` === false  **(MANDATORY)**
 3. `document.contains(el)` === true
+4. **`hasLayoutBox(el)` === true — added 2026-08-20.** A 0x0 card was measured live: the click
+   was dispatched at an element with no box, `elementFromPoint` resolved a corner-of-viewport
+   element instead, and nothing handled it. No box ⇒ wait one animation frame, **bounded to
+   `AUTO_OPEN_LAYOUT_ATTEMPTS = 10`**, then give up cleanly. **Never click an unlaid-out element.**
 
 Gates on the resolved `target` (elementFromPoint result, run inside setTimeout):
-4. `target` non-null
-5. `isForbiddenElement(target)` === false  **(MANDATORY)**
-6. If `target` is outside `el`, fall back to `el` itself
+5. `target` non-null
+6. `isForbiddenElement(target)` === false  **(MANDATORY)**
+7. If `target` is outside `el`, fall back to `el` itself
+8. **`hasLayoutBox(target)` === true — added 2026-08-20**, same rule, same bound.
 
 Intent logged as `ALLOWED_CLICK_INTENTS.NEUTRAL_ZONE`.
+
+#### ⚠ THE DISPATCH IS A CONSTRUCTED MouseEvent, NOT `.click()` — changed 2026-08-20
+
+It was `target.click()`. `HTMLElement.click()` takes no arguments, so every synthetic click
+carried `clientX/clientY = 0` — measured on all five attempts as
+`click (0,0) ** OUTSIDE ** the innermost interactive element's box`. Amazon tolerated it three
+times out of five. Coordinates cannot be set through `.click()` at all, so the dispatch is now:
+
+```js
+var ev = new MouseEvent('click', { view: window, bubbles: true, cancelable: true,
+  composed: true, detail: 1, clientX: cx, clientY: cy, screenX: cx, screenY: cy,
+  button: 0, buttons: 0 });
+target.dispatchEvent(ev);
+```
+
+`cx, cy` = the **centre of the resolved target's own box**.
+
+**What did NOT change, and must not:** it is still **exactly ONE click event on ONE element**, it
+still passes **every** gate above, and **no `pointerdown`/`mousedown`/`pointerup`/`mouseup`
+sequence was added**. This is not a broader interaction — it is the same click with the
+coordinates a real one has. `isForbiddenElement()` still runs before it, unchanged.
 
 ### Click 3 — Load detail panel close (panelCloser.js → closePanelsForStart())
 **Rationale:** Same as Click 3. Closing the load-detail sheet cannot trigger booking.

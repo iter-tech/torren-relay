@@ -261,6 +261,11 @@ function injectPanelStyle() {
       // Data-row border now #F3F4F6 per spec (was var(--ext-n200)) — no vertical column
       // borders (none were ever added — "border-right REMOVED" from an earlier pass).
       'padding:8px 12px;border-bottom:1px solid #F3F4F6;vertical-align:middle;word-break:break-word;' +
+      // U3 (2026-08-20): EVERY stop row is explicitly white. The zebra rule was already deleted
+      // in 2026-08-17, but the cells still declared NO background at all, so the panel's own
+      // #F1F3F5 surface showed through and the lower rows read as a grey band. Stating it here
+      // makes a row's background independent of whatever sits behind the table.
+      'background:var(--ext-surface);' +
     '}' +
     // Primary line (station code / city) — the <b> element built in buildSegmentTable().
     // No class on that element (tag selector, scoped to this table, is precise enough —
@@ -772,19 +777,37 @@ function buildPanelElement(data) {
 // div.wo-card-header--highlighted excluded: always an inner wrapper, never the outer container;
 // parseLoads already drops it via the contains() filter.
 function findLiveOutermostCard(loadId) {
-  var idEl = document.getElementById(loadId);
-  if (!idEl) return null;
-  var card = idEl.closest('div.load-card, div.load-card__selected');
-  if (!card) return null;
-  var outer = card;
-  var p = card.parentElement;
-  while (p) {
-    var candidate = p.closest('div.load-card, div.load-card__selected');
-    if (!candidate) break;
-    outer = candidate;
-    p = candidate.parentElement;
+  logger.log('inlinePanel', 'findLiveOutermostCard called');
+  try {
+    var idEl = document.getElementById(loadId);
+    if (!idEl) return null;
+
+    // ⚠ THE THIRD INSTANCE OF FAILURE 1, and the one that would have made the other two look
+    // like they had not worked. Fixing the click handler let a recently-added card RESOLVE, and
+    // fixing the id let it BIND — and then the panel still refused to render, because this
+    // function is what visibleAnchorFor() calls and it required the load-card class too. The
+    // card exists, is visible, is in the main list, and this returned null.
+    //
+    // Same rule as everywhere else now: resolveCardForNode(), i.e. cityAssign's.
+    // Caught by recentcard-suite, which renders end to end rather than asserting the call.
+    var card = resolveCardForNode(idEl);
+    if (!card) return null;
+
+    // A card can be nested inside another card match; the outermost is the anchor. Unchanged.
+    var outer = card;
+    var p = card.parentElement;
+    while (p) {
+      var candidate = p.closest ? p.closest('div.load-card, div.load-card__selected') : null;
+      if (!candidate) break;
+      outer = candidate;
+      p = candidate.parentElement;
+    }
+    return outer;
+  } catch (e) {
+    logger.error('inlinePanel', 'findLiveOutermostCard failed — treating the load as absent, so ' +
+      'the panel declines rather than floating over an unknown row', { error: e, loadId: loadId });
+    return null;
   }
-  return outer;
 }
 
 // ── PANEL ANCHORING (2026-08-13) ──────────────────────────────────────────────────────────
@@ -1141,9 +1164,8 @@ function showInlinePanel(cardElement) {
   var old = document.getElementById(PANEL_ID);
   if (old) old.remove();
 
-  // Reads the CARD, never a sheet.
-  var sheetLoadIdEl = cardElement ? cardElement.querySelector('div[id]') : null;
-  var sheetLoadId   = sheetLoadIdEl ? sheetLoadIdEl.id : null;
+  // Reads the CARD, never a sheet. By UUID SHAPE as of 2026-08-20 — see cardLoadIdFor().
+  var sheetLoadId = cardLoadIdFor(cardElement);
   if (!sheetLoadId) {
     panelGate('1 STOPPED — no load id on the card', null,
       'cardElement ' + (cardElement ? 'present' : 'NULL'));
@@ -1452,13 +1474,13 @@ function clickDiagPointInRect(rect, x, y) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-// The id our own render path would resolve for this card — deliberately the SAME expression
+// The id our own render path would resolve for this card — deliberately the SAME function
 // showInlinePanel() uses, so this reports what the panel will actually bind to, not what it
-// ought to. Note it takes the FIRST div[id] and does NOT filter by UUID shape.
+// ought to. Updated 2026-08-20 with it: the panel now selects by UUID SHAPE, so a diagnostic
+// still reading the first div[id] would report a badge id the panel never uses.
 function clickDiagOurLoadId(card) {
   try {
-    var el = card ? card.querySelector('div[id]') : null;
-    return el ? el.id : null;
+    return card ? cardLoadIdFor(card) : null;
   } catch (e) {
     logger.error('inlinePanel', 'clickDiagOurLoadId failed — diagnostics only', { error: e });
     return null;
@@ -1501,8 +1523,10 @@ function initClickZoneDiagnostic() {
         if (!mainList || !mainList.contains || !mainList.contains(target)) return;
 
         // ── C2 (computed first, because C1's path terminates at this element) ──
-        // EXACTLY the selector initManualToggle() uses. Not the wider card-shape list.
-        var card = target.closest('div.load-card, div.load-card__selected');
+        // EXACTLY what initManualToggle() uses — the same function call, not a copy of it.
+        // Before 2026-08-20 this was closest('div.load-card, div.load-card__selected'), which is
+        // what reported "no match" on the recently-added card that Amazon itself opened fine.
+        var card = resolveCardForNode(target);
         var ourId = clickDiagOurLoadId(card);
         var re = clickDiagUuidRe();
 
@@ -1636,12 +1660,101 @@ function initClickZoneDiagnostic() {
   }
 }
 
+// ── FAILURE 1 (measured 2026-08-20): the recently-added card has NO div.load-card ancestor ──
+//
+// CLICKDIAG on a failed auto-open:
+//     C1 PATH ^6  <div> class="wo-card-header--highlighted ext-new-load"
+//     C1 PATH     (no div.load-card ancestor — our handler would NOT treat this as a card click)
+//     C2 OURS     no match — initManualToggle() returns early
+//     outcome: highlight=true, panel=FALSE
+//
+// Amazon opened its own sheet; we rendered nothing. The card is the known recently-added one,
+// established live on 2026-08-13: it carries a DIFFERENT class from ordinary cards.
+//
+// 🔑 THIS EXACT FACT ALREADY DRIVES cityAssign. A measured 9-result board found 8 cards by class
+// and 9 by UUID-shaped id, which is why readRenderedCardIds() counts BY ID SHAPE, NOT BY CARD
+// CLASS. The panel's own lookup never got the same treatment — it required the load-card class —
+// so a recently-added load opened Amazon's card and none of ours.
+//
+// ⚠ THE RULE IS REUSED, NOT REIMPLEMENTED. This calls cityAssign's readMainCardElements(), which
+// is already "every bare-UUID div[id] in the main list -> cardContainerFor()". A second copy of
+// the rule here would be a second thing to keep in step, and the 2026-08-13 measurement says the
+// class list is the part that goes stale.
+//
+// ⚠ AND IT DOES NOT ANCHOR ON wo-card-header--highlighted. That is a STATE class — it marks a
+// card as recently added, not as a card — and a rule built on it would break the moment Amazon
+// stops highlighting. The anchor is the id SHAPE, which every card carries.
+//
+// Returns null when the node is not in a main-list card, which every caller treats exactly as
+// the old closest() returning null did.
+function resolveCardForNode(node) {
+  logger.log('inlinePanel', 'resolveCardForNode called');
+  try {
+    if (!node) return null;
+
+    // cityAssign.js is listed AFTER this file in the manifest, so guard on the function rather
+    // than the load order. The fallback is the OLD selector — the previous behaviour exactly,
+    // not a second divergent rule — because a panel that mostly works beats no panel at all if
+    // cityAssign ever fails to load.
+    if (typeof readMainCardElements !== 'function') {
+      logger.warn('inlinePanel', 'readMainCardElements is not defined — cityAssign.js did not ' +
+        'load; falling back to the pre-2026-08-20 class selector, which misses recently-added cards');
+      return node.closest ? node.closest('div.load-card, div.load-card__selected') : null;
+    }
+
+    var cards = readMainCardElements();
+    for (var i = 0; i < cards.length; i++) {
+      var el = cards[i].el;
+      if (el === node) return el;
+      if (el.contains && el.contains(node)) return el;
+    }
+    return null;
+  } catch (e) {
+    logger.error('inlinePanel', 'resolveCardForNode failed — treating the click as not-a-card, ' +
+      'which renders nothing and leaves Amazon untouched', { error: e });
+    return null;
+  }
+}
+
+// The load id ON a card, by the SAME shape rule.
+//
+// ⚠ WHY THE FIRST div[id] IS NOT ENOUGH. Cards also contain div[id="STARTING_SOON"] and other
+// badge ids — cityAssign's readRenderedCardIds() filters them out for exactly this reason, and
+// its comment calls the filter load-bearing. showInlinePanel() took the FIRST div[id] with no
+// shape filter, so on a card whose badge markup comes first it would bind the panel to a badge
+// id, find no record for it, and decline. Same defect family as failure 1, same fix.
+//
+// The regex is CARD_UUID_RE via clickDiagUuidRe(), which already resolves to cityAssign's
+// constant when that file is loaded — one definition in practice.
+function cardLoadIdFor(cardElement) {
+  logger.log('inlinePanel', 'cardLoadIdFor called');
+  try {
+    if (!cardElement || typeof cardElement.querySelectorAll !== 'function') return null;
+    var re  = clickDiagUuidRe();
+    var els = cardElement.querySelectorAll('div[id]');
+    for (var i = 0; i < els.length; i++) {
+      if (els[i].id && re.test(els[i].id)) return els[i].id;
+    }
+    // No UUID-shaped id anywhere on this card. Fall back to the first div[id] — the exact
+    // pre-2026-08-20 behaviour — so nothing that used to render stops rendering.
+    var first = cardElement.querySelector('div[id]');
+    return first ? first.id : null;
+  } catch (e) {
+    logger.error('inlinePanel', 'cardLoadIdFor failed — no id, so the panel declines rather than ' +
+      'binding to the wrong load', { error: e });
+    return null;
+  }
+}
+
 function initManualToggle() {
   if (window.__extManualToggleInit) return;
   window.__extManualToggleInit = true;
 
   document.addEventListener('click', function (ev) {
-    var card = ev.target.closest('div.load-card, div.load-card__selected');
+    // FAILURE 1 FIX (2026-08-20): resolved by cityAssign's id-shape rule, not by requiring the
+    // load-card class — see resolveCardForNode() above. The container-target guard immediately
+    // below is UNCHANGED and still compares ev.target against whatever this returns.
+    var card = resolveCardForNode(ev.target);
     if (!card) return;
 
     // CONTAINER-PADDING CLICK — IGNORE IT ENTIRELY (2026-08-19).
@@ -1765,7 +1878,11 @@ function initManualToggle() {
 // Expose for manual console testing only — NOT called automatically.
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};
 window.__EXT_DEBUG.showPanel        = function () {
-  var c = document.querySelector('div.load-card__selected, div.load-card');
+  // 2026-08-20: resolved the same way the handler does, so testing from the console exercises
+  // the real path — including on a recently-added card, which the old class selector missed.
+  var cards = (typeof readMainCardElements === 'function') ? readMainCardElements() : [];
+  var c = cards.length ? cards[0].el
+                       : document.querySelector('div.load-card__selected, div.load-card');
   return showInlinePanel(c);
 };
 window.__EXT_DEBUG.removePanel      = removeInlinePanel;

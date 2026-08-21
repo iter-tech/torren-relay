@@ -189,6 +189,31 @@ not be placed. The count is clickable and filters to just those loads. This exis
 silently-broken assignment once looked exactly like a working filter — two city tabs showed
 identical plausible lists and nothing on screen contradicted it.
 
+**9a. REFINEMENT, 2026-08-20 (Ihor) — "visible" means visible IN "All", not under every city.**
+
+⚠ **THIS REFINES RULE 9. IT DOES NOT CONTRADICT IT.** Read them together or you will undo one of
+them. An unassigned load is still **visible** and still **counted** — in "All", where it now also
+carries a marker reading *"Origin not determined"*. What it no longer does is appear under a
+**city tab**.
+
+**Ihor's reasoning, verbatim in substance:** a YORK, PA load was showing under the HEBRON, KY tab.
+*If a dispatcher believes he is booking a load near Hebron and it is actually in New York, that is
+a serious problem — not a cosmetic one.* Rule 9 protects against a filter that silently does
+nothing; it was never a licence for a city tab to claim a load 450 miles away. A tab that does
+that is lying to the dispatcher in a way that costs him money.
+
+**Both categories of unassigned behave identically** — "never captured" and "captured but beyond
+`CITY_ASSIGN_MAX_MILES` of every city". Before this, only the first was counted on the badge and
+both were shown under every tab.
+
+⚠ **Consequence, which follows necessarily and was not a separate decision:** `cityFilterHidesLoad()`
+now returns true for an unassigned load, so a NEW unassigned load arriving while a city filter is
+active is not auto-opened (correct — we only ever open something on screen) and not city-badged
+(it has no city). The All badge count is the signal.
+
+**If you are tempted to restore "never hidden":** you would be re-creating the YORK/HEBRON defect.
+The half of rule 9 that must never be lost is *visible somewhere, and counted* — and All is where.
+
 **10. Deadhead is replaced with our per-city distance ONLY on multi-city loads.** Amazon's
 deadhead is one value for the whole search — the distance to the *nearest* of the selected cities.
 On a load belonging to exactly one city it is already correct, so it is left alone.
@@ -228,6 +253,31 @@ and assert a panel appears.
 
 **Ask Ihor to run the six-item smoke checklist before anything else.** It has been NOT RUN for
 every change in this phase.
+
+### 2026-08-20 — the smoke checklist is now COMPLETE, and what still needs a look
+
+⚠ **The paragraph above is superseded: Ihor ran all six items in full on 2026-08-19/20 and all
+six PASS.** Do not ask for another full run. Ask for a specific item, and say why.
+
+**Confirmed live on a real board, 2026-08-20:** the cross-tab rate-limit auto-stop and the
+top-bar message. Ihor provoked it deliberately — two tabs at 2.5s ran indefinitely, a third
+produced an immediate 503 lasting over 15 minutes (see BACKLOG 0w for the derived limits).
+
+**Awaiting Ihor — the five UI changes of 2026-08-20 (U1–U5).** Nothing below was exercised in
+any browser; there is none in this environment. What to look at, per item:
+
+| item | what to look at | the failure that matters |
+|---|---|---|
+| **U1** tab indicator | switch away, wait for a load, switch back | the **favicon** must return to Amazon's own, not merely stop moving. That was the defect |
+| **U2** "All" button | sight along the top and bottom edges of the city row | any button shorter than the rest, badge or no badge |
+| **U3** accordion rows | open a multi-stop load, look at the lower stop rows | a grey band where the panel surface shows through |
+| **U4** Similar matches | start the loop on a board that has a Similar block | the block must be gone every time, with no toggle in the popup |
+| **U5** rate-limit toast | `__EXT_DEBUG.simulateRateLimit(503, 3)` | after the toast fades, **play/pause must still read stopped** |
+
+⚠ **U3 has a counterpart nobody may touch without asking.** The dark-mode zebra rule
+`html.ext-night #ext-inline-panel tbody tr:nth-child(even) td{` at `content/nightMode.js:237`
+produces the same banding in Night Mode. **`content/nightMode.js` is off limits by standing
+constraint and was not edited.** Ihor must lift the constraint for that one line.
 
 ---
 
