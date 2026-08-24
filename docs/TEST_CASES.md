@@ -1,5 +1,103 @@
 # Test Cases
 
+## TC-CITY-STOP — a load whose pickup is a CITY, not a facility (2026-08-24)
+
+**Why:** 16 of 17 loads went unassigned because their first stop was city-level —
+`"LOCKBOURNE, OH"` with `stopCode`, `line1`, `postalCode` and both coordinates all null.
+
+### Steps
+1. Open the board in the state that failed (Required equipment, or any board with vendor
+   pickups). `CITY_ASSIGN_DEBUG = true`.
+2. **PASS:** the **All badge is empty** and no card says *"Origin not determined"*.
+   **FAIL:** a count remains — read the `CITY WHY-UNASSIGNED` lines; each now says whether a
+   city-level stop was seen and why it could not be resolved.
+3. Read the `CITY ASSIGN` line's `positions:` segment.
+   **PASS:** `positions: N facility + M CITY CENTROID (±3-10 mi, accepted 2026-08-24)`.
+   **FAIL:** no centroid reported on a board that has city-level pickups — the resolution did
+   not run.
+4. Read `CITY STOPS resolved N load(s) from M distinct city(ies)`.
+   **PASS:** M is the number of **distinct** pickup cities, not the number of loads. Twenty loads
+   out of one city must cost **one** lookup.
+5. Refresh several times. **PASS:** `CITY STOPS` reports 0 newly resolved after the first cycle —
+   the cache is holding. **FAIL:** it re-resolves every refresh; that is a network cost per tick.
+6. Click a city tab. **PASS:** the city-level loads appear under the right city.
+
+### The state-name case
+7. Find a load whose stop state is a **full name** (`"Illinois"`, `"Ohio"` — both appear in the
+   2026-08-24 capture). **PASS:** it resolves and is assigned.
+   **FAIL:** `** CITY-LEVEL STOP "X, Illinois" ... THE STATE IS NOT RECOGNISED **` — the
+   normalisation table is missing that name. ⚠ It must **never** truncate to a guess.
+
+### The accuracy this accepts
+8. ⚠ A city centroid is **not** the pickup facility — median 3.3 mi, max 18.8 mi from the real
+   building. **Ihor accepted this on 2026-08-24.** At 250 mi it is irrelevant; at a 50 mi radius a
+   load near the boundary could land in a neighbouring city. If that ever matters, the fix is a
+   smaller radius question, not a coordinate question.
+
+## TC-REQ-CAPTURE — the /search REQUEST is read without disturbing the board (2026-08-20, PART 1)
+
+**Why:** the dispatcher's per-city radius is in the request body. Reading it must cost the board
+nothing — this is the same file that once broke the board by cloning a response.
+
+### Steps
+1. Load the board, start the loop, let it refresh a few times.
+   **PASS:** the board renders and refreshes exactly as before. **FAIL:** anything slower,
+   blank, or erroring — stop and report, the read is not free.
+2. Console: `__EXT_DEBUG.dumpSearchRequest()`.
+   **PASS:** it prints `radiusFilters`, `originCities` and `startCityRadius`.
+   **FAIL:** `nothing captured yet` after several refreshes — the body is not a plain string;
+   look for the `[Torren Relay] Could not read your search radius` warning, which names the shape.
+3. 🔑 **Read the key names on the first radius filter entry.** That is what Part 2 is waiting
+   for. With `CITY_ASSIGN_DEBUG = true` the receiver prints them outright.
+4. **PASS:** the printed object contains **no** `savedSearchId`, **no** `minPayout`, **no**
+   `minPricePerDistance`. **FAIL:** any of them present — the projection is leaking.
+5. Save the output into `samples/search-request-<date>.json` (samples/ is gitignored).
+
+## TC-RADIUS-MEMBERSHIP — per-city radius drives membership (2026-08-20, PART 2 — BUILT)
+
+✅ **Part 2 landed.** The field is `radius`, a bare number, one per city.
+
+| # | case | expected |
+|---|---|---|
+| 1 | a load **within** a city's own radius | assigned to that city, appears under its tab |
+| 2 | a load **beyond every** city's radius | **All only**, marked *"Origin not determined"* — rule 9a unchanged |
+| 3 | two cities with **DIFFERENT** radii (say 50 and 250) | each assigns by **its own** number; a load 120 mi from both is in the 250 city and **not** in the 50 city |
+| 4 | a load in range of **two** cities | appears under **both** — membership is still every city in range, **not** nearest-wins |
+| 5 | the radius for a city **cannot be read** | **reported, never defaulted** — the console carries `Could not read your search radius`, and the report says what limit was used instead |
+| 6 | the radius unit is absent or unrecognised | **no conversion is performed** and it is said out loud; miles is never assumed |
+
+⚠ **Case 5 is the one that matters most.** Silently falling back to 150 reinstates the exact
+defect: at radius 250 it marks six legitimately-returned loads unassigned, at radius 50 it puts a
+122 mi load under the HEBRON tab.
+
+## TC-ALL-BADGE-EMPTY — the acceptance criterion, and a permanent self-check (2026-08-20)
+
+🔑 **After Part 2 the "All" badge must be EMPTY.** Amazon only returns loads already inside the
+dispatcher's radius of one of his selected cities, so once our membership uses that same radius,
+every returned load belongs to at least one city and **nothing can be unassigned**.
+
+⚠ **This makes the badge a permanent self-check. A count on it is a BUG — our radius has diverged
+from Amazon's — NOT expected noise.** Treat it as a signal, not as background.
+
+### Steps
+
+1. Load the board with the loop running and the filter on **All**.
+2. **PASS:** the All badge shows **nothing**. No card carries *"Origin not determined"*.
+   **FAIL:** any count at all — capture the console and report it. The `CITY WHY-UNASSIGNED`
+   lines name the load, its coordinates, and its distance against **each city's own radius**.
+3. **PASS:** the board's **total load count is unchanged** from before the change. Only which tab
+   each load appears under may differ.
+   **FAIL:** loads have disappeared — that is a membership regression, not a filtering one.
+4. Change your radius in Amazon's filter (say 250 → 50) and let the board refresh.
+   **PASS:** loads move between tabs to match, and the badge stays empty.
+   **FAIL:** the badge fills up — our capture is stale; check the console for
+   `Could not read your search radius`.
+5. Console: `__EXT_DEBUG.getSearchRequest()`.
+   **PASS:** `radiusFilters` shows your **current** radius per city.
+6. Look at the `CITY ASSIGN` line's `radius:` segment.
+   **PASS:** each city shows your number. **FAIL:** any `(FALLBACK)` — that city is on the
+   built-in 150, which is **not** your setting, and the console will have said so by name.
+
 ## TC-ALL-ONLY — an unassigned load appears under "All" and under NO city tab (2026-08-20)
 
 **Why:** a YORK, PA load appeared under the HEBRON, KY tab. Ihor: a dispatcher who thinks he is

@@ -228,7 +228,92 @@ when the flag is off.
 
 ---
 
+## 🔴 SHIP GATE — a COMMITTED problem, not a local one
+
+⚠ **`DEBUG_LEVEL = 3` and `CITY_ASSIGN_DEBUG = true` are COMMITTED to the repository** (b1b4c96,
+`utils/constants.js`), not merely sitting in someone's working tree. **A clean clone builds a
+debug extension.** Both must return to `1` / `false` before any build is produced.
+
+This is why `capture-suite` has a standing red — it is a true positive and must stay red until
+the flags are reset. **Do not silence it.**
+
+⚠ The MAIN-world copy in `content/networkObserver.js` is a separate mirror
+(`var CITY_ASSIGN_DEBUG = false;`) and is already correct. **Flipping only `utils/constants.js`
+is the complete fix; flipping only the mirror is not.**
+
+## ✅ CITY-LEVEL STOPS — FIXED 2026-08-24. Acceptance criterion awaiting Ihor's board run
+
+**The cause was a stop SHAPE, not an endpoint and not the radius.** Amazon returns two shapes in
+the same response; assignment reads `stops[0]`, and in Ihor's capture **six of eight records have
+a city-level first stop**:
+
+| shape | `label` | `stopCode` | coordinates |
+|---|---|---|---|
+| facility | `"UNC3"` | `"UNC3"` | ✅ set |
+| **city-level** | `"LOCKBOURNE, OH"` | `null` | ❌ **null** |
+
+**Fixed:** the city + state now cross to the isolated world and resolve through
+`resolveCityCoords()`, with state normalisation. 🔑 **Ihor accepted the 3–10 mi centroid error**
+(measured: median 3.3 mi, max 18.8 mi) — assigned to roughly the right city beats unassigned.
+Provenance is tracked, so a centroid is never reported as a facility.
+
+⚠ **THE ALL BADGE SHOULD NOW BE EMPTY, and it remains the self-check** — a count there still means
+our radius or our positions have diverged from Amazon's, which is a bug and not noise.
+
+**What to check on a real board:** the All badge is empty; the `CITY ASSIGN` line shows
+`positions: N facility + M CITY CENTROID`; `CITY STOPS` reports one lookup per DISTINCT city and
+**zero** new resolutions after the first cycle (the cache holding); and a full-state-name stop
+(`"Illinois"`, `"Ohio"` both appear in the capture) resolves rather than reporting an
+unrecognised state.
+
+### Superseded diagnosis — kept for the record
+
+**The cause is a stop SHAPE, not an endpoint and not the radius.** Amazon returns two shapes in
+the same response:
+
+| shape | `label` | `stopCode` | coordinates |
+|---|---|---|---|
+| facility (Amazon building) | `"UNC3"` | `"UNC3"` | ✅ populated |
+| **city-level** (vendor pickup) | `"LOCKBOURNE, OH"` | `null` | ❌ **null** |
+
+**Measured across all 159 captured records / 506 stops: 47 city-level stops, and a null latitude is
+accompanied by null `stopCode`, `line1`, `postalCode` and `longitude` in 47 of 47 — no
+counter-example.** `label` is exactly `city + ", " + state` on 47/47.
+
+⚠ **Two earlier conclusions were WRONG and are corrected in BACKLOG 0af:** the `/similar`
+attribution (the endpoint label is last-write-wins; the cards are in the MAIN list), and "the
+failing shape has never been captured" (it is in our samples 47 times — the earlier scan only
+looked at `stops[0]`, and every city-level stop we hold is a later stop).
+
+🔑 **0 of 159 captured records have a city-level FIRST stop — and stop 0 is the only stop
+assignment reads.** That is why this never surfaced, and why Ihor's board breaks.
+
+**Part 2 still neither caused nor worsened this** — these loads fail before any distance is
+computed.
+
+**Nothing was changed by this diagnostic.** `resolveCityCoords()` could already take
+`"LOCKBOURNE, OH"`; the open questions are the network cost, a strict `stateCode` match that
+would reject full state names, and whether a city centroid is accurate enough at small radii
+(**measured: median 3.3 mi, max 18.8 mi between facilities in one city**) — **Ihor's call.**
+
 ## Open diagnostics
+
+- **PER-CITY RADIUS — BOTH PARTS LANDED 2026-08-20, awaiting Ihor's board run.** Membership now
+  uses the radius **he** set, per city, read from his own `/search` request (field: `radius`, a
+  bare number). Matched on **coordinates** — never name or country, because ⚠ **TULSA carried
+  `country: null`** live. `CITY_ASSIGN_MAX_MILES` survives only as a **labelled last resort** that
+  announces itself by city name.
+
+  🔑 **THE "ALL" BADGE IS NOW A SELF-CHECK, AND THIS IS THE ACCEPTANCE CRITERION.** It must be
+  **EMPTY**. Amazon only returns loads already inside his radius of a selected city, so once our
+  membership uses that same radius every returned load belongs to at least one city and nothing
+  can be unassigned. **⚠ A count on that badge is a BUG — our radius has diverged from Amazon's —
+  NOT expected noise.** Treat it as a signal. The board's **total load count must not change at
+  all**; only which tab each load appears under.
+
+  🔴 **Still open: the radius UNIT is implicit** — a bare number on a `.com`-only capture set. On a
+  metric domain every range would be ~38% short. No conversion is performed and non-`.com` boards
+  are flagged; closing it needs a non-`.com` capture (BACKLOG 0ad, PLAN 21).
 
 - **UNASSIGNED LOADS ARE "ALL" ONLY — fixed 2026-08-20, awaiting Ihor's board run.** A YORK, PA
   load was appearing under the HEBRON, KY tab. Both unassigned categories are now hidden from

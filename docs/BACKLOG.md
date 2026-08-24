@@ -45,6 +45,392 @@ Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.m
 ## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
 
 
+### 0af. ✅ CITY-LEVEL STOPS — FIXED 2026-08-24
+
+**Loads whose pickup is a city rather than an Amazon facility now resolve.** The MAIN world carries
+`{ id, city, state }` for a coordinate-less stop; the isolated world resolves it through
+**`resolveCityCoords()`** — the same function that already resolves the dispatcher's origin
+cities — after normalising the state via patApi's `STATE_NAME_TO_CODE`.
+
+🔑 **Ihor's ruling, 2026-08-24: a 3–10 mi centroid error is ACCEPTABLE.** Getting loads onto city
+tabs beats leaving them unassigned. Measured spread between facilities in one city: **median
+3.3 mi, max 18.8 mi**. Provenance is tracked (`_cityPickupSourceById`) so a centroid is never
+reported as a facility — the per-cycle line reads
+`positions: 2 facility + 1 CITY CENTROID (±3-10 mi, accepted 2026-08-24)`.
+
+⚠ **State normalisation is load-bearing, not a nicety.** `resolvePATCity()` matches
+`stateCode` strictly, and **2 of the 12 city-level stops in the capture carry a full name**.
+`normalizeStopState()` refuses an unrecognised name rather than truncating it to a guess
+(`"PENNSYLVANIA"` → `"PE"`, BACKLOG 0o) — it returns null and the diagnostic says so.
+
+**Cost:** one request per DISTINCT city, ever — `resolveCityCoords()` caches negatives too.
+
+⚠ **`computeAssignment()` remains fully synchronous.** Resolution runs in the cycle before it; a
+re-render frame with an unresolved stop leaves it unassigned and the next cycle picks it up.
+
+### 0af-was. 🔴 CITY-LEVEL STOPS CARRY NO COORDINATES — the diagnosis (2026-08-24)
+
+⚠ **THIS CORRECTS 0ae BELOW ON TWO POINTS. Read this one; 0ae is kept only as the record of a
+wrong turn.**
+
+**CORRECTION 1 — the endpoint is NOT the variable.** 0ae reported these loads as coming from
+`/similar`. That label is `_cityIdEndpointById`, which is **last-write-wins**, as 0ae itself
+flagged. Ihor confirms the cards are in the **MAIN results list**, not the Similar-matches block.
+**Stop treating the endpoint as the cause.**
+
+**CORRECTION 2 — 0ae concluded "the failing shape has never been captured". WRONG.** It IS in the
+captures — 47 city-level stops across the samples on disk. 0ae only scanned `stops[0]`, and every
+city-level stop we hold is a LATER stop, so the scan missed all 47. **The rule was already in our
+own data.**
+
+#### THE RULE — two shapes of stop, in the same response
+
+| shape | `label` | `stopCode` | `line1` | `postalCode` | `latitude`/`longitude` |
+|---|---|---|---|---|---|
+| **facility** (Amazon building) | `"UNC3"` | `"UNC3"` | `"4525 STATESVILLE RD"` | `"28269"` | ✅ populated |
+| **city-level** (vendor pickup) | `"LOCKBOURNE, OH"` | `null` | `null` | `null` | ❌ **null** |
+
+**N1 — 47 city-level stops, ZERO counter-examples.** A null latitude is ALWAYS accompanied by
+`stopCode`, `line1`, `postalCode` **and** `longitude` all null. The rule is exact.
+
+**N2 — 47 of 506 stops (9.3%) are city-level.** ⚠ **But 0 of 159 records have a city-level FIRST
+stop** — and stop 0 is the only stop assignment reads. That is why this never surfaced before, and
+why Ihor's board breaks: **his loads have the city-level stop at position 0.**
+
+**N3 — `city`, `state` and `timeZone` are populated on 47/47.** 🔑 **`label` is exactly
+`city + ", " + state` on 47/47** — directly usable, no parsing invented.
+⚠ Three state casings occur: `"OH"`, `"Ohio"`, `"KENTUCKY"`. Of the 47, **45 are 2-letter and 2
+are full names**.
+
+**N4 — the Required/Provided correlation CANNOT be confirmed from the data, and must not be
+assumed.** We hold exactly **one** labelled P/R record (`pr-badge-labelled-records-2026-08-19.json`,
+badge **P**), and it is a facility-to-facility LOADED load with coordinates on both stops —
+consistent with Ihor's reading, but **n = 1 proves nothing**, and BACKLOG **0p** already
+established the response body cannot distinguish P from R.
+
+What the data DOES show: of 159 records, 13 carry a city-level stop, and **13/13 are
+`loads[0].loadType === "EMPTY"`** (against 103 LOADED / 43 EMPTY among the rest). So EMPTY is
+**necessary but not sufficient** in our captures. ⚠ **That is a correlation with the empty-leg
+repositioning stops we happen to hold — NOT evidence about vendor pickups at stop 0.** Ihor's
+mechanism (vendor pickups have no facility code, so no coordinates) is plausible and matches the
+shape exactly; it is simply not yet measurable here.
+
+#### N5 — options for resolving a city-level stop
+
+🔑 **The function already exists: `resolveCityCoords(cityString)` in `content/cityAssign.js`** —
+the same one that resolves the dispatcher's five origin cities.
+
+| question | answer |
+|---|---|
+| Can it take `"LOCKBOURNE, OH"`? | ✅ **Yes, unchanged.** `parseCityState()` splits on the LAST comma and uppercases the state — exactly the `label` format, which is `city + ", " + state` on 47/47. |
+| Does it need the network? | ⚠ **Yes.** It calls `resolvePATCity()` → `GET /api/loadboard/filters/cities/search/<city>`, which is **not memoised inside patApi** (up to three requests counting its retries). |
+| Can results be cached? | ✅ **Already are.** `_cityCoordCache[cityString]`, in memory, per page session, **negative results cached too**. One request per distinct city, ever — a board with 11 distinct pickup cities costs 11 requests total, not 11 per refresh. |
+
+⚠ **A GAP THAT WOULD BITE: `resolvePATCity()` matches `results[i].stateCode === state`, a strict
+two-letter comparison, and does NOT call `normalizeState()` on a pre-parsed `{city, state}`
+input.** A stop reading `"…, Pennsylvania"` would never match `stateCode: "PA"` and would resolve
+to null. **2 of the 47 city-level stops on disk carry a full state name** (~4%). Related to
+BACKLOG **0o** (`normalizeState`'s first-two-letters fallback: "PENNSYLVANIA" → "PE", wrong).
+
+**Options, none implemented:**
+
+| option | cost | failure mode |
+|---|---|---|
+| **A. Do nothing** | zero | City-level pickups stay All-only and marked. On a board dominated by them, per-city filtering is effectively unavailable. Honest and visible. |
+| **B. Resolve `label` through `resolveCityCoords()`** | one network request per distinct city, cached forever; plus fixing the `stateCode` gap above | A city centroid is **not** the pickup facility — see the accuracy note. A city the endpoint cannot resolve returns null and the load stays unassigned, which is the current behaviour anyway. |
+| **C. B, but only when stop 0 is city-level** | same, narrower | Same accuracy question, applied to fewer loads. Facility stops keep their exact coordinates. |
+
+#### ⚠ THE ACCURACY QUESTION — IHOR'S CALL, NOT OURS
+
+**A city centroid is not the pickup facility.** Measured over 27 cities in our captures that carry
+more than one distinct facility: **median spread 3.3 mi between facilities in the same city,
+maximum 18.8 mi** (JACKSONVILLE, FL — JAX9 vs JAX7). A centroid sits somewhere in that spread, so
+the error is realistically **a few miles, up to about 10**.
+
+- **At a 250-mile radius that is irrelevant** — nothing near a boundary.
+- **At 50 miles it could place a load in the wrong city**, or drop one that belongs. A load
+  measured at 47 mi might really be 55.
+
+**This is Ihor's decision.** The trade is: a city-level load that is currently *unassigned and
+marked* would become *assigned, possibly to a neighbouring city at a small radius*.
+
+⛔ **NOT an option, and never to be proposed: reading city or address text off the CARD DOM.**
+That is task **7d**, it failed live on 2026-08-13 leaving every card unassigned, and it must never
+be reinvented. Everything above comes from the **captured API record**, a different source.
+
+### 0ae. ⚠ SUPERSEDED BY 0af — PART 2 ACCEPTANCE CRITERION IS NOT MET (2026-08-21)
+
+⚠ **TWO CONCLUSIONS HERE ARE WRONG — see 0af.** (1) The `/similar` attribution is misleading: the
+endpoint label is last-write-wins and the cards are in the MAIN list. (2) "The failing shape has
+never been captured" is false — it is in the samples, 47 times, but only ever at stops **after**
+the first, which the scan did not reach. Kept as the record of the wrong turn.
+
+### 0ae-was. PART 2 ACCEPTANCE CRITERION IS NOT MET — loads with NO COORDINATES (2026-08-21)
+
+**Measured by Ihor, live, after Part 2 landed:**
+
+```
+CITY WHY-UNASSIGNED  16 unassigned of 17 rendered
+radius per city: all five = 250
+every one of the 16: NO COORDINATES — "listed in a captured response from [similar] but it
+carried no latitude/longitude — _cityPickupById has no entry, _cityNoCoordIds does"
+merged map holds 371 ids from 6 buffered responses
+```
+
+🔑 **THE ALL BADGE IS NOT EMPTY, SO THE SELF-CHECK IS DOING ITS JOB.** It is telling us about a
+real gap. **The cause is NOT the radius and NOT the distance maths** — these loads fail before any
+distance is computed, because there is no position to measure from.
+
+#### S1 — what the samples on disk actually say
+
+`samples/similar-1.json` (50 work opportunities) was measured field by field against
+`samples/search-5cities-active.json`:
+
+| check | result |
+|---|---|
+| `loads[0].stops[0].location.latitude` / `.longitude` present and numeric | ✅ **50 / 50** |
+| absent, or present-but-null | **0** |
+| `stops[0].stopType` | `PICKUP` **50/50** — the existing `stops[0]` rule holds |
+| `workOpportunity` key set vs `/search` | **identical** |
+| `loads[0]` key set | **identical** |
+| `loads[0].stops[0]` key set | **identical** |
+| `stops[0].location` key set | **identical** |
+| `workOpportunities[].id` shape | bare UUID **50/50**, same as `/search` |
+
+Across **every** sample on disk — 159 records, five files — the number of records where our
+extractor would find no usable coordinates is **ZERO**.
+
+⚠ **SO IT IS NEITHER A PARSING BUG NOR AN ENDPOINT LIMITATION, ON THE EVIDENCE WE HOLD.** For
+every `/similar` record we have ever captured, the endpoint provides coordinates and our
+extractor reads them correctly. **The shape that failed on Ihor's board is one we have never
+captured.**
+
+`/similar` also carries, on every record: `label`, `stopCode`, `line1`, `city`, `state`,
+`country`, `postalCode`, `timeZone`, `domicile`. ⚠ `state` is a **mix of full names and
+abbreviations in BOTH endpoints** (`/similar` 43 abbrev / 7 full; `/search` 49 / 1).
+
+#### S2 — could another response supply the coordinates? The merge ALREADY tries
+
+**Answer: no, and this is provable from the code rather than probable.** `mergePickupCoords()`
+only ever ADDS; `_cityPickupById` persists across responses, is capped at `CITY_PICKUP_MAX = 4000`
+(371 held, so nothing was evicted), and `computeAssignment()` checks it **before** anything else.
+
+🔑 **So if ANY buffered response had carried coordinates for those 16 ids, they would already be
+assigned.** The cross-response fallback S2 asks about is not a missing mechanism — it exists, it
+ran, and the data was not there. **0 of the 16 appear with coordinates in any buffered response.**
+
+The `[similar]` label is accurate but reports only the **last** endpoint that mentioned the id
+(`_cityIdEndpointById` is last-write-wins). Since these ids never appeared in a `pairs` list, every
+response that mentioned them listed them **without** coordinates.
+
+#### S3 — Part 2 neither caused nor worsened this
+
+**Stated plainly: PART 2 DID NOT CAUSE THIS AND DID NOT MAKE IT WORSE.**
+
+- These loads fail at the **coordinate** stage. The radius is never consulted for them — there is
+  no position to measure. Changing 150 → his real per-city radius cannot affect a load with no
+  coordinates.
+- They were **already** counted on the All badge before Part 2: the pre-2026-08-20 counter was
+  `publishUnassignedCount(result.unresolved)`, and `unresolved` is exactly the no-coordinate
+  category.
+- What changed is **legibility, not behaviour**: rule 9a (2026-08-20) stopped showing them under
+  every city tab and marked them; Part 2 then declared a non-empty badge to be a bug rather than
+  noise. **The gap is pre-existing; the self-check is what made it impossible to ignore.**
+
+#### S4 — options, none implemented
+
+| option | cost | failure mode |
+|---|---|---|
+| **A. Do nothing** — accept that these loads are All-only and marked | zero | The dispatcher cannot filter them by city. On a Required-equipment board that is *most* of the list, so per-city filtering is effectively unavailable there. Honest, visible, and already what happens. |
+| **B. Capture the failing response first, then decide** | one DevTools save | None. **Nothing can be designed until the failing shape is known** — every other option depends on what that body actually contains. |
+| **C. Derive a position from other fields IN THE RESPONSE** (`postalCode`, or `city`+`state`) | a geocode lookup per distinct value, cached like `resolveCityCoords()` | ⚠ **Conditional on S1 for the failing board — unknown whether those fields are even populated there.** A ZIP centroid is not the warehouse: error of a few miles, which matters at a 50 mi radius and not at 250. Adds a network dependency to assignment. **Do not start without B.** |
+| **D. Use Amazon's own `deadhead`** — one value per load, distance to the NEAREST selected city | none; already captured and already in memory | Cannot say WHICH city, so it cannot produce membership. It could only prove a load is inside *someone's* radius. Also unknown whether `/similar` populates it on the failing board. |
+
+⛔ **NOT AN OPTION: parsing addresses, ZIPs, city names or facility codes off the CARD.** That is
+task **7d**. It **FAILED LIVE on 2026-08-13**, leaving every card unassigned, and is recorded as
+never to be reinvented. Options C and D read the **captured response**, never the DOM.
+
+#### What Ihor must capture to settle it
+
+1. Put the board in the state that fails — **Required equipment**, the one where 16 of 17 went
+   unassigned.
+2. DevTools → **Network** → filter `similar` → click the `/api/loadboard/similar` request →
+   **Response** tab → save the whole body as `samples/similar-required-2026-08-21.json`.
+3. If the failing cards are served by a different endpoint, save that body instead — the
+   `CITY ENDPOINT SHAPE` line names every endpoint seen and its record count.
+4. Also paste the `CITY WHY-UNASSIGNED` block and **one** of the 16 load ids, so the id can be
+   found in the saved body.
+
+⚠ **Do not guess from the existing `similar-1.json`** — it is from a 53' board and shows the
+problem NOT happening. The capture that matters is the one that fails.
+
+
+### 0ad. 🔴 THE RADIUS UNIT IS IMPLICIT — needs a non-.com capture (2026-08-20)
+
+`radius` is a **bare number**. Every other distance in this API carries a unit — `deadhead`,
+`totalDistance` and per-load `distance` all say `"miles"`; the PAT upsert says `"mi"`. **This one
+says nothing.**
+
+Every capture on disk is from a **`.com`** board and our maths is miles. On a metric Relay domain
+(de, fr, it, es, pl, cz, in, co.jp) the number would mean **kilometres** and every range would be
+**~38% short** — loads would silently vanish from their city tabs.
+
+**What is in place:** `radiusUnitCaveat()` marks every diagnostic line that quotes a radius when
+the host is not `relay.amazon.com`; **no conversion is ever performed**; an **unknown** host says
+nothing rather than the wrong thing.
+
+**What is needed to close it: a non-`.com` capture** — the same artefact **PLAN 21 (non-US
+locale)** already requires. ⚠ Do not guess the unit from the domain; capture it.
+
+### 0ac. ✅ PER-CITY RADIUS — BOTH PARTS LANDED 2026-08-20
+
+**Ihor captured the `/api/loadboard/search` REQUEST body. The radius is in it — and it is**
+**PER CITY**, in `originCitiesRadiusFilters[]`, one entry per origin city.
+
+⚠ **CORRECTION TO A WORKING ASSUMPTION.** We had "one radius for the whole search". The API
+stores one **per city**. The UI may set them alike; do not build on that.
+
+**PART 1 — DONE.** The `window.fetch` wrapper (which already read `init.signal`) now also reads
+`init.body` for `WATCH_PATH` only. 🔑 **The response machinery is untouched** — no clone, no tee,
+none of §6.8's abort hazard, because that hazard belongs to response *streams*. A non-string body
+**stops and reports**; no `Request` is ever cloned.
+
+✅ **PART 2 — DONE.** The field is **`radius`**, a **bare number**, one per city. Membership uses
+each city's own value, matched to our active origin cities by **haversine distance** — never by
+name (localised) or country (⚠ **TULSA carried `country: null`** in the live capture).
+
+⚠ **The two coordinate sources differ by ~4 mi** (request entry vs cities endpoint), so the match
+bound is **15 miles** — well above that gap, well below the distance between distinct selected
+cities. An **ambiguous** match is **refused**, never guessed.
+
+🔑 **THE ALL BADGE IS NOW A SELF-CHECK.** It must be EMPTY: Amazon only returns loads inside his
+radius, so every returned load belongs to a city. **A count on it is a BUG, not noise.**
+
+**`CITY_ASSIGN_MAX_MILES` is KEPT as a labelled last resort**, not deleted — an unreadable radius
+would otherwise have to mean "assign to nothing" or "assign to everything". It announces itself:
+`console.warn` by city name, `(FALLBACK)` on every line, and an explicit "not the dispatcher's
+setting".
+
+⚠ **When Part 2 lands, "fall back to 150" is not acceptable.** A visible channel already exists
+for this (`reportRequestIssue` → `console.warn`), deliberately NOT on the debug flag, because
+`reportDrop` ships off and would have made the failure invisible.
+
+✅ **Clau2de's separate finding resolves itself here, with no second mechanism:** a load should
+not be called *"Origin not determined"* merely for exceeding 150 mi, because Amazon returned it
+and its origin IS known. Once membership uses the dispatcher's real per-city radius, a returned
+load is inside that radius of at least one selected city by construction, so the out-of-range
+category empties out on its own. **Nothing extra should be added for it.**
+
+
+### 0ab. 🔬 CAN WE READ THE DISPATCHER'S SEARCH RADIUS? — measured 2026-08-20, NOTHING CHANGED
+
+**Ihor is right that `CITY_ASSIGN_MAX_MILES = 150` is wrong in both directions**, and he has
+measured both:
+
+| his radius | our limit | result |
+|---|---|---|
+| **250** | 150 | six loads with deadhead **151–222 mi** marked *"Origin not determined"* — Amazon returned them legitimately, and we declared their origin unknown |
+| **50** | 150 | a load **122 mi** from HEBRON appeared under the HEBRON tab (measured 2026-08-19) |
+
+The radius is **one value for the whole search**, not per city. ⚠ **Do not turn it into a
+per-city setting.**
+
+#### R1 — the DOM: the field is not merely fragile, it is probably ABSENT while we run
+
+⚠ **NO capture of a load-board radius control exists anywhere on disk** — not in `samples/`, not
+in `docs/AMAZON_SELECTORS.md`, not in `AMAZON_DOM_REFERENCE.md`. The one "Radius" reference
+(`AMAZON_DOM_REFERENCE.md` §"Form structure", *Section 2 Location — Origin select + Radius*) is
+the **Create Order / Post-a-Truck form**, a different page. **The anchor, the raw value format
+and the empty/mid-edit behaviour are therefore UNKNOWN and must be captured before anything is
+built on them.**
+
+What IS known about the surrounding markup, and it is bad:
+
+1. 🔑 **Amazon UNMOUNTS the filter panel when it is collapsed.** `div.filters__column` is
+   *absent entirely*, not hidden — captured 2026-08-05, both states, same session.
+2. 🔑 **We collapse it ourselves on every loop START** (`content.js` → `closePanelsForStart()` →
+   `collapseFilterPanel()`). So for the whole time city assignment matters, a radius control
+   that lives inside that panel **is not in the DOM at all**. That is absence, not fragility.
+3. If the radius is instead a **chip** (like `Origin city: …` or `Payout (min): 500`), chips do
+   survive the collapse — that is how the origin cities are read today. **But no radius chip is
+   recorded**, and a radius may not be removable/chip-shaped at all.
+4. Any chip read is anchored on **English user-facing text** and would inherit the limitation
+   `ORIGIN_CITY_PREFIX = 'Origin city: '` already has across the **11 Relay domains**
+   (ca, co.jp, co.uk, com, cz, de, es, fr, it, in, pl).
+5. The wrappers are `css-<hash>` (`div.css-1w1nhw5 > div.css-e7fmj9 > span`) — unusable. **Three
+   June 2026 attempts died on hashed selectors.**
+
+#### R2 — the request: unknown, but the hook already exists and does NOT touch the settled path
+
+The concept exists in Amazon's own API: the PAT upsert carries
+`originCityRadius: { value: 50, unit: "mi" }` — confirmed from a live capture.
+
+⚠ **Whether `/api/loadboard/search` carries the radius in its REQUEST cannot be known from what
+is on disk.** We have never captured a request body. Do not assume it does.
+
+What it would take: `window.fetch` is **already wrapped** in `content/networkObserver.js` and
+**already receives `arguments[1]`** — it reads `init.signal` and nothing else. Two shapes:
+
+| call shape | body location | cost |
+|---|---|---|
+| `fetch(url, { body: '…' })` | `init.body`, **already a string in hand** | synchronous, free, no clone, no stream consumption |
+| `fetch(new Request(url, { body }))` | a **ReadableStream** on the Request | needs `clone()` — the same tee hazard that killed response cloning |
+
+**Which shape Amazon uses is not recorded on disk.**
+
+🔑 **REQUEST CAPTURE DOES NOT TOUCH THE RESPONSE MACHINERY.** The `Response.prototype.json`
+piggyback (`api-samples.md` §6.8) is installed separately by `installResponseReadHook()` and is
+unrelated to the fetch wrapper. Request reading sits **beside** it, in `window.fetch`. Nothing
+about the hard-won response path changes.
+
+#### R3 — units: two vocabularies already, and non-.com is UNKNOWN
+
+⚠ **Amazon uses two different unit spellings in its own API.** `/search` responses use
+`unit: "miles"` (`deadhead`, `totalDistance`, per-load `distance`); the PAT upsert uses
+`unit: "mi"` (and `distanceUnit: "mi"`, documented as *lowercase, not `MILES`*). **Any radius
+read must carry its unit, never assume one.**
+
+⚠ **Every capture on disk is from a `.com` board.** What a `.de` / `.pl` / `.co.jp` board emits —
+`kilometers`, `km`, or still `miles` — **cannot be determined from what is on disk.** Amazon does
+emit metric units in this API for other quantities (`"unit":"kilograms"` on weight), which is a
+reason to expect locale variation but is **not evidence** of it for distance. Our maths is miles
+(`CITY_ASSIGN_EARTH_RADIUS_MI = 3958.8`).
+
+#### R4 — when it changes
+
+| source | how we would notice | stale risk |
+|---|---|---|
+| **chip** | `originCities.js` already observes the filter area (200 ms debounce); assignment re-runs per cycle | low |
+| **inside the panel** | **we could not** — we collapse it and Amazon unmounts it | **silent and indefinite** |
+| **request** | re-read on the next `/search`, i.e. every refresh | **structurally impossible** — nothing is cached |
+
+⚠ **A stale radius is not a cosmetic risk.** Stale-too-large re-creates the HEBRON 122 mi false
+positive; stale-too-small re-creates the six *"Origin not determined"* false negatives. Both are
+the defects this would exist to remove.
+
+#### R5 — the option nobody had noticed: the answer may already be in memory
+
+The `/search` response already carries, per work opportunity,
+`deadhead: { value, unit: "miles" }` — **Amazon's own distance from the load to the NEAREST
+selected origin city** (that is exactly why the per-city deadhead substitution exists). Every load
+Amazon returns is, by definition, within the dispatcher's radius of some selected city. So
+**`max(deadhead)` across the rendered board is a lower bound on the radius, needing no DOM read,
+no request capture and no new machinery** — the data is already in `_cityRecordById`.
+
+⚠ **Its failure modes, stated plainly:** it is a *lower* bound, so on a board whose farthest
+returned load is 40 mi it under-estimates a 250 mi radius; it can only grow within a search
+unless reset when the search changes; and it is **not known** whether the `recommendations`
+endpoint ("Recently added") honours the radius filter at all — **there is no recommendations
+sample on disk to check.**
+
+**It also cannot answer WHICH cities a load is in range of** — membership still needs a real
+number. What it does fix outright is the false-negative half: a load Amazon returned should never
+be called *"Origin not determined"* on distance grounds.
+
+⚠ **If the DOM is ever chosen, "fall back to 150" is NOT acceptable** — that silently
+re-creates the exact defect. The fallback must be visible: mark the radius as unknown and say so.
+
+
 ### 0z. ✅ UNASSIGNED LOADS ARE "ALL" ONLY — fixed 2026-08-20 (Ihor, safety)
 
 A YORK, PA load appeared under the HEBRON, KY tab. Both categories of unassigned —

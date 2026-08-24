@@ -740,6 +740,8 @@ suspecting the JSON path. Harden by selecting the UUID-shaped id rather than the
 
 ## 6.8 HOW the board's `/search` body must be captured (2026-08-13) ✅ proven live
 
+> **See also §6.9 — the /search REQUEST.** §6.8 is about the RESPONSE and is unchanged by it.
+
 **The board reads its own response via `Response.json()`, and that read completes. A cloned read
 of the same response CANNOT be made to work.**
 
@@ -852,3 +854,207 @@ Beyond it a card is counted unmatched rather than forced onto a city. Tune again
 §1/§2 (`name`, `stateCode`, `latitude`, `longitude`), via `resolvePATCity()`. Note that function
 is **not memoised** — `cityAssign.js` caches its results per page session precisely so this does
 not become a per-refresh network call.
+
+## 6.9 The `/search` REQUEST body — where the dispatcher's RADIUS lives (2026-08-20) ✅ captured live
+
+Ihor captured the request body from DevTools on 2026-08-20. **The radius is in the REQUEST, and
+it is PER CITY.**
+
+```
+originCitiesRadiusFilters: [
+  { cityLatitude: 41.837235, cityLongitude: -87.685969,
+    cityName: "CHICAGO", cityStateCode: "IL", ... },   <- entry truncated in the paste
+  ...
+]
+startCityRadius: 75
+originCities: [ { name, stateCode, country, latitude, longitude, ... }, ... ]
+resultSize: 50
+maximumNumberOfStops: 4
+minPayout: 400
+minPricePerDistance: 4
+isAutoRefreshCall: true
+savedSearchId: "6dc8cde0-b75e-4031-93fd-e4002c09cf10"
+```
+
+⚠ **THE RADIUS FIELD NAME INSIDE EACH ENTRY IS NOT YET KNOWN** — the paste truncates the entry.
+**Do not guess it, and do not assume its unit.** `content/networkObserver.js` projects those
+entries **by SHAPE, not by name** precisely so the capture reveals the name without anyone
+inventing one.
+
+⚠ **CORRECTION to an assumption we had been working under.** "The same radius for all cities in
+the search" is **not** what the API stores — it stores a radius **per city**. The UI may well set
+them alike; build from the request, not from the assumption.
+
+### It is a plain object, not a stream
+
+🔑 **This is why §6.8's hazard does not apply here.** The abort-kills-both-tee-branches problem
+is a property of response **streams**. The request body arrives as `init.body`, already a string
+in hand — **no clone, no tee, no abort exposure.** If the call shape is ever
+`fetch(new Request(...))` instead, the body is a stream on the Request and the capture **STOPS
+and reports**; it does not clone. See `classifyRequestBody()`.
+
+🔑 **§6.8 IS UNTOUCHED.** `installResponseReadHook()` and the `Response.prototype.json`
+piggyback are not modified by this. Request capture sits **beside** them in the `window.fetch`
+wrapper, which already received `arguments[1]` and read `init.signal`.
+
+### What is carried across postMessage, and what is not
+
+| kept | why |
+|---|---|
+| `originCitiesRadiusFilters[]` | the point of the exercise — the per-city radius. Projected **by shape**: scalars and `{value, unit}` pairs only |
+| `originCities[]` | needed to match a radius entry to an active origin city. Strict **name** allow-list (`name`, `stateCode`, `country`, `latitude`, `longitude`) — those names ARE known |
+| `startCityRadius` | a named scalar radius sitting beside them |
+
+| dropped | why |
+|---|---|
+| `savedSearchId` | an identifier for the dispatcher's saved search |
+| `minPayout`, `minPricePerDistance` | his commercial settings — none of our business |
+| `resultSize`, `maximumNumberOfStops`, `isAutoRefreshCall` | not needed for membership |
+| anything matching `/token|secret|auth|csrf|session|cookie|password|jwt|bearer|signature/i` | checked **before** the shape allow-list, so a credential cannot ride in on a scalar |
+| nested objects, arrays, strings > 64 chars | an audit blob cannot ride along |
+
+### How to save one
+
+`samples/` is gitignored, so the file must be written by hand:
+
+1. Load the board with the loop running.
+2. In the page console: `__EXT_DEBUG.dumpSearchRequest()`
+3. Paste the printed JSON into `samples/search-request-2026-08-20.json`.
+
+⚠ **The capture is deliberately the PROJECTED object, not the raw body** — the raw body carries
+`savedSearchId` and the dispatcher's payout thresholds, and there is no reason for those to sit
+on disk.
+
+### 6.9.1 The radius field — CONFIRMED 2026-08-20
+
+Each `originCitiesRadiusFilters` entry has **exactly six fields**:
+
+```json
+{ "cityDisplayValue": "CHICAGO, IL",
+  "cityLatitude": 41.837235,
+  "cityLongitude": -87.685969,
+  "cityName": "CHICAGO",
+  "cityStateCode": "IL",
+  "radius": 75 }
+```
+
+Live capture in `samples/search-request-2026-08-20.json`: five cities, `rawFilterKeyCounts`
+`[6,6,6,6,6]` — **no field lost in projection** — all reading `radius: 100`. An earlier capture
+the same day read 75, so the capture tracks the dispatcher's current setting, not a stale one.
+
+#### 🔴 THE UNIT IS IMPLICIT — a KNOWN LIMITATION, not an oversight
+
+`radius` is a **bare number**. Every other distance in this API is `{ value, unit }` —
+`deadhead`, `totalDistance`, per-load `distance` all carry `"miles"`; the PAT upsert carries
+`"mi"`. **This one carries nothing.**
+
+Every capture on disk is from a **`.com`** board, where miles is overwhelmingly the meaning, and
+our maths is miles. **But nothing in the payload says so.** On a metric Relay domain the number
+would mean kilometres and every range would be **~38% short** — loads would silently vanish from
+their city tabs. `radiusUnitCaveat()` appends a warning to every diagnostic line that quotes a
+radius when the host is not `relay.amazon.com`, and **no conversion is ever performed**.
+
+⚠ **An unknown host says nothing rather than the wrong thing** — an empty hostname is "we do not
+know", not "non-.com".
+
+**To close this properly a non-`.com` capture is needed** — the same one PLAN 21 (non-US locale)
+already requires.
+
+#### Matching is on COORDINATES
+
+Entries are joined to our active origin cities by **haversine distance**, not by name or country:
+
+1. **Name is localised copy.** Our city strings come from Amazon's chips (`"CHICAGO, IL"`); the
+   entry carries `cityName` and `cityStateCode` separately, so a name match means re-assembling
+   and re-parsing a string across 11 locales.
+2. ⚠ **Country is not reliable** — in the live capture **TULSA carries `country: null`** while
+   the other four carry `"US"`.
+3. Coordinates are what the membership maths already uses.
+
+⚠ **THE TWO COORDINATE SOURCES DO NOT AGREE EXACTLY.** Our resolved city comes from the CITIES
+endpoint; the entry carries its own. The live capture has CHICAGO at `41.837235,-87.685969`
+while the cities endpoint answers `41.8781,-87.6298` — **about 4 mi apart**. The match bound is
+therefore **15 miles**, comfortably above that gap and far below the distance between two
+distinct selected cities (the closest realistic pair, CHICAGO/JOLIET, is ~35 mi). An **ambiguous**
+match — two entries inside the bound — is **refused**, not guessed.
+
+## 6.10 TWO SHAPES OF STOP — facility-level and CITY-LEVEL (2026-08-24) 🔴
+
+⚠ **This supersedes the 2026-08-21 reading that the problem belonged to `/similar`.** The endpoint
+is **not** the variable. Both shapes occur **in the same response**, from any endpoint.
+
+### The two shapes
+
+**FACILITY-LEVEL — an Amazon building. HAS coordinates:**
+```json
+{ "label": "UNC3", "stopCode": "UNC3", "line1": "4525 STATESVILLE RD",
+  "postalCode": "28269", "latitude": 35.2821767, "longitude": -80.8358462 }
+```
+
+**CITY-LEVEL — a vendor/city pickup. NO coordinates:**
+```json
+{ "label": "LOCKBOURNE, OH", "stopCode": null, "line1": null,
+  "postalCode": null, "latitude": null, "longitude": null,
+  "city": "LOCKBOURNE", "state": "OH", "timeZone": "America/New_York" }
+```
+
+### Measured across every capture on disk — 159 records, 506 stops
+
+| measurement | result |
+|---|---|
+| city-level stops (null latitude) | **47 of 506 — 9.3%** |
+| facility-level stops | 459 |
+| 🔑 **null latitude WITHOUT stopCode/line1/postalCode/longitude also null** | **0 — the rule holds with no counter-example** |
+| city-level stops with `city` null | **0** |
+| city-level stops with `state` null | **0** |
+| city-level stops with `timeZone` null | **0** |
+| 🔑 `label` === `city + ", " + state` | **47 / 47** |
+| records with a **city-level FIRST stop** | **0 of 159** |
+
+⚠ **THE LAST ROW IS WHY THIS WAS NEVER SEEN BEFORE.** Assignment reads
+`loads[0].stops[0].location`, and in every capture we hold, stop 0 is always a facility. The
+city-level stops are all later stops. **Ihor's 2026-08-24 board has a city-level FIRST stop, and
+that is precisely what breaks assignment.**
+
+### State spellings — THREE casings, on both shapes
+
+`"OH"` (2-letter), `"Ohio"` (Title Case) and `"KENTUCKY"` / `"TEXAS"` (UPPER) all occur.
+On the 47 city-level stops: **45 are 2-letter, 2 are full names** (`"Pennsylvania"`, `"Virginia"`).
+
+⚠ **`resolvePATCity()` matches `results[i].stateCode === state` — a strict two-letter comparison —
+and does NOT call `normalizeState()` on a pre-parsed `{city, state}` input.** A full state name
+would therefore never match. See BACKLOG 0af.
+
+### Intra-city facility spread — the accuracy budget for a city centroid
+
+Measured over 27 cities that appear with more than one distinct facility:
+**median spread 3.3 mi, maximum 18.8 mi** (JACKSONVILLE, FL — JAX9 vs JAX7).
+
+### ⚠ THE 2026-08-24 BODY ITSELF IS NOT ON DISK
+
+The two shapes above are quoted from Ihor's message, not read from a saved file. The eleven
+city-level pickups he listed — LOCKBOURNE OH, HOBART WI, JACKSON TN, MEMPHIS TN, PALMETTO GA,
+DEERFIELD WI, PERTH AMBOY NJ, ORISKANY NY, JEFFERSON CITY MO, OMAHA NE, ELWOOD KS — could not be
+verified against a body. **To save it:** DevTools → Network → the `/api/loadboard/search` (or
+whichever endpoint served those cards) → **Response** → save as
+`samples/search-city-level-2026-08-24.json`. `samples/` is gitignored, so this must be done by
+hand.
+
+### 6.10.1 The capture is on disk, and the fix landed 2026-08-24
+
+`samples/search-city-level-2026-08-24.json` — 8 work opportunities, saved by Ihor from the board
+that failed. **Six of the eight have a city-level FIRST stop**: LOCKBOURNE OH, HOBART WI,
+INDIANAPOLIS IN, DEERFIELD WI, PERTH AMBOY NJ, ORISKANY NY. The other two are facilities
+(UNY5 Brooklyn NY, SRH2 Wilmington MA) and carry coordinates.
+
+Measured on this file: **12 city-level stops, zero counter-examples** to the rule; `label` equals
+`city + ", " + state` in **12/12**; **two carry a full state name** (`"Illinois"`, `"Ohio"`).
+
+⚠ **All eight records are `loadType: "LOADED"`, which REFUTES the `EMPTY` correlation** seen in
+the older captures. That correlation was an artefact of empty-leg repositioning stops and was
+flagged as unproven when first reported.
+
+**How it is now handled:** the MAIN world carries `{ id, city, state }` for a coordinate-less
+stop; the isolated world resolves it through `resolveCityCoords()` — the same function that
+resolves the dispatcher's own origin cities — after normalising the state through patApi's
+`STATE_NAME_TO_CODE`. See CHANGELOG 2026-08-24.

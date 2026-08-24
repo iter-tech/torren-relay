@@ -55,6 +55,45 @@ coordinates, which lookup came back empty and which endpoint listed it.
 
 ---
 
+## 32. PER-CITY SEARCH RADIUS — BOTH PARTS DONE 2026-08-20  **done**
+
+Supersedes the `CITY_ASSIGN_MAX_MILES` half of PLAN 16.
+
+**PART 1 — DONE.** The `/api/loadboard/search` REQUEST body is captured. The `window.fetch`
+wrapper already received `arguments[1]` and read `init.signal`; it now reads `init.body` beside
+it, for `WATCH_PATH` only. 🔑 **The response machinery (api-samples §6.8) is untouched** — there
+is no clone and no tee, because `init.body` is a plain string already in hand. A non-string body
+**stops and reports**; no `Request` is ever cloned.
+
+✅ **PART 2 — DONE.** The field is **`radius`**, a **bare number**, one per city. Membership uses
+each city's own value, matched to our active origin cities by **haversine distance within 15 mi**
+— never by name (localised) or country (⚠ **TULSA carried `country: null`** live). The two
+coordinate sources differ by ~4 mi, which is what the bound absorbs; an **ambiguous** match is
+**refused**, never guessed.
+
+🔑 **THE ACCEPTANCE CRITERION — the All badge must be EMPTY, and is now a SELF-CHECK.** Amazon
+only returns loads already inside his radius of a selected city, so every returned load belongs to
+at least one city. **⚠ A count on that badge is a BUG — our radius has diverged from Amazon's —
+NOT expected noise.** The board's total load count must not change at all; only which tab each
+load appears under.
+
+🔴 **STILL OPEN: the radius UNIT is implicit.** A bare number, `.com`-only captures; on a metric
+domain every range would be ~38% short. No conversion is performed, non-`.com` boards are flagged,
+and closing it needs a non-`.com` capture — BACKLOG 0ad, and the same artefact PLAN 21 requires.
+
+**`CITY_ASSIGN_MAX_MILES` is KEPT as a labelled last resort**, not deleted: an unreadable radius
+would otherwise have to mean "assign to nothing" or "assign to everything". It announces itself.
+
+⚠ **The radius is PER CITY, not one value for the search.** That corrects an assumption we had
+been working under.
+
+⚠ **When Part 2 lands:** membership uses each city's **own** radius; semantics are otherwise
+unchanged (every city in range, **not** nearest-wins); the unit comes **from the data**, never
+assumed; and an unreadable radius is **reported, never silently defaulted to 150** — that would
+reinstate the exact defect.
+
+---
+
 ## Before launch
 
 1. **Live DOM capture — main vs similar list.** **done** (2026-08-13). Structure recorded in `AMAZON_SELECTORS.md`: the summary panel is a **sibling** of the results, not a container.
@@ -83,6 +122,18 @@ coordinates, which lookup came back empty and which endpoint listed it.
 14. **Multi-Driver Monitor UI** — driver sub-tabs, per-driver new-load counter, colour stripe on the "All" view. *Verify: a new load for one driver highlights that driver's tab and flashes the card.*
 15. **Re-capture the five-city response into `samples/`, re-confirm findings 1, 3, 4.** *Verify: nothing on screen — a file exists and matches.*
 16. **Tune `CITY_ASSIGN_MAX_MILES` (150) and `CITY_ASSIGN_SETTLE_MS` (700) against real logs.** *Verify: no load lands in the wrong city and none goes unmatched on a normal board.*
+
+    🔴 **2026-08-20 — MEASURED WRONG IN BOTH DIRECTIONS. Ihor is right, and 150 is not tunable to a correct value because it is the wrong KIND of number.** With his radius at **250**, six loads at **151–222 mi** were marked *"Origin not determined"* — Amazon returned them legitimately. With his radius at **50**, a load **122 mi** from HEBRON appeared under the HEBRON tab. The limit must follow the radius **he** sets, which is **one value for the whole search — not per city**.
+
+    ⚠ **Reading that radius is genuinely hard, and the cost was measured before anything was built (BACKLOG 0ab, 2026-08-20 — diagnostic only, nothing changed).** In short: **no capture of a load-board radius control exists anywhere on disk**; Amazon **unmounts** the filter panel when collapsed and **we collapse it ourselves on every loop START**, so a control living there is *absent*, not merely fragile; and whether the `/api/loadboard/search` **request** carries the radius **cannot be known without capturing one** — we have never captured a request body.
+
+    🔑 **The cheapest source may already be in memory.** The `/search` response carries `deadhead: { value, unit }` per load — Amazon's own distance to the **nearest** selected origin city — so every returned load is within the radius by definition, and `max(deadhead)` is a **lower bound** needing no DOM read and no new capture. It cannot say *which* cities a load is in range of, so it does not replace the limit; it does fix the false-negative half outright.
+
+    ⚠ **"Fall back to 150" is not an acceptable fallback** — it silently re-creates the defect. Any fallback must be visible.
+
+    ✅ **2026-08-20 — SUPERSEDED, not closed.** `CITY_ASSIGN_SETTLE_MS` (700) still wants tuning and stays here. But `CITY_ASSIGN_MAX_MILES` is **no longer a number to tune** — Ihor captured the `/search` REQUEST body and the dispatcher's radius is in it, **per city**. Tuning a global guess toward a per-city value the API already states would be the wrong exercise. See **PLAN 32**.
+
+    **The constant is untouched for now.** What becomes of it is a Part 2 decision, and the honest options are: **delete it**, or **keep it as a clearly-labelled last-resort bound used only when the radius cannot be read — and only alongside the visible warning, never silently.**
 17. **Persist the city-coordinate cache across page reloads.** *Verify: after a reload the city panel fills without a visible delay.*
 18. **Split the ~400 flag-gated diagnostic lines out of `cityAssign.js`.** *Verify: nothing on screen — ergonomics only.*
 19. **Collapse Amazon's left filters panel on START.** blocked (no reliable read of open vs collapsed). *Verify: pressing START collapses the panel and never re-opens it.*

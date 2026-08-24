@@ -34,13 +34,25 @@
 // which is far inside the tolerance of a "which of 5 cities is nearest" question.
 var CITY_ASSIGN_EARTH_RADIUS_MI = 3958.8;
 
-// ⚠ A GUESS, NOT A KNOWN VALUE. Dispatcher radius has been seen set from 25 to 100 miles, so a
-// pickup should normally sit well inside 100 mi of its city. 150 leaves headroom for a wide
-// radius plus the difference between the city centroid the cities endpoint returns and the
-// actual warehouse. It is here to stop a load being FORCED onto a city it has nothing to do
-// with — an unmatched card is an honest answer, a wrongly-attributed one is not.
-// TUNE THIS AGAINST REAL LOGS. If genuine loads show up as unmatched with distances of
-// 150–250 mi, raise it. If junk is being absorbed, lower it.
+// ⚠ NO LONGER THE OPERATING LIMIT — LAST RESORT ONLY, as of 2026-08-20 (PART 2).
+//
+// Membership now uses the radius THE DISPATCHER SET, read per city from his own /search request
+// (attachRadii(), api-samples §6.9). This constant is reached in exactly one situation: a city
+// whose radius could not be read. That case is ANNOUNCED to the dispatcher by name — console
+// warning plus a "(FALLBACK)" mark on every diagnostic line — because a silent 150 is the whole
+// defect this replaced.
+//
+// WHY IT WAS WRONG, measured by Ihor in BOTH directions:
+//   radius 250, limit 150 -> six loads at 151-222 mi marked "Origin not determined", though
+//                            Amazon had returned them as legitimately in range.
+//   radius  50, limit 150 -> a load 122 mi from HEBRON appeared under the HEBRON tab.
+// It was never tunable to a correct value, because it is the wrong KIND of number: one global
+// guess standing in for a per-city setting the dispatcher changes often (75, 100, 250 and 50 all
+// observed). See PLAN 32; PLAN 16's tuning task is superseded by it.
+//
+// KEPT rather than deleted, deliberately: with it gone, an unreadable radius would have to mean
+// either "assign to nothing" (the board empties) or "assign to everything" (loads land in cities
+// they have nothing to do with). A labelled, announced bound is the least-bad third answer.
 var CITY_ASSIGN_MAX_MILES = 150;
 
 // A refresh can deliver several responses. The raw responses are still buffered for DIAGNOSTICS
@@ -194,6 +206,39 @@ function getLoadRecord(loadId) {
 // same outcome but very different problems, and Ihor cannot report a pattern from a number.
 var _cityNoCoordIds = {};
 
+// ── CITY-LEVEL STOPS (2026-08-24) ─────────────────────────────────────────────────────────
+//
+// Amazon returns TWO shapes of stop, in the SAME response:
+//
+//   FACILITY    label "UNC3", stopCode "UNC3", line1/postalCode set, lat/lng SET
+//   CITY-LEVEL  label "LOCKBOURNE, OH", stopCode/line1/postalCode NULL, lat/lng NULL,
+//               but city, state and timeZone ALWAYS populated
+//
+// MEASURED over 59 city-level stops across every capture on disk: a null latitude is ALWAYS
+// accompanied by null stopCode, line1, postalCode AND longitude — zero counter-examples — and
+// `label` is exactly `city + ", " + state` in 59/59.
+//
+// 🔑 WHY THIS BROKE ASSIGNMENT. In samples/search-city-level-2026-08-24.json SIX OF EIGHT
+// records have a city-level FIRST stop, and stops[0] is the only stop assignment reads. Every
+// one of them was reported "NO COORDINATES" and left unassigned.
+//
+// ⚠ THE ENDPOINT WAS NEVER THE VARIABLE. An earlier reading blamed /similar; that was the
+// last-write-wins endpoint label, and the cards are in the MAIN list. Both stop shapes occur in
+// any response from any endpoint.
+//
+// id -> { city, state }. Same eviction, same teardown as the coordinates.
+var _cityStopById = {};
+
+// Where a pickup coordinate CAME from. 'facility' = Amazon's own lat/lng for the building;
+// 'city-centroid' = derived from the stop's city because Amazon sent none.
+//
+// ⚠ KEPT SEPARATE SO THE DIAGNOSTICS CANNOT PASS ONE OFF AS THE OTHER. A centroid is not the
+// facility: measured over 27 cities carrying more than one facility, the spread between
+// facilities in the same city is a median of 3.3 mi and a maximum of 18.8 mi (JACKSONVILLE, FL
+// — JAX9 vs JAX7). Ihor's ruling, 2026-08-24: 3-10 mi of error is ACCEPTABLE, because a load
+// assigned to roughly the right city beats a load not assigned at all.
+var _cityPickupSourceById = {};
+
 // Which captured endpoint last mentioned an id — 'search' | 'recommendations' | 'similar', the
 // labels networkObserver.js already assigns. DIAGNOSTICS ONLY (2026-08-20): it answers "from
 // which endpoint did the record come" for an unassigned load, and nothing reads it to make a
@@ -232,6 +277,10 @@ function mergePickupCoords(pairs) {
     // Last write wins on a repeat. Harmless by the uniqueness argument above — the values are
     // equal — and it keeps the entry fresh rather than stale if Amazon ever did revise one.
     _cityPickupById[p.id] = { lat: p.lat, lng: p.lng };
+    // 2026-08-24: provenance. Amazon's own lat/lng for the facility, as opposed to a city
+    // centroid derived by resolvePendingCityStops(). Marked here so a facility can never be
+    // reported as a centroid or the other way round.
+    _cityPickupSourceById[p.id] = 'facility';
   }
   while (_cityPickupOrder.length > CITY_PICKUP_MAX) {
     var old = _cityPickupOrder.shift();
@@ -246,6 +295,11 @@ function mergePickupCoords(pairs) {
     // Same for the diagnostic endpoint note (2026-08-20): one eviction, one order list.
     if (Object.prototype.hasOwnProperty.call(_cityIdEndpointById, old)) {
       delete _cityIdEndpointById[old];
+    }
+    // The city-level stop and the provenance note go too (2026-08-24) — same id, same list.
+    if (Object.prototype.hasOwnProperty.call(_cityStopById, old)) delete _cityStopById[old];
+    if (Object.prototype.hasOwnProperty.call(_cityPickupSourceById, old)) {
+      delete _cityPickupSourceById[old];
     }
     if (!Object.prototype.hasOwnProperty.call(_cityPickupById, old)) continue;
     delete _cityPickupById[old];
@@ -273,6 +327,8 @@ var _cityAssignTimer    = null;  // settle-debounce handle
 var _cityAssignRunning  = false; // re-entry guard — the cycle awaits, refreshes do not wait
 var _cityAssignListener = null;  // kept so teardown can remove exactly what init added
 var _cityEndpointListener = null; // endpoint recon listener (2026-08-08), removed alongside it
+var _citySearchReqListener = null; // search-request listener (2026-08-20), removed in teardown
+var _citySearchIssueListener = null; // "radius unreadable" listener, removed alongside it
 var _cityTraceListener  = null;  // capture drop/ok trace listener (2026-08-13)
 
 // city string ("TULSA, OK") -> { lat, lng } or null when unresolvable.
@@ -1809,25 +1865,39 @@ function computeAssignment(cards, resolved) {
       continue;
     }
 
-    // RANGE MEMBERSHIP, unchanged: a card belongs to EVERY active city within
-    // CITY_ASSIGN_MAX_MILES, not only the nearest, and the <= boundary includes a load sitting
-    // exactly on the threshold.
+    // RANGE MEMBERSHIP. Semantics UNCHANGED: a card belongs to EVERY active city it is within
+    // range of, NOT only the nearest, and the <= boundary includes a load sitting exactly on the
+    // threshold. What changed on 2026-08-20 is only the LIMIT — each city now uses the radius the
+    // dispatcher set for THAT city, read from his own /search request. See attachRadii().
     var inRange = [];
     var bestDist = Infinity;
     var nearestName = null;
+    var nearestLimit = null;
     for (var m = 0; m < resolved.length; m++) {
       var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
-      if (d < bestDist) { bestDist = d; nearestName = resolved[m].name; }
-      if (d <= CITY_ASSIGN_MAX_MILES) inRange.push(resolved[m].name);
+
+      // ⚠ THE FALLBACK IS LOUD, NOT SILENT. A city whose radius could not be read falls back to
+      // the old constant — but attachRadii() has already warned the dispatcher by name, and the
+      // diagnostics below mark the city so the fallback is never mistaken for his setting.
+      var limit = (typeof resolved[m].radius === 'number') ? resolved[m].radius
+                                                           : CITY_ASSIGN_MAX_MILES;
+      if (d < bestDist) { bestDist = d; nearestName = resolved[m].name; nearestLimit = limit; }
+      if (d <= limit) inRange.push(resolved[m].name);
     }
     if (inRange.length === 0) {
-      // Resolved, and the answer is "no city" — a different thing from unresolved, and NOT
-      // counted as such. It is still never hidden.
+      // Resolved, and the answer is "no city".
+      //
+      // 🔑 AFTER PART 2 THIS SHOULD BE IMPOSSIBLE, AND THAT MAKES IT A SELF-CHECK. Amazon only
+      // returns loads already inside the dispatcher's radius of one of his selected cities, so
+      // once membership uses that same radius every returned load belongs to at least one city.
+      // A non-zero count here means OUR radius has diverged from Amazon's — a BUG, not noise.
       outOfRange++;
       unmatched.push({
         id: id,
         why: 'nearest city ' + (nearestName || '?') + ' ' + Math.round(bestDist) + ' mi > ' +
-             CITY_ASSIGN_MAX_MILES + ' mi max'
+             (nearestLimit === null ? '?' : nearestLimit) + ' mi radius' +
+             '  ** UNEXPECTED: Amazon returned this load, so it IS inside his radius of some ' +
+             'selected city — our radius has diverged from his **'
       });
       continue;
     }
@@ -1862,8 +1932,16 @@ function logUnassignedDiagnostics(cards, resolved, result) {
     logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + list.length + ' unassigned of ' +
       cards.length + ' rendered  ||  active cities: ' +
       (resolved.length ? resolved.map(function (r) { return r.name; }).join(', ') : '(none)') +
-      '  ||  limit ' + CITY_ASSIGN_MAX_MILES + ' mi (CITY_ASSIGN_MAX_MILES — NOT changed here; ' +
-      'whether 150 is right is PLAN 16 and Ihor has not decided it)');
+      '  ||  radius per city: ' + (resolved.length
+        ? resolved.map(function (r) {
+            return r.name + '=' + ((typeof r.radius === 'number')
+              ? r.radius
+              : CITY_ASSIGN_MAX_MILES + '(FALLBACK)');
+          }).join(', ')
+        : '(none)') + radiusUnitCaveat() +
+      '  ||  ⚠ ANY LINE BELOW IS UNEXPECTED SINCE 2026-08-20: Amazon only returns loads inside ' +
+      'his radius, so every returned load should belong to a city. These are a divergence ' +
+      'signal, not normal output.');
 
     for (var i = 0; i < list.length; i++) {
       var id = list[i].id;
@@ -1875,6 +1953,16 @@ function logUnassignedDiagnostics(cards, resolved, result) {
         var listedNoCoord = Object.prototype.hasOwnProperty.call(_cityNoCoordIds, id);
         var ep = Object.prototype.hasOwnProperty.call(_cityIdEndpointById, id)
           ? _cityIdEndpointById[id] : null;
+        // 2026-08-24: a city-level stop we could not resolve is a DIFFERENT problem from a stop
+        // that said nothing about where it is. Saying which removes a whole guessing step.
+        var cityStop = Object.prototype.hasOwnProperty.call(_cityStopById, id)
+          ? _cityStopById[id] : null;
+        var cityNote = cityStop
+          ? '  ||  ** CITY-LEVEL STOP "' + cityStop.city + ', ' + cityStop.state + '" was seen ' +
+            'but could not be resolved to coordinates' +
+            (normalizeStopState(cityStop.state) ? '' :
+              ' — THE STATE IS NOT RECOGNISED, and it was NOT truncated to a guess') + ' **'
+          : '  ||  no city-level stop either: this record said nothing about where it is';
         logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + (i + 1) + '/' + list.length + '  ' + id +
           '  NO COORDINATES  ' +
           (listedNoCoord
@@ -1884,25 +1972,35 @@ function logUnassignedDiagnostics(cards, resolved, result) {
               'has this id, so no watched endpoint ever listed it' +
               (ep ? ' (last endpoint that mentioned it: [' + ep + '])' : '')) +
           '  ||  merged map holds ' + _cityPickupOrder.length + ' ids from ' +
-          _cityAssignBuffers.length + ' buffered response(s)');
+          _cityAssignBuffers.length + ' buffered response(s)' + cityNote);
         continue;
       }
 
       // ── CATEGORY: OUT OF RANGE. Distance to EVERY active city, and the nearest named.
+      // Each distance is reported against THAT city's own radius, so "over by how much, against
+      // which number" is readable without cross-referencing anything.
       var parts = [];
-      var bestDist = Infinity, nearest = null;
+      var bestOver = Infinity, nearest = null, nearestLim = null, nearestDist = null;
       for (var m = 0; m < resolved.length; m++) {
         var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
-        if (d < bestDist) { bestDist = d; nearest = resolved[m].name; }
-        parts.push(resolved[m].name + ' ' + Math.round(d) + ' mi');
+        var lim = (typeof resolved[m].radius === 'number') ? resolved[m].radius
+                                                           : CITY_ASSIGN_MAX_MILES;
+        var over = d - lim;
+        if (over < bestOver) {
+          bestOver = over; nearest = resolved[m].name; nearestLim = lim; nearestDist = d;
+        }
+        parts.push(resolved[m].name + ' ' + Math.round(d) + '/' + lim + ' mi' +
+          ((typeof resolved[m].radius === 'number') ? '' : ' (FALLBACK)'));
       }
       logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + (i + 1) + '/' + list.length + '  ' + id +
         '  OUT OF RANGE  @' + pickup.lat.toFixed(3) + ',' + pickup.lng.toFixed(3) +
+        (_cityPickupSourceById[id] === 'city-centroid'
+          ? ' (CITY CENTROID, not the facility — \u00b13-10 mi)' : '') +
         (nearest
-          ? '  nearest ' + nearest + ' ' + Math.round(bestDist) + ' mi > ' +
-            CITY_ASSIGN_MAX_MILES + ' mi max'
+          ? '  closest to its limit: ' + nearest + ' ' + Math.round(nearestDist) + ' mi vs ' +
+            nearestLim + ' mi radius (over by ' + Math.round(bestOver) + ')'
           : '  ** NO ACTIVE ORIGIN CITY RESOLVED — nothing to measure against **') +
-        (parts.length ? '  ||  ' + parts.join(' · ') : ''));
+        (parts.length ? '  ||  ' + parts.join(' · ') : '') + radiusUnitCaveat());
     }
   } catch (e) {
     logger.error('cityAssign', 'logUnassignedDiagnostics failed — diagnostics only, the filter is ' +
@@ -1928,6 +2026,255 @@ function sampleDistances(cards, resolved, howMany) {
   return out;
 }
 
+// ── PER-CITY RADIUS (2026-08-20, PART 2) ──────────────────────────────────────────────────
+//
+// The dispatcher's own radius, read from the /search REQUEST body he sends. Field name and shape
+// confirmed from a live capture (samples/search-request-2026-08-20.json, api-samples §6.9):
+//
+//   { cityDisplayValue, cityLatitude, cityLongitude, cityName, cityStateCode, radius }
+//
+// ⚠ THE RADIUS IS A BARE NUMBER. Every other distance in this API is { value, unit } — this one
+// is not, so THE UNIT IS IMPLICIT and nothing in the payload states it. See radiusUnitCaveat().
+//
+// ⚠ IT IS PER CITY. In the captured board all five carry 100, and an earlier capture had 75, so
+// the UI appears to set one value for all of them — but the API does not say that, and Ihor
+// changes the number often (250 and 50 both seen). Every entry's OWN radius is read.
+
+// How close two coordinate pairs must be to count as the same city, IN MILES — measured with the
+// same haversine the membership maths uses, not in raw degrees.
+//
+// ⚠ THE TWO COORDINATE SOURCES DO NOT AGREE EXACTLY, AND ASSUMING THEY DID WAS A REAL DEFECT.
+// Our resolved city comes from Amazon's CITIES endpoint (resolveCityCoords); the radius filter
+// carries its OWN cityLatitude/cityLongitude from the search request. Both are Amazon's, but they
+// are different records: the live capture has CHICAGO at 41.837235,-87.685969 while the cities
+// endpoint answers 41.8781,-87.6298 — about 4 mi apart. A tolerance sized for float
+// round-tripping rejected every match and sent every city to the fallback.
+//
+// 15 mi absorbs that comfortably while staying far below the gap between two distinct selected
+// origin cities (the closest realistic pair, CHICAGO/JOLIET, is ~35 mi). An AMBIGUOUS match —
+// two entries both inside the bound — is REFUSED rather than guessed, which sends that city to
+// the announced fallback instead of silently borrowing another city's radius.
+var CITY_RADIUS_MATCH_MAX_MILES = 15;
+
+// ⚠ MATCHED ON COORDINATES, NOT ON NAME OR COUNTRY. Three reasons, all from the live capture:
+//   1. NAME is localised copy. Our active-city strings come from Amazon's chips ("CHICAGO, IL");
+//      the filter entry carries cityName ("CHICAGO") and cityStateCode ("IL") separately, so a
+//      name match means re-assembling and re-parsing a string across 11 locales.
+//   2. COUNTRY IS NOT RELIABLE — in the captured board TULSA carries country: null while the
+//      other four carry "US". Anything keyed on it would drop that city.
+//   3. Coordinates are what the membership maths already uses. Matching on the same numbers the
+//      distance is computed from removes a whole class of disagreement.
+function findRadiusForCity(city) {
+  logger.log('cityAssign', 'findRadiusForCity called');
+  try {
+    if (!city || typeof city.lat !== 'number' || typeof city.lng !== 'number') return null;
+    if (!_citySearchRequest || !_citySearchRequest.radiusFilters) return null;
+
+    var filters = _citySearchRequest.radiusFilters;
+    var best = null, bestMiles = Infinity, secondMiles = Infinity;
+    for (var i = 0; i < filters.length; i++) {
+      var f = filters[i];
+      if (!f || typeof f.cityLatitude !== 'number' || typeof f.cityLongitude !== 'number') continue;
+      var d = haversineMiles(city.lat, city.lng, f.cityLatitude, f.cityLongitude);
+      if (d < bestMiles) { secondMiles = bestMiles; bestMiles = d; best = f; }
+      else if (d < secondMiles) { secondMiles = d; }
+    }
+    if (!best || bestMiles > CITY_RADIUS_MATCH_MAX_MILES) return null;
+
+    // AMBIGUOUS — two entries within the bound. Refuse rather than pick one: borrowing the wrong
+    // city's radius is the failure this whole change exists to prevent, and the fallback at least
+    // announces itself.
+    if (secondMiles <= CITY_RADIUS_MATCH_MAX_MILES) {
+      logger.warn('cityAssign', 'CITY RADIUS  ambiguous match — two request entries are both ' +
+        'within ' + CITY_RADIUS_MATCH_MAX_MILES + ' mi of this city; refusing to guess', {
+          city: city.name, nearestMi: Math.round(bestMiles), secondMi: Math.round(secondMiles)
+        });
+      return null;
+    }
+    if (typeof best.radius !== 'number' || !isFinite(best.radius) || best.radius <= 0) return null;
+    return { radius: best.radius, label: best.cityDisplayValue || best.cityName || null,
+             matchMiles: bestMiles };
+  } catch (e) {
+    logger.error('cityAssign', 'findRadiusForCity failed — reporting no radius rather than a ' +
+      'wrong one, so the caller reports it instead of defaulting silently',
+      { error: e, city: city && city.name });
+    return null;
+  }
+}
+
+// Attaches each city's own radius to the resolved list. ONE place, so the async cycle and the
+// synchronous re-render path can never disagree about a city's limit.
+//
+// ⚠ NO SILENT FALLBACK. A city with no readable radius gets radius: null and radiusSource:
+// 'MISSING', and computeAssignment reports it. It does NOT quietly become 150 — that is exactly
+// the defect being removed: at 250 it marked six legitimately-returned loads unassigned, at 50 it
+// put a 122 mi load under the HEBRON tab.
+function attachRadii(resolved) {
+  logger.log('cityAssign', 'attachRadii called');
+  var missing = [];
+  try {
+    for (var i = 0; i < resolved.length; i++) {
+      var hit = findRadiusForCity(resolved[i]);
+      if (hit) {
+        resolved[i].radius = hit.radius;
+        resolved[i].radiusSource = 'request';
+      } else {
+        resolved[i].radius = null;
+        resolved[i].radiusSource = _citySearchRequest ? 'NO-MATCHING-ENTRY' : 'NO-REQUEST-CAPTURED';
+        missing.push(resolved[i].name);
+      }
+    }
+    if (missing.length) {
+      // VISIBLE, not swallowed. console.warn because logger.warn needs DEBUG_LEVEL >= 2 and the
+      // shipped level is 1 — the dispatcher must be able to see that his radius was not used.
+      logger.warn('cityAssign', 'CITY RADIUS  no radius for ' + missing.length + ' active city(ies)',
+        { cities: missing, haveRequest: !!_citySearchRequest });
+      try {
+        console.warn('[Torren Relay] Could not read your search radius for: ' + missing.join(', ') +
+          '. Those cities fall back to the built-in ' + CITY_ASSIGN_MAX_MILES + ' mi limit, which ' +
+          'is NOT your setting — loads may be placed in the wrong city, or shown as ' +
+          '"Origin not determined". Reload the board; if it persists, report it.');
+      } catch (e1) {
+        logger.error('cityAssign', 'could not surface the missing-radius warning', { error: e1 });
+      }
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'attachRadii failed — every city keeps radius null, so the fallback ' +
+      'path reports rather than assigning silently', { error: e });
+  }
+  return resolved;
+}
+
+// ⚠ THE UNIT IS IMPLICIT AND WE CANNOT READ IT. `radius` is a bare number with no unit anywhere
+// in the payload, unlike every other distance in this API. Every capture on disk is from a .com
+// board, where miles is overwhelmingly the meaning — and our maths is miles — but nothing states
+// it. On a non-.com Relay domain this may be kilometres, and we would silently under-range by
+// ~38%. Recorded rather than assumed: api-samples §6.9, BACKLOG, and PLAN 21 (non-US locale),
+// which needs a non-.com capture anyway.
+function radiusUnitCaveat() {
+  try {
+    var host = (window.location && window.location.hostname) || '';
+    if (!host) return '';                      // unknown host — say nothing rather than the wrong thing
+    return (host.indexOf('relay.amazon.com') === -1)
+      ? ' ** NON-.COM DOMAIN (' + host + '): the radius is a BARE NUMBER with no unit in the ' +
+        'payload, and our maths is MILES. If this board is metric, every range is ~38% short. **'
+      : '';
+  } catch (e) {
+    logger.error('cityAssign', 'radiusUnitCaveat failed — omitting the caveat', { error: e });
+    return '';
+  }
+}
+
+// ── STATE NORMALISATION (2026-08-24, Ihor) ────────────────────────────────────────────────
+//
+// ⚠ WHY THIS IS NEEDED, MEASURED. resolvePATCity() matches `results[i].stateCode === state` —
+// a strict TWO-LETTER comparison — and does NOT call normalizeState() on a pre-parsed
+// { city, state } input. Amazon sends state in THREE casings, on both stop shapes:
+// "OH", "Ohio" and "KENTUCKY". In samples/search-city-level-2026-08-24.json TWO OF TWELVE
+// city-level stops carry a full name ("Illinois", "Ohio"), so without this ~17% of them would
+// resolve to null and stay unassigned.
+//
+// Reuses patApi's STATE_NAME_TO_CODE — 51 entries, all 50 states plus DC — rather than starting
+// a second table that would drift.
+//
+// ⚠ IT DOES NOT USE normalizeState()'s FIRST-TWO-LETTERS FALLBACK. That fallback turns an
+// unrecognised long name into a truncation ("PENNSYLVANIA" -> "PE"), which is a WRONG answer
+// dressed as an answer — see BACKLOG 0o. An unknown name returns null here, and the caller
+// reports it instead of resolving to the wrong state.
+function normalizeStopState(state) {
+  logger.log('cityAssign', 'normalizeStopState called');
+  try {
+    var s = String(state || '').trim();
+    if (!s) return null;
+    if (s.length === 2) return s.toUpperCase();
+    if (typeof STATE_NAME_TO_CODE !== 'undefined') {
+      var hit = STATE_NAME_TO_CODE[s.toLowerCase()];
+      if (hit) return hit;
+    }
+    // Longer than two characters and not a name we know. Refuse rather than truncate.
+    return null;
+  } catch (e) {
+    logger.error('cityAssign', 'normalizeStopState failed — returning null so the caller reports ' +
+      'it rather than resolving to a guessed state', { error: e });
+    return null;
+  }
+}
+
+// Resolves the city-level stops of the cards on screen, and folds the results into the pickup
+// map so computeAssignment() can treat them like any other coordinates.
+//
+// ⚠ ASYNC ON PURPOSE, AND ONLY HERE. computeAssignment() is fully synchronous — that is what
+// stops a re-render flashing unfiltered — so nothing may geocode inside it. This runs in the
+// cycle, before it. On the synchronous re-render path an unresolved stop simply stays
+// unassigned for that frame and is picked up by the next cycle, exactly as an id we have not
+// seen yet already does.
+//
+// COST: one request per DISTINCT city, ever. resolveCityCoords() caches in _cityCoordCache —
+// including negative results — so a board with eleven distinct pickup cities costs eleven
+// requests for the session, not eleven per refresh.
+async function resolvePendingCityStops(cardIds) {
+  logger.log('cityAssign', 'resolvePendingCityStops called');
+  var resolvedNow = 0, alreadyHad = 0, failed = [], badState = [];
+  try {
+    if (!cardIds || !cardIds.length) return { resolved: 0 };
+
+    // De-duplicate by CITY, not by card: twenty loads out of one city cost one lookup.
+    var wanted = {};
+    for (var i = 0; i < cardIds.length; i++) {
+      var id = cardIds[i];
+      // Already positioned — by Amazon or by an earlier cycle. Never re-resolve.
+      if (Object.prototype.hasOwnProperty.call(_cityPickupById, id)) { alreadyHad++; continue; }
+      if (!Object.prototype.hasOwnProperty.call(_cityStopById, id)) continue;
+
+      var stop = _cityStopById[id];
+      var code = normalizeStopState(stop.state);
+      if (!code) {
+        badState.push(stop.city + ', ' + stop.state);
+        continue;
+      }
+      var key = String(stop.city).toUpperCase() + ', ' + code;
+      (wanted[key] = wanted[key] || []).push(id);
+    }
+
+    var keys = Object.keys(wanted);
+    if (!keys.length && !badState.length) return { resolved: 0 };
+
+    for (var k = 0; k < keys.length; k++) {
+      // The SAME function that resolves the dispatcher's own origin cities, and the same cache.
+      var coords = await resolveCityCoords(keys[k]);
+      if (!coords) { failed.push(keys[k]); continue; }
+      var ids = wanted[keys[k]];
+      for (var j = 0; j < ids.length; j++) {
+        // Fold into the pickup map so nothing downstream needs to know the difference...
+        _cityPickupById[ids[j]] = { lat: coords.lat, lng: coords.lng };
+        // ...except the diagnostics, which must never present a centroid as a facility.
+        _cityPickupSourceById[ids[j]] = 'city-centroid';
+        if (_cityPickupOrder.indexOf(ids[j]) === -1) _cityPickupOrder.push(ids[j]);
+        resolvedNow++;
+      }
+    }
+
+    logger.log('cityAssign', 'CITY STOPS  resolved ' + resolvedNow + ' load(s) from ' +
+      keys.length + ' distinct city(ies)' +
+      (alreadyHad ? '  |  ' + alreadyHad + ' already had coordinates' : '') +
+      (failed.length ? '  ||  ** UNRESOLVED: ' + failed.join(' · ') + ' **' : '') +
+      (badState.length ? '  ||  ** UNRECOGNISED STATE (not truncated to a guess): ' +
+        badState.join(' · ') + ' **' : '') +
+      '  ||  \u26a0 these are CITY CENTROIDS, not facilities — median 3.3 mi / max 18.8 mi from ' +
+      'the real building, accepted by Ihor 2026-08-24');
+
+    if (failed.length || badState.length) {
+      logger.warn('cityAssign', 'CITY STOPS  some city-level pickups could not be resolved', {
+        unresolved: failed, unrecognisedState: badState
+      });
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'resolvePendingCityStops failed — those loads keep no coordinates ' +
+      'and stay unassigned, which is the previous behaviour, not a new failure', { error: e });
+  }
+  return { resolved: resolvedNow };
+}
+
 // The active origin cities, resolved to coordinates. Cached after the first call per city.
 async function resolveActiveCities() {
   logger.log('cityAssign', 'resolveActiveCities called');
@@ -1938,7 +2285,8 @@ async function resolveActiveCities() {
     if (!coords) continue;                    // already warned by name inside resolveCityCoords
     resolved.push({ name: cities[ci], lat: coords.lat, lng: coords.lng });
   }
-  return { cities: cities, resolved: resolved };
+  // PART 2 (2026-08-20): each city carries its OWN radius from the dispatcher's search request.
+  return { cities: cities, resolved: attachRadii(resolved) };
 }
 
 // Same, but cache-only — for the synchronous re-render path.
@@ -1949,7 +2297,9 @@ function resolveActiveCitiesFromCache() {
     var c = _cityCoordCache[cities[ci]];
     if (c) resolved.push({ name: cities[ci], lat: c.lat, lng: c.lng });
   }
-  return resolved;
+  // Same attachment as the async path — ONE definition, so a re-render can never use a different
+  // limit from the cycle that preceded it.
+  return attachRadii(resolved);
 }
 
 // ── Q5/Q6 WRITE-AND-WAKE LEDGER (2026-08-18, round 3) ─────────────────────────────────────
@@ -2491,9 +2841,14 @@ function logCityPageDiagnostics(ctx) {
     }
     logger.log('cityAssign', 'CITYDIAG 5 ASSIGN    ' + (parts.length ? parts.join(' | ') : '(no city resolved)') +
       '  ||  unassigned: ' + result.unresolved + ' never captured' +
-      '  +  ' + result.outOfRange + ' captured but beyond ' + CITY_ASSIGN_MAX_MILES +
-      ' mi of every city  =  ' + unassignedTotal(result) +
-      ' on the All badge, All-ONLY on the board, each marked on its card (2026-08-20)');
+      '  +  ' + result.outOfRange + ' captured but beyond their own radius' +
+      '  =  ' + unassignedTotal(result) + ' on the All badge' +
+      (unassignedTotal(result) === 0
+        ? '  (EMPTY — correct: every returned load belongs to a city)'
+        : '  ** THE BADGE SHOULD BE EMPTY SINCE 2026-08-20. Amazon only returns loads already ' +
+          'inside the dispatcher\'s radius of a selected city, so once our membership uses that ' +
+          'same radius nothing can be unassigned. A count here is a BUG — our radius has diverged ' +
+          'from his — NOT expected noise. **'));
 
     // 6. VISIBLE — measured from the settled DOM, not from what the filter believes it did. The
     //    split is the point: a card visible under a city it is not assigned to is the symptom.
@@ -2679,8 +3034,13 @@ async function runCityAssignCycle() {
     }
     var resolved = active.resolved;
 
-    // NOTHING IS GEOCODED PER LOAD. Every card's coordinates come from Amazon, already merged
-    // into _cityPickupById as responses arrived. The only await above is for the chips.
+    // CITY-LEVEL STOPS (2026-08-24). Resolved HERE, before the synchronous assignment below,
+    // because it needs the network and computeAssignment() must stay synchronous.
+    await resolvePendingCityStops(cardIds);
+
+    // Amazon's own coordinates wherever it sends them; a resolved CITY CENTROID only where it
+    // sends none — see resolvePendingCityStops(). Either way the value is in _cityPickupById
+    // before this line, so the assignment itself geocodes nothing and stays synchronous.
     var result       = computeAssignment(cards, resolved);
     var counts       = result.counts;
     var unmatched    = result.unmatched;
@@ -2689,14 +3049,23 @@ async function runCityAssignCycle() {
     // THE line this whole file exists to print.
     //
     // These are MEMBERSHIPS, not a partition. Since 2026-08-13 a card belongs to every city it
-    // is within CITY_ASSIGN_MAX_MILES of, so a load shared by two cities is counted in both and
+    // is in range of, so a load shared by two cities is counted in both and
     // the per-city numbers can sum to MORE than the card count. That is correct, not a
     // double-count — the line says so explicitly rather than leaving it to look like a bug.
     var parts = [];
     var membershipTotal = 0;
+    var radiusParts = [], anyFallback = false;
     for (var pi = 0; pi < resolved.length; pi++) {
       parts.push(resolved[pi].name + ': ' + counts[resolved[pi].name]);
       membershipTotal += counts[resolved[pi].name];
+      // The radius rides in its OWN segment, below — same information, without changing the
+      // shape of "NAME: count" that the rest of the suite reads.
+      if (typeof resolved[pi].radius === 'number') {
+        radiusParts.push(resolved[pi].name + '=' + resolved[pi].radius);
+      } else {
+        anyFallback = true;
+        radiusParts.push(resolved[pi].name + '=' + CITY_ASSIGN_MAX_MILES + '(FALLBACK)');
+      }
     }
     parts.push('unmatched: ' + unmatched.length);
 
@@ -2707,7 +3076,23 @@ async function runCityAssignCycle() {
     logger.log('cityAssign', 'CITY ASSIGN  ' + parts.join(' | ') +
       '   [coverage ' + resolvedCount + '/' + cardIds.length + ' resolved' +
       (result.unresolved > 0 ? '  ** ' + result.unresolved + ' NOT IN ANY CAPTURED RESPONSE **' : '') +
-      '  |  ' + result.outOfRange + ' resolved but outside ' + CITY_ASSIGN_MAX_MILES + ' mi' +
+      '  |  ' + result.outOfRange + ' resolved but outside their radius' +
+      (result.outOfRange > 0
+        ? '  ** SHOULD BE 0 SINCE 2026-08-20 — Amazon only returns loads inside his radius, so a ' +
+          'non-zero here means OUR radius has diverged from his. This is a BUG, not noise. **'
+        : '') +
+      '  |  ' + (function () {
+        var cen = 0, fac = 0;
+        for (var pv = 0; pv < cardIds.length; pv++) {
+          var src = _cityPickupSourceById[cardIds[pv]];
+          if (src === 'city-centroid') cen++; else if (src === 'facility') fac++;
+        }
+        return 'positions: ' + fac + ' facility' +
+          (cen ? ' + ' + cen + ' CITY CENTROID (\u00b13-10 mi, accepted 2026-08-24)' : '');
+      })() +
+      '  |  radius: ' + (radiusParts.length ? radiusParts.join(', ') : '(no active city)') +
+      (anyFallback ? '  ** at least one city is on the FALLBACK, not the dispatcher\'s setting **'
+                   : '') + radiusUnitCaveat() +
       '  |  ' + membershipTotal + ' memberships — a load in range of 2 cities counts in both, ' +
       'so the sum may exceed the card count' +
       '  |  merged map holds ' + _cityPickupOrder.length + ' ids]');
@@ -3033,6 +3418,132 @@ function scheduleCityAssignCycle() {
 
 // ── PLUMBING ──────────────────────────────────────────────────────────────────────────────
 
+// ── SEARCH REQUEST: the dispatcher's PER-CITY RADIUS (2026-08-20) ─────────────────────────
+//
+// Ihor captured the /api/loadboard/search REQUEST body live. The radius is in it, and it is
+// PER CITY — originCitiesRadiusFilters[] carries one entry per origin city. The UI may set them
+// all alike; the API does not, so nothing here assumes it.
+//
+// ⚠ PART 2 IS BLOCKED, AND THIS IS WHERE IT IS BLOCKED. The radius FIELD NAME inside each entry
+// is not yet known — Ihor's paste truncates the entry. networkObserver.js therefore projects
+// those entries BY SHAPE rather than by name, so the capture itself reveals the name without
+// anyone guessing it. Nothing below consumes the radius yet: this stores and reports only.
+//
+// Latest projected request, replaced per response. Not merged and not accumulated: the search
+// criteria are whatever the LAST request said, and an older one is not evidence about now.
+var _citySearchRequest = null;
+
+function onCitySearchRequestMessage(ev) {
+  logger.log('cityAssign', 'onCitySearchRequestMessage called');
+  try {
+    if (ev.source !== window) return;
+    var data = ev.data;
+    if (!data || data.__extRelaySearchRequest !== true) return;
+
+    _citySearchRequest = {
+      at: Date.now(),
+      seq: data.seq,
+      path: data.path,
+      radiusFilters: data.radiusFilters || [],
+      originCities: data.originCities || [],
+      startCityRadius: (data.startCityRadius === undefined) ? null : data.startCityRadius,
+      rawFilterKeyCounts: data.rawFilterKeyCounts || []
+    };
+
+    logger.log('cityAssign', 'CITY SEARCH REQUEST  captured  ||  radius filters: ' +
+      _citySearchRequest.radiusFilters.length +
+      '  |  origin cities: ' + _citySearchRequest.originCities.length +
+      '  |  startCityRadius: ' + JSON.stringify(_citySearchRequest.startCityRadius) +
+      '  |  keys per filter entry BEFORE projection: [' +
+      _citySearchRequest.rawFilterKeyCounts.join(', ') + ']');
+
+    // ⚠ THE POINT OF PART 1: name every key that survived projection, so the radius field's
+    // NAME is read off a real capture instead of guessed. Console, not logger, so it is visible
+    // at the shipped DEBUG_LEVEL — same reasoning as dumpTrailerLabels().
+    if (cityVerboseDiagnostics() && _citySearchRequest.radiusFilters.length) {
+      try {
+        var keys = Object.keys(_citySearchRequest.radiusFilters[0]);
+        console.log('[CITY SEARCH REQUEST] keys on radius-filter entry 0: ' + keys.join(', '));
+      } catch (e1) {
+        logger.error('cityAssign', 'could not list radius-filter keys', { error: e1 });
+      }
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'onCitySearchRequestMessage failed — the search request is not ' +
+      'stored this cycle; assignment is unaffected', { error: e });
+  }
+}
+
+// ⚠ THE VISIBLE FAILURE. When the radius cannot be read, the dispatcher must be able to SEE
+// that — a silent fallback is the defect this whole change exists to remove. console.warn, not
+// logger.warn, because logger.warn needs DEBUG_LEVEL >= 2 and the shipped level is 1. The MAIN
+// world dedupes by reason, so this fires once per page session however fast the loop refreshes.
+var _citySearchRequestIssue = null;
+
+function onCitySearchRequestIssue(ev) {
+  logger.log('cityAssign', 'onCitySearchRequestIssue called');
+  try {
+    if (ev.source !== window) return;
+    var data = ev.data;
+    if (!data || data.__extRelaySearchRequestIssue !== true) return;
+
+    _citySearchRequestIssue = { at: Date.now(), reason: data.reason, detail: data.detail };
+    logger.warn('cityAssign', 'CITY SEARCH REQUEST  could NOT be read', {
+      reason: data.reason, detail: data.detail, path: data.path
+    });
+    try {
+      console.warn('[Torren Relay] Could not read your search radius from Amazon (' + data.reason +
+        '). ' + (data.detail || '') + ' City filtering will keep using the built-in limit until ' +
+        'this is fixed — check whether loads are being placed in the right cities.');
+    } catch (e1) {
+      logger.error('cityAssign', 'could not surface the search-request issue to the console',
+        { error: e1 });
+    }
+  } catch (e) {
+    logger.error('cityAssign', 'onCitySearchRequestIssue failed', { error: e });
+  }
+}
+
+// The last reason the radius could not be read, or null. Read by diagnostics; Part 2 will read
+// it to decide what to tell the dispatcher rather than defaulting silently.
+function getSearchRequestIssue() {
+  logger.log('cityAssign', 'getSearchRequestIssue called');
+  return _citySearchRequestIssue;
+}
+
+// Read-only accessor. Returns a COPY so a consumer cannot corrupt the stored capture. Null until
+// a search request has been seen.
+function getSearchRequest() {
+  logger.log('cityAssign', 'getSearchRequest called');
+  try {
+    if (!_citySearchRequest) return null;
+    return JSON.parse(JSON.stringify(_citySearchRequest));
+  } catch (e) {
+    logger.error('cityAssign', 'getSearchRequest failed — reporting null rather than a partial ' +
+      'copy', { error: e });
+    return null;
+  }
+}
+
+// Prints the captured request as JSON for Ihor to paste into samples/. samples/ is gitignored,
+// so the file has to be written by hand — see docs/api-samples.md §6.9.
+function dumpSearchRequest() {
+  try {
+    if (!_citySearchRequest) {
+      console.log('[CITY SEARCH REQUEST] nothing captured yet. Refresh the board once with the ' +
+        'loop running, then run this again.');
+      return null;
+    }
+    console.log('[CITY SEARCH REQUEST] copy everything below into ' +
+      'samples/search-request-<date>.json');
+    console.log(JSON.stringify(_citySearchRequest, null, 2));
+    return _citySearchRequest;
+  } catch (e) {
+    logger.error('cityAssign', 'dumpSearchRequest failed', { error: e });
+    return null;
+  }
+}
+
 // Receives the { id, lat, lng } triples from content/networkObserver.js (MAIN world).
 //
 // The body itself never crosses: the MAIN world extracts the triples and posts only those, so
@@ -3060,6 +3571,16 @@ function onCityCoordsMessage(ev) {
     // reads this to make a decision, and the merged coordinate map is untouched.
     for (var pe = 0; pe < pairs.length; pe++) {
       if (pairs[pe] && pairs[pe].id) _cityIdEndpointById[pairs[pe].id] = data.endpoint;
+    }
+
+    // CITY-LEVEL STOPS (2026-08-24). Recorded, not resolved here: resolution needs the network
+    // and this handler runs on the response-arrival path, which must stay fast. The cycle
+    // resolves them — see resolvePendingCityStops().
+    var cs = data.cityStops || [];
+    for (var csi = 0; csi < cs.length; csi++) {
+      if (cs[csi] && cs[csi].id && cs[csi].city && cs[csi].state) {
+        _cityStopById[cs[csi].id] = { city: cs[csi].city, state: cs[csi].state };
+      }
     }
 
     var noCoord = {};
@@ -3192,6 +3713,12 @@ function initCityAssign() {
     // longer feeds assignment. All it does now is buffer and log.
     _cityAssignListener = onCityCoordsMessage;
     window.addEventListener('message', _cityAssignListener);
+    // The search-request listener rides alongside, on the same PRODUCT flag path — it is not a
+    // diagnostic, it is what Part 2 will read the per-city radius from.
+    _citySearchReqListener = onCitySearchRequestMessage;
+    window.addEventListener('message', _citySearchReqListener);
+    _citySearchIssueListener = onCitySearchRequestIssue;
+    window.addEventListener('message', _citySearchIssueListener);
 
     // Watches for Amazon re-rendering the board, so the filter re-asserts in the same frame
     // instead of 700 ms later. This is what removes the un-filtered flash.
@@ -3236,6 +3763,19 @@ function teardownCityAssign() {
       window.removeEventListener('message', _cityEndpointListener);
       _cityEndpointListener = null;
     }
+    if (_citySearchReqListener) {
+      window.removeEventListener('message', _citySearchReqListener);
+      _citySearchReqListener = null;
+    }
+    if (_citySearchIssueListener) {
+      window.removeEventListener('message', _citySearchIssueListener);
+      _citySearchIssueListener = null;
+    }
+    _citySearchRequestIssue = null;
+    // The captured search criteria go with the listener. A radius from a session that has ended
+    // must never be readable by the next one — that is precisely the stale-radius failure the
+    // whole change exists to avoid.
+    _citySearchRequest = null;
     if (_cityTraceListener) {
       window.removeEventListener('message', _cityTraceListener);
       _cityTraceListener = null;
@@ -3273,6 +3813,8 @@ function teardownCityAssign() {
     clearUnassignedMarkers();
     _cityNoCoordIds  = {};
     _cityIdEndpointById = {};
+    _cityStopById    = {};
+    _cityPickupSourceById = {};
     _cityRecordById  = {};
     _cityTrailerLabelById = {};
     // The page signature too, so a re-activation treats the first board it sees as a new working
@@ -3297,6 +3839,11 @@ function teardownCityAssign() {
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};
 // PART 2 (2026-08-20): dump the collected badge-letter + record pairs, for the PM.
 window.__EXT_DEBUG.dumpTrailerLabels = dumpTrailerLabels;
+// PART 1 (2026-08-20): prints the captured /search REQUEST so Ihor can save it into samples/,
+// which is gitignored and so cannot be written from here. See docs/api-samples.md §6.9.
+window.__EXT_DEBUG.dumpSearchRequest = dumpSearchRequest;
+window.__EXT_DEBUG.getSearchRequest  = getSearchRequest;
+window.__EXT_DEBUG.getSearchRequestIssue = getSearchRequestIssue;
 window.__EXT_DEBUG.filterCity      = function (city) { return applyCityFilter(city); };
 window.__EXT_DEBUG.cityAssignments = function () {
   var out = {};

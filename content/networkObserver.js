@@ -384,6 +384,23 @@
       }
       var pairs = [];
       var noCoordIds = [];
+      // ── CITY-LEVEL STOPS (2026-08-24) ───────────────────────────────────────────────────
+      // Amazon returns TWO shapes of stop in the same response:
+      //   FACILITY   label "UNC3", stopCode "UNC3", line1 set, postalCode set, lat/lng SET
+      //   CITY-LEVEL label "LOCKBOURNE, OH", stopCode null, line1 null, postalCode null,
+      //              lat/lng NULL — but city, state and timeZone always populated.
+      //
+      // MEASURED, 59 city-level stops across every capture on disk (47 older + 12 in
+      // samples/search-city-level-2026-08-24.json): a null latitude is ALWAYS accompanied by
+      // null stopCode, line1, postalCode AND longitude. Zero counter-examples.
+      //
+      // 🔑 In samples/search-city-level-2026-08-24.json SIX OF EIGHT records have a city-level
+      // FIRST stop — and stops[0] is the only stop assignment reads. That is the whole defect.
+      //
+      // The isolated world resolves these through the SAME resolveCityCoords() that already
+      // resolves the dispatcher's own origin cities. All that crosses here is city + state,
+      // which projectRecord() already carries for every stop — no new class of data.
+      var cityStops = [];
       var records = [];
       for (var i = 0; i < wo.length; i++) {
         var item = wo[i];
@@ -406,6 +423,13 @@
           // "this response had the load but no usable coordinates" from "this response never
           // mentioned the load", and the unmatched reason would be a guess.
           noCoordIds.push(id);
+          // A CITY-LEVEL stop still says WHERE it is, just not in coordinates. Carry the city
+          // and state so the isolated world can resolve them. Only when both are present — a
+          // stop with neither is genuinely unplaceable and stays in noCoordIds alone.
+          if (loc && typeof loc.city === 'string' && loc.city &&
+              typeof loc.state === 'string' && loc.state) {
+            cityStops.push({ id: id, city: loc.city, state: loc.state });
+          }
           continue;
         }
         pairs.push({ id: id, lat: loc.latitude, lng: loc.longitude });
@@ -416,6 +440,9 @@
         woCount:    wo.length,
         pairs:      pairs,
         noCoordIds: noCoordIds,
+        // City-level stops: { id, city, state } for ids that had no coordinates but DID say
+        // which city they are in. See the note beside cityStops above.
+        cityStops:  cityStops,
         // The panel's data source (STAGE B). See projectRecord() for the exact field list.
         records:    records,
         // Added 2026-08-08 for the unmatched-card diagnostic. Both are plain counters already
@@ -585,6 +612,267 @@
   var _respSeq = (typeof WeakMap === 'function') ? new WeakMap() : null;
 
   var _responseHookInstalled = false;
+  // ══ SEARCH REQUEST CAPTURE (2026-08-20) ═════════════════════════════════════════════════
+  //
+  // WHY: the dispatcher's per-city search RADIUS is in the /search REQUEST body. Ihor captured
+  // it live on 2026-08-20. Our own limit (CITY_ASSIGN_MAX_MILES = 150) is a development guess
+  // that is wrong in BOTH directions — at radius 250 it marked six legitimately-returned loads
+  // "Origin not determined"; at radius 50 it put a 122 mi load under the HEBRON tab.
+  //
+  // ⚠ THE RADIUS IS PER CITY, NOT ONE GLOBAL VALUE. The body carries
+  // originCitiesRadiusFilters[] with one entry per origin city. The UI may well set them all
+  // alike; the API does not, so nothing here assumes it.
+  //
+  // 🔑 THIS DOES NOT TOUCH THE RESPONSE MACHINERY. installResponseReadHook() below and the
+  // Response.prototype.json piggyback (api-samples.md §6.8) are UNCHANGED and untouched. This
+  // reads the REQUEST, in the fetch wrapper, from a plain object Amazon already handed us.
+  // There is no clone, no tee, and none of the abort hazard that killed response cloning —
+  // that hazard is a property of response STREAMS and does not exist here.
+  //
+  // 🔑 NO REQUEST IS EVER CLONED. If the body turns out to be a stream (the fetch(new Request)
+  // call shape), this reports the shape and STOPS. Cloning a Request is not on the table.
+
+  // ⚠ WHY THIS IS NOT reportDrop(). reportDrop is gated on CITY_ASSIGN_DEBUG, which ships OFF —
+  // a drop there is invisible in a real build. "We could not read your radius" must NEVER be
+  // invisible: silently falling back is precisely the defect being removed. This rides on the
+  // PRODUCT flag instead, and the isolated world surfaces it with console.warn so it is legible
+  // at the shipped DEBUG_LEVEL.
+  //
+  // DEDUPED BY REASON, once per page session. Auto-refresh runs every 2.5s; without this the
+  // console would fill with the same line.
+  var _reqIssuesSeen = {};
+  function reportRequestIssue(reason, url, seq, detail) {
+    try {
+      if (!CITY_FILTER_ENABLED) return;
+      if (Object.prototype.hasOwnProperty.call(_reqIssuesSeen, reason)) return;
+      _reqIssuesSeen[reason] = true;
+      window.postMessage({
+        __extRelaySearchRequestIssue: true,
+        reason: reason,
+        path: pathOnly(url),
+        seq: (seq === undefined || seq === null) ? null : seq,
+        detail: (detail === undefined) ? null : detail
+      }, '*');
+    } catch (e) {
+      // Never surface to the page.
+    }
+  }
+
+  // Key names that must never leave this world, whatever shape their value has. Checked before
+  // the shape allow-list below, so a scalar cannot slip through on a credential-shaped name.
+  var REQ_DENY_KEY_RE = /token|secret|auth|csrf|session|cookie|password|jwt|bearer|signature/i;
+
+  // A scalar we are willing to carry: a number, a boolean, or a SHORT string.
+  function isCarryableScalar(v) {
+    if (typeof v === 'number') return isFinite(v);
+    if (typeof v === 'boolean') return true;
+    if (typeof v === 'string') return v.length <= 64;
+    return false;
+  }
+
+  // ⚠ THE RADIUS FIELD NAME IS NOT KNOWN YET. Ihor's paste truncates the entry, and guessing a
+  // field name is exactly what this project forbids. So a radius-filter entry is projected BY
+  // SHAPE, not by name: every own property whose value is a carryable scalar, or a
+  // {value, unit} pair, is kept — minus the deny-list above. That captures the radius whatever
+  // it is called, and the capture itself is what reveals the name.
+  //
+  // This is deliberately NARROWER than it sounds: nested objects, arrays and long strings are
+  // all dropped, so an audit blob or a token bag cannot ride along.
+  function projectRadiusFilter(entry) {
+    var out = {};
+    try {
+      if (!entry || typeof entry !== 'object') return out;
+      for (var k in entry) {
+        if (!Object.prototype.hasOwnProperty.call(entry, k)) continue;
+        if (REQ_DENY_KEY_RE.test(k)) continue;
+        var v = entry[k];
+        if (isCarryableScalar(v)) { out[k] = v; continue; }
+        // The {value, unit} shape Amazon uses for every other distance in this API.
+        if (v && typeof v === 'object' && !Array.isArray(v) &&
+            isCarryableScalar(v.value) && typeof v.unit === 'string' && v.unit.length <= 16) {
+          out[k] = { value: v.value, unit: v.unit };
+        }
+      }
+    } catch (e) {
+      reportDrop('project-radius-filter-threw', 'projectRadiusFilter', 0, {
+        detail: (e && e.message) ? e.message : 'unknown'
+      });
+    }
+    return out;
+  }
+
+  // originCities entries, by NAME — unlike the radius filters, these field names ARE known
+  // (AMAZON_SELECTORS.md, the cities endpoint: name, stateCode, country, latitude, longitude).
+  // A strict allow-list is correct where the names are known; shape-projection is only for the
+  // one entry whose key we genuinely do not have.
+  function projectOriginCity(c) {
+    try {
+      if (!c || typeof c !== 'object') return null;
+      return {
+        name:      (typeof c.name === 'string') ? c.name : null,
+        stateCode: (typeof c.stateCode === 'string') ? c.stateCode : null,
+        country:   (typeof c.country === 'string') ? c.country : null,
+        latitude:  (typeof c.latitude === 'number') ? c.latitude : null,
+        longitude: (typeof c.longitude === 'number') ? c.longitude : null
+      };
+    } catch (e) {
+      reportDrop('project-origin-city-threw', 'projectOriginCity', 0, {
+        detail: (e && e.message) ? e.message : 'unknown'
+      });
+      return null;
+    }
+  }
+
+  // WHAT IS KEPT, and why — the whole contract in one place:
+  //   originCitiesRadiusFilters  the point of the exercise: the per-city radius
+  //   originCities              needed to match a radius entry to an active origin city
+  //   startCityRadius           a named, scalar radius sitting beside them
+  //
+  // WHAT IS DROPPED, deliberately, though it is all in the body Ihor captured:
+  //   savedSearchId             an identifier for the dispatcher's saved search
+  //   minPayout, minPricePerDistance   his commercial settings; none of our business
+  //   resultSize, maximumNumberOfStops, isAutoRefreshCall   not needed for membership
+  //   everything else           not enumerated, not carried
+  function projectSearchRequest(parsed) {
+    var out = { originCitiesRadiusFilters: [], originCities: [], startCityRadius: null };
+    try {
+      if (!parsed || typeof parsed !== 'object') return out;
+
+      var rf = parsed.originCitiesRadiusFilters;
+      if (Array.isArray(rf)) {
+        for (var i = 0; i < rf.length; i++) out.originCitiesRadiusFilters.push(projectRadiusFilter(rf[i]));
+      }
+      var oc = parsed.originCities;
+      if (Array.isArray(oc)) {
+        for (var j = 0; j < oc.length; j++) {
+          var p = projectOriginCity(oc[j]);
+          if (p) out.originCities.push(p);
+        }
+      }
+      if (isCarryableScalar(parsed.startCityRadius)) out.startCityRadius = parsed.startCityRadius;
+      else if (parsed.startCityRadius && typeof parsed.startCityRadius === 'object' &&
+               isCarryableScalar(parsed.startCityRadius.value)) {
+        out.startCityRadius = { value: parsed.startCityRadius.value,
+                                unit: (typeof parsed.startCityRadius.unit === 'string')
+                                  ? parsed.startCityRadius.unit : null };
+      }
+    } catch (e) {
+      reportDrop('project-search-request-threw', 'projectSearchRequest', 0, {
+        detail: (e && e.message) ? e.message : 'unknown'
+      });
+    }
+    return out;
+  }
+
+  // Classifies what we were actually handed, so an unreadable shape is REPORTED rather than
+  // guessed at. Returns { kind, text } — text is non-null only for 'string'.
+  function classifyRequestBody(input, init) {
+    try {
+      // The fetch(new Request(...)) call shape: the body lives on the Request as a stream.
+      // ⚠ WE DO NOT CLONE IT. Report and stop.
+      if (input && typeof input === 'object' && 'url' in input) {
+        return { kind: 'request-object', text: null };
+      }
+      if (!init || !('body' in init) || init.body === null || init.body === undefined) {
+        return { kind: 'none', text: null };
+      }
+      var b = init.body;
+      if (typeof b === 'string') return { kind: 'string', text: b };
+      if (typeof URLSearchParams === 'function' && b instanceof URLSearchParams) {
+        return { kind: 'urlsearchparams', text: null };
+      }
+      if (typeof FormData === 'function' && b instanceof FormData)   return { kind: 'formdata', text: null };
+      if (typeof Blob === 'function' && b instanceof Blob)           return { kind: 'blob', text: null };
+      if (typeof ReadableStream === 'function' && b instanceof ReadableStream) {
+        return { kind: 'stream', text: null };
+      }
+      if (b && typeof b === 'object' && typeof b.byteLength === 'number') {
+        return { kind: 'arraybuffer', text: null };
+      }
+      return { kind: 'unknown-object', text: null };
+    } catch (e) {
+      return { kind: 'classify-threw', text: null };
+    }
+  }
+
+  // Reads and emits ONE search request body. Search only — the caller gates on isWatched, which
+  // is WATCH_PATH and nothing else. WATCH_PATH is NOT widened by this change.
+  //
+  // Gated on CITY_FILTER_ENABLED, the same PRODUCT flag the coordinate emit rides on, and for
+  // the same reason: city membership needs this in a shipped build. It is NOT behind a debug
+  // flag, so what Ihor re-tests is the real path.
+  function emitSearchRequest(url, input, init, seq) {
+    try {
+      if (!CITY_FILTER_ENABLED) return;
+
+      var body = classifyRequestBody(input, init);
+      if (body.kind === 'none') return;          // GET, or no body: nothing to read, not an error
+
+      if (body.kind !== 'string') {
+        // ⚠ STOP. Anything that is not already a plain string would need a clone or a stream
+        // read, and neither is acceptable here. Reported so the shape is KNOWN rather than
+        // assumed, and so this line is what tells us to change approach.
+        var notString = 'shape=' + body.kind + ' — NOT read, NOT cloned. The radius cannot be ' +
+          'taken from this call shape without touching the request stream.';
+        reportDrop('request-body-not-a-string', url, seq, { detail: notString });
+        reportRequestIssue('request-body-not-a-string', url, seq, notString);
+        return;
+      }
+
+      var parsed = null;
+      try {
+        parsed = JSON.parse(body.text);
+      } catch (e1) {
+        reportDrop('request-body-not-json', url, seq, { detail: 'length=' + body.text.length });
+        reportRequestIssue('request-body-not-json', url, seq,
+          'the request body is a string but not JSON (length ' + body.text.length + ')');
+        return;
+      }
+
+      var projected = projectSearchRequest(parsed);
+      // Nothing to say if the body carried neither list — do not post an empty message every
+      // refresh.
+      if (!projected.originCitiesRadiusFilters.length && !projected.originCities.length &&
+          projected.startCityRadius === null) {
+        var noFields = 'parsed OK but carried no originCitiesRadiusFilters, no originCities and ' +
+          'no startCityRadius — Amazon may have renamed them';
+        reportDrop('request-body-no-radius-fields', url, seq, { detail: noFields });
+        reportRequestIssue('request-body-no-radius-fields', url, seq, noFields);
+        return;
+      }
+
+      window.postMessage({
+        __extRelaySearchRequest: true,
+        seq: seq,
+        path: pathOnly(url),
+        radiusFilters: projected.originCitiesRadiusFilters,
+        originCities: projected.originCities,
+        startCityRadius: projected.startCityRadius,
+        // How many keys each entry actually carried BEFORE projection, so a shrinking entry is
+        // visible rather than silent. Counts only — no names, no values.
+        rawFilterKeyCounts: (function () {
+          var counts = [];
+          try {
+            var rf = parsed.originCitiesRadiusFilters;
+            if (Array.isArray(rf)) {
+              for (var i = 0; i < rf.length; i++) {
+                counts.push((rf[i] && typeof rf[i] === 'object') ? Object.keys(rf[i]).length : 0);
+              }
+            }
+          } catch (e2) { /* counts stay short; never surface to the page */ }
+          return counts;
+        })()
+      }, '*');
+    } catch (e) {
+      // Never surface to the page. This runs inside Amazon's own fetch call.
+      try {
+        reportDrop('emit-search-request-threw', url, seq, {
+          detail: (e && e.message) ? e.message : 'unknown'
+        });
+      } catch (e2) { /* nothing further is safe to do */ }
+    }
+  }
+
   function installResponseReadHook() {
     if (_responseHookInstalled) return;
     try {
@@ -682,6 +970,14 @@
           detail: 'CAPTURE_RESPONSES=' + CAPTURE_RESPONSES + ' isCapturePath=false'
         });
       }
+
+      // SEARCH REQUEST CAPTURE (2026-08-20). BEFORE origFetch, because init.body must be read
+      // while it is still the plain object Amazon handed us — after the call it may have been
+      // consumed. Reads only; never mutates init, never replaces arguments, and the call below
+      // still forwards `arguments` verbatim.
+      //
+      // isWatched is WATCH_PATH ('/api/loadboard/search') and nothing else. NOT widened.
+      if (isWatched) emitSearchRequest(url, input, init, seq);
 
       var result = origFetch.apply(this, arguments);
       if (isWatched || isCaptured) {
