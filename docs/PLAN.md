@@ -55,6 +55,22 @@ coordinates, which lookup came back empty and which endpoint listed it.
 
 ---
 
+## 33. MINIMUM OPERATING RADIUS — 25 mi floor, 2026-08-24  **done**
+
+Ihor's product decision, from a live measurement: at radius **10 mi** Amazon still returned
+**JAX3 at 13.64 mi** and **DAL2 at 16.15 mi**, and judging them by his raw 10 stranded both on
+the All tab marked *"Origin not determined"*.
+
+🔑 **Amazon relaxes proximity below 25 mi and respects the boundary at or above it**, so city
+membership uses `effectiveRadius = Math.max(hisRadius, 25)`. At 50 mi nothing changes.
+
+⚠ **MEMBERSHIP ONLY** — the search request, the captured radius and the payload sent to Amazon
+are untouched, and `CITY_ASSIGN_MAX_MILES` fallback logic is unchanged and not clamped.
+`computeAssignment()` stays synchronous. Diagnostics print `25 (clamped from 10)`, never the
+clamped number alone.
+
+---
+
 ## 32. PER-CITY SEARCH RADIUS — BOTH PARTS DONE 2026-08-20  **done**
 
 Supersedes the `CITY_ASSIGN_MAX_MILES` half of PLAN 16.

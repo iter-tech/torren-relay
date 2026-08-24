@@ -55,6 +55,69 @@ var CITY_ASSIGN_EARTH_RADIUS_MI = 3958.8;
 // they have nothing to do with). A labelled, announced bound is the least-bad third answer.
 var CITY_ASSIGN_MAX_MILES = 150;
 
+// ── MINIMUM OPERATING RADIUS (2026-08-24, Ihor's product decision) ────────────────────────
+//
+// MEASURED ON THE LIVE BOARD: with the dispatcher's radius set to 10 mi, Amazon still returned
+// JAX3 at 13.64 mi deadhead and DAL2 at 16.15 mi. Our membership test is
+// "distance <= his radius", so those loads matched no city, fell to the All tab and were marked
+// "Origin not determined" — while the board itself plainly considered them in range.
+//
+// 🔑 AMAZON RELAXES PROXIMITY BELOW 25 MI AND RESPECTS THE BOUNDARY AT OR ABOVE IT. So the fix
+// is a FLOOR, not a tolerance percentage and not a blanket widening:
+//
+//     effectiveRadius = Math.max(hisRadius, MIN_OPERATING_RADIUS)
+//
+// At 10 mi he gets 25 and those loads land in JACKSONVILLE and DALLAS. At 50 mi he gets 50 —
+// nothing is widened, because Amazon does not relax there.
+//
+// ⚠ THIS IS A MEMBERSHIP RULE ONLY. It never touches the /search request, the captured radius,
+// or what Amazon is asked for — see the guardrails in CHANGELOG 2026-08-24.
+var MIN_OPERATING_RADIUS = 25;
+
+// The radius a city is actually judged by: his own value, floored at MIN_OPERATING_RADIUS, or
+// the announced last-resort constant when his could not be read at all.
+//
+// ONE DEFINITION. The assignment and every diagnostic call this, so a line can never quote a
+// different number from the one the membership test used — which is exactly how "why is this
+// load here" becomes unanswerable.
+//
+// ⚠ THE FALLBACK IS UNCHANGED AND IS NOT CLAMPED. CITY_ASSIGN_MAX_MILES is 150, already far
+// above the floor, and its own loud reporting stays exactly as it was.
+// ⚠ NO ENTRY LOG, DELIBERATELY, and this follows the file rather than departing from it.
+// This is called inside computeAssignment's inner loop — once per city per card, ~250 times on
+// a 50-card five-city board — alongside haversineMiles() and formatMiles(), neither of which
+// logs at entry for the same reason. computeAssignment is the hot synchronous path that must
+// not make the board janky. Every CALLER of this logs, and the value it returns is printed on
+// the CITY ASSIGN line, so nothing about it is invisible.
+function effectiveRadiusFor(city) {
+  try {
+    if (!city || typeof city.radius !== 'number' || !isFinite(city.radius)) {
+      return { limit: CITY_ASSIGN_MAX_MILES, raw: null, clamped: false };
+    }
+    if (city.radius < MIN_OPERATING_RADIUS) {
+      return { limit: MIN_OPERATING_RADIUS, raw: city.radius, clamped: true };
+    }
+    return { limit: city.radius, raw: city.radius, clamped: false };
+  } catch (e) {
+    logger.error('cityAssign', 'effectiveRadiusFor failed — falling back to the announced ' +
+      'last-resort limit rather than guessing a radius', { error: e });
+    return { limit: CITY_ASSIGN_MAX_MILES, raw: null, clamped: false };
+  }
+}
+
+// "25" or "25 (clamped from 10)" — the raw value is never hidden behind the clamp.
+function radiusLabelFor(city) {
+  logger.log('cityAssign', 'radiusLabelFor called');
+  try {
+    var eff = effectiveRadiusFor(city);
+    if (eff.raw === null) return CITY_ASSIGN_MAX_MILES + '(FALLBACK)';
+    return eff.clamped ? (eff.limit + ' (clamped from ' + eff.raw + ')') : String(eff.limit);
+  } catch (e) {
+    logger.error('cityAssign', 'radiusLabelFor failed — diagnostics only', { error: e });
+    return '?';
+  }
+}
+
 // A refresh can deliver several responses. The raw responses are still buffered for DIAGNOSTICS
 // ONLY; assignment reads the merged map below, not these.
 //
@@ -1873,15 +1936,23 @@ function computeAssignment(cards, resolved) {
     var bestDist = Infinity;
     var nearestName = null;
     var nearestLimit = null;
+    var nearestRaw = null, nearestClamped = false;
     for (var m = 0; m < resolved.length; m++) {
       var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
 
       // ⚠ THE FALLBACK IS LOUD, NOT SILENT. A city whose radius could not be read falls back to
       // the old constant — but attachRadii() has already warned the dispatcher by name, and the
       // diagnostics below mark the city so the fallback is never mistaken for his setting.
-      var limit = (typeof resolved[m].radius === 'number') ? resolved[m].radius
-                                                           : CITY_ASSIGN_MAX_MILES;
-      if (d < bestDist) { bestDist = d; nearestName = resolved[m].name; nearestLimit = limit; }
+      //
+      // MINIMUM OPERATING RADIUS (2026-08-24): his radius floored at MIN_OPERATING_RADIUS,
+      // because Amazon relaxes proximity below 25 mi and returns loads slightly outside it.
+      // Pure arithmetic — computeAssignment stays synchronous.
+      var eff = effectiveRadiusFor(resolved[m]);
+      var limit = eff.limit;
+      if (d < bestDist) {
+        bestDist = d; nearestName = resolved[m].name; nearestLimit = limit;
+        nearestRaw = eff.raw; nearestClamped = eff.clamped;
+      }
       if (d <= limit) inRange.push(resolved[m].name);
     }
     if (inRange.length === 0) {
@@ -1896,6 +1967,7 @@ function computeAssignment(cards, resolved) {
         id: id,
         why: 'nearest city ' + (nearestName || '?') + ' ' + Math.round(bestDist) + ' mi > ' +
              (nearestLimit === null ? '?' : nearestLimit) + ' mi radius' +
+             (nearestClamped ? ' (clamped from ' + nearestRaw + ' mi — MIN_OPERATING_RADIUS)' : '') +
              '  ** UNEXPECTED: Amazon returned this load, so it IS inside his radius of some ' +
              'selected city — our radius has diverged from his **'
       });
@@ -1933,11 +2005,7 @@ function logUnassignedDiagnostics(cards, resolved, result) {
       cards.length + ' rendered  ||  active cities: ' +
       (resolved.length ? resolved.map(function (r) { return r.name; }).join(', ') : '(none)') +
       '  ||  radius per city: ' + (resolved.length
-        ? resolved.map(function (r) {
-            return r.name + '=' + ((typeof r.radius === 'number')
-              ? r.radius
-              : CITY_ASSIGN_MAX_MILES + '(FALLBACK)');
-          }).join(', ')
+        ? resolved.map(function (r) { return r.name + '=' + radiusLabelFor(r); }).join(', ')
         : '(none)') + radiusUnitCaveat() +
       '  ||  ⚠ ANY LINE BELOW IS UNEXPECTED SINCE 2026-08-20: Amazon only returns loads inside ' +
       'his radius, so every returned load should belong to a city. These are a divergence ' +
@@ -1983,14 +2051,18 @@ function logUnassignedDiagnostics(cards, resolved, result) {
       var bestOver = Infinity, nearest = null, nearestLim = null, nearestDist = null;
       for (var m = 0; m < resolved.length; m++) {
         var d = haversineMiles(pickup.lat, pickup.lng, resolved[m].lat, resolved[m].lng);
-        var lim = (typeof resolved[m].radius === 'number') ? resolved[m].radius
-                                                           : CITY_ASSIGN_MAX_MILES;
+        // The SAME effective limit the membership test used, clamp included — so the reader can
+        // check the arithmetic against the decision instead of against a different number.
+        var effU = effectiveRadiusFor(resolved[m]);
+        var lim = effU.limit;
         var over = d - lim;
         if (over < bestOver) {
           bestOver = over; nearest = resolved[m].name; nearestLim = lim; nearestDist = d;
         }
-        parts.push(resolved[m].name + ' ' + Math.round(d) + '/' + lim + ' mi' +
-          ((typeof resolved[m].radius === 'number') ? '' : ' (FALLBACK)'));
+        // e.g. "JACKSONVILLE, FL 13.64/25 mi (clamped from 10 mi)"
+        parts.push(resolved[m].name + ' ' + (Math.round(d * 100) / 100) + '/' + lim + ' mi' +
+          (effU.raw === null ? ' (FALLBACK)'
+                             : (effU.clamped ? ' (clamped from ' + effU.raw + ' mi)' : '')));
       }
       logger.log('cityAssign', 'CITY WHY-UNASSIGNED  ' + (i + 1) + '/' + list.length + '  ' + id +
         '  OUT OF RANGE  @' + pickup.lat.toFixed(3) + ',' + pickup.lng.toFixed(3) +
@@ -3054,18 +3126,20 @@ async function runCityAssignCycle() {
     // double-count — the line says so explicitly rather than leaving it to look like a bug.
     var parts = [];
     var membershipTotal = 0;
-    var radiusParts = [], anyFallback = false;
+    var radiusParts = [], anyFallback = false, anyClamped = false;
     for (var pi = 0; pi < resolved.length; pi++) {
       parts.push(resolved[pi].name + ': ' + counts[resolved[pi].name]);
       membershipTotal += counts[resolved[pi].name];
       // The radius rides in its OWN segment, below — same information, without changing the
       // shape of "NAME: count" that the rest of the suite reads.
-      if (typeof resolved[pi].radius === 'number') {
-        radiusParts.push(resolved[pi].name + '=' + resolved[pi].radius);
-      } else {
-        anyFallback = true;
-        radiusParts.push(resolved[pi].name + '=' + CITY_ASSIGN_MAX_MILES + '(FALLBACK)');
-      }
+      //
+      // ⚠ THE NUMBER PRINTED IS THE ONE MEMBERSHIP ACTUALLY USED. radiusLabelFor() calls the
+      // same effectiveRadiusFor() the assignment does, so the line can never quote a limit the
+      // test did not apply — and when the floor bit, it says "25 (clamped from 10)" rather than
+      // silently showing 25 as though he had asked for it.
+      radiusParts.push(resolved[pi].name + '=' + radiusLabelFor(resolved[pi]));
+      if (typeof resolved[pi].radius !== 'number') anyFallback = true;
+      if (effectiveRadiusFor(resolved[pi]).clamped) anyClamped = true;
     }
     parts.push('unmatched: ' + unmatched.length);
 
@@ -3092,7 +3166,11 @@ async function runCityAssignCycle() {
       })() +
       '  |  radius: ' + (radiusParts.length ? radiusParts.join(', ') : '(no active city)') +
       (anyFallback ? '  ** at least one city is on the FALLBACK, not the dispatcher\'s setting **'
-                   : '') + radiusUnitCaveat() +
+                   : '') +
+      (anyClamped ? '  |  \u26a0 CLAMPED to MIN_OPERATING_RADIUS ' + MIN_OPERATING_RADIUS +
+        ' mi: Amazon relaxes proximity below 25 mi and returns loads just outside a small ' +
+        'radius, so judging them by his raw number would strand them on All (Ihor, 2026-08-24)'
+                  : '') + radiusUnitCaveat() +
       '  |  ' + membershipTotal + ' memberships — a load in range of 2 cities counts in both, ' +
       'so the sum may exceed the card count' +
       '  |  merged map holds ' + _cityPickupOrder.length + ' ids]');

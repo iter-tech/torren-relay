@@ -241,6 +241,23 @@ the flags are reset. **Do not silence it.**
 (`var CITY_ASSIGN_DEBUG = false;`) and is already correct. **Flipping only `utils/constants.js`
 is the complete fix; flipping only the mirror is not.**
 
+## ✅ MINIMUM OPERATING RADIUS — 25 mi floor, 2026-08-24
+
+**Ihor's product rule, from a live measurement.** At radius **10 mi** Amazon still returned
+**JAX3 at 13.64 mi** and **DAL2 at 16.15 mi**; judging them by his raw 10 stranded both on the
+All tab. City membership now uses `effectiveRadius = Math.max(hisRadius, 25)`.
+
+🔑 **A FLOOR, NOT A WIDENING.** Amazon relaxes proximity below 25 mi and respects the boundary
+at or above it, so a 50 mi search is judged against 50 — nothing is loosened there.
+
+⚠ **Membership only.** The search request, the captured radius and Amazon's payload are
+untouched; `CITY_ASSIGN_MAX_MILES` is unchanged and is **not** clamped;
+`computeAssignment()` stays synchronous. Every diagnostic prints `25 (clamped from 10)` so the
+raw value is never hidden.
+
+**To verify on the board:** set Radius = 10, and the **All badge should read 0** with the DAL2
+and JAX3 loads inside the Dallas and Jacksonville tabs.
+
 ## ✅ CITY-LEVEL STOPS — FIXED 2026-08-24. Acceptance criterion awaiting Ihor's board run
 
 **The cause was a stop SHAPE, not an endpoint and not the radius.** Amazon returns two shapes in

@@ -2,6 +2,74 @@
 
 ## [Unreleased]
 
+### 2026-08-24 (later) — MINIMUM OPERATING RADIUS: a 25 mi floor for city membership
+
+**File:** `content/cityAssign.js`.
+
+#### The problem, measured on the live board
+
+With the dispatcher's radius set to **10 mi**, Amazon still returned **JAX3 at 13.64 mi** and
+**DAL2 at 16.15 mi** deadhead. Our membership test is `distance <= hisRadius`, so both matched no
+city, fell to the **All** tab and were marked *"Origin not determined"* — while the board itself
+plainly considered them in range.
+
+🔑 **Amazon relaxes proximity BELOW 25 mi and respects the boundary at or above it.** So the fix
+is a **floor**, not a tolerance percentage and not a blanket widening:
+
+```
+effectiveRadius = Math.max(hisRadius, MIN_OPERATING_RADIUS)   // MIN_OPERATING_RADIUS = 25
+```
+
+| his radius | judged against | effect |
+|---|---|---|
+| 10 mi | **25 mi** | 13.64 and 16.15 mi loads land in JACKSONVILLE and DALLAS |
+| 25 mi | 25 mi | unchanged — already at the floor |
+| 50 mi | 50 mi | **unchanged — nothing is widened**, because Amazon does not relax there |
+| unreadable | 150 mi | the announced `CITY_ASSIGN_MAX_MILES` fallback, **not** clamped |
+
+#### ONE definition, so a diagnostic can never quote a different number
+
+`effectiveRadiusFor(city)` returns `{ limit, raw, clamped }` and is called by **both** the
+assignment and every diagnostic. A line can therefore never print a limit the membership test did
+not apply — which is exactly how "why is this load here?" becomes unanswerable.
+
+**The raw value is never hidden behind the clamp:**
+
+```
+radius: JACKSONVILLE, FL=25 (clamped from 10), DALLAS, TX=25 (clamped from 10)
+  |  ⚠ CLAMPED to MIN_OPERATING_RADIUS 25 mi: Amazon relaxes proximity below 25 mi ...
+
+CITY WHY-UNASSIGNED ... JACKSONVILLE, FL 13.64/25 mi (clamped from 10 mi)
+```
+
+Per-load distances now print to **2 dp**, so `13.64/25` reads exactly as the decision was made.
+
+#### Guardrails, all asserted
+
+- ⚠ **MEMBERSHIP ONLY.** The `/search` request, the captured radius and the payload sent to
+  Amazon are untouched — `MIN_OPERATING_RADIUS` appears nowhere in `content/networkObserver.js`.
+- ⚠ **The captured radius is stored RAW.** The clamp never rewrites what Amazon told us.
+- ⚠ **`CITY_ASSIGN_MAX_MILES` fallback logic is unchanged** and is **not** clamped.
+- ⚠ **`computeAssignment()` remains fully synchronous** — the clamp is pure arithmetic and awaits
+  nothing.
+- Membership semantics unchanged: **every city in range, not nearest-wins**.
+
+#### One deliberate departure from the logging rule, and why
+
+`effectiveRadiusFor()` has **no entry log**. It runs inside `computeAssignment()`'s inner loop —
+~250 times on a 50-card five-city board — beside `haversineMiles()` and `formatMiles()`, **neither
+of which logs at entry either**. That is the file's existing convention for hot-path arithmetic on
+the synchronous path that must not make the board janky. Every *caller* logs, and the value is
+printed on the `CITY ASSIGN` line, so nothing is invisible. `radiusLabelFor()` — diagnostics only,
+once per city per cycle — does log at entry.
+
+**Tests.** `radius-suite` grew to **96 checks** with the measured JAX3/DAL2 case, the
+"50 stays 50" case, the boundary (24 mi in, 26 mi out at radius 10), `effectiveRadiusFor()` called
+directly, and the guardrails. `cityassign-suite` gained the 10-mi-search case. Four assertions
+pinned the old inline limit expression or 0-dp distances and were updated. **2432 green.**
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here.**
+
 ### 2026-08-24 — CITY-LEVEL STOPS: a load whose pickup is a city, not a facility
 
 **Files:** `content/networkObserver.js`, `content/cityAssign.js`.
