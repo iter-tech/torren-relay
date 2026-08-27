@@ -223,6 +223,40 @@ five debug flags ship **off**.
 
 **12. One `/search` response = ONE page.** Never several. See §7 for the page-size correction.
 
+**13. The dispatcher's RADIUS comes from the `/search` REQUEST body, per city.**
+`originCitiesRadiusFilters[].radius` — a **bare number**, one entry per origin city, six fields
+per entry. It replaced a hardcoded 150 that was measured wrong in **both** directions.
+⚠ **Match entries to active cities by COORDINATES**, never by name (localised) or country
+(**TULSA carried `country: null`** in the live capture). The two coordinate sources differ by
+~4 mi, so the match bound is 15 mi; an ambiguous match is **refused**, not guessed.
+
+**14. MIN_OPERATING_RADIUS = 25 — a FLOOR on membership, nothing else.**
+Amazon **relaxes proximity below 25 mi** (measured: at radius 10 it returned loads at 13.64 and
+16.15 mi) **and respects the boundary at or above it**. So membership uses
+`Math.max(hisRadius, 25)`. ⚠ **It never touches the request, never rewrites the stored raw
+radius, and never clamps the 150 fallback.** `effectiveRadiusFor()` is the **single definition**
+used by both the assignment and every diagnostic, so a log line cannot print a limit the
+membership test did not apply.
+
+**15. Amazon returns TWO shapes of stop, in the same response.**
+A **facility** (`"UNC3"`, `stopCode` set, coordinates set) and a **city-level** pickup
+(`"LOCKBOURNE, OH"`, `stopCode`/`line1`/`postalCode` and **both coordinates** `null`).
+Measured across 59 city-level stops: **zero counter-examples**, and `label` is exactly
+`city + ", " + state` in 59/59. Assignment reads `stops[0]`, so a city-level FIRST stop is
+what breaks it — **6 of 8 records** in the 2026-08-24 capture. They resolve through
+`resolveCityCoords()` with state normalisation, at an accepted **3–10 mi** centroid error.
+
+**16. Request-body capture sits BESIDE the response hook, never inside it.**
+The `Response.prototype.json` piggyback (§6.8) is untouched. `init.body` is a plain string
+already in hand — **no clone, no tee**, so none of the abort hazard that killed response cloning
+applies. ⚠ **A non-string body STOPS and REPORTS. No Request is ever cloned.**
+
+**17. A failure the dispatcher depends on must be VISIBLE, not merely logged.**
+`reportDrop()` is gated on `CITY_ASSIGN_DEBUG`, which ships off — so "we could not read your
+radius" would have been invisible in a real build. Those warnings ride a separate channel on the
+PRODUCT flag and surface with `console.warn`, deduped once per session. **Silence there
+re-creates the defect the warning exists to prevent.**
+
 ---
 
 ## 5. Verified live vs awaiting Ihor
@@ -238,6 +272,12 @@ five debug flags ship **off**.
 | Per-cycle city assignment | `CITY DIAG 0/5` MATCH: YES every cycle; intersection **30/30 and 28/28**, zero unmatched |
 | Body capture via `Response.json()` | board rendered normally with the wrapper installed |
 | The recently-added card carries `wo-card-header--highlighted` | live 10-of-10 capture — this **disproved** a suspected silent alert-miss |
+| **The six-item smoke checklist, all six** | Ihor, 2026-08-19/20 — ⚠ do not ask for another full run; ask for a named item and say why |
+| **PAT modal opens, Confirm enables** | Ihor, 2026-08-20, on **both** a P and an R load |
+| **Rate-limit auto-stop and the top-bar toast** | Ihor, 2026-08-20 — provoked deliberately: 2 tabs at 2.5s fine indefinitely, a 3rd → immediate 503 for 15+ min |
+| **The `/search` REQUEST body carries a per-city radius** | Ihor, 2026-08-20 — capture saved to `samples/` |
+| **City-level stops exist and break assignment** | Ihor, 2026-08-21/24 — 16 unassigned of 17; capture saved |
+| **Amazon returns loads beyond a small radius** | Ihor, 2026-08-24 — at radius 10, JAX3 at 13.64 mi and DAL2 at 16.15 mi |
 
 ### Built but NOT verified live — the whole current phase
 

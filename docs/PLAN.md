@@ -110,6 +110,22 @@ reinstate the exact defect.
 
 ---
 
+## 🔴 LAUNCH BLOCKERS — audited 2026-08-24. Not features; the package does not pass without them.
+
+| # | blocker | closes when |
+|---|---|---|
+| **B1** | ⚠ **PARTLY RESOLVED 2026-08-26.** Both flags now read `1` / `false` and the suite is green (2433/0) — **but the change is UNCOMMITTED**, so the history at b1b4c96 still builds a debug extension | commit `utils/constants.js`. ✅ `capture-suite` already went green **by the flag being FIXED, not silenced** |
+| **B2** | `manifest.json` has **no `icons`**, no `action.default_icon`, and there is **no PNG in the repo** | 16/32/48/128 px committed and declared |
+| **B3** | `scripting` permission requested, `chrome.scripting` used **0 times** | remove it; verify `activeTab` and `clipboardWrite` the same way |
+| **B4** | P/R detection is a DOM dependency and the **R branch has never executed** — only P has ever been captured | a labelled R capture (BACKLOG 0p), or an explicit decision to ship the DOM read |
+| **B5** | The radius **unit is implicit** — bare number, `.com`-only captures; a metric board would be ~38% short | a non-`.com` capture (PLAN 21 / BACKLOG 0ad), or ship US-only and say so |
+| **B6** | **Nothing built since 2026-08-20 has been seen on a real board** | Ihor runs the checks in STATE.md |
+
+⚠ **B2–B3 are small edits and were deliberately NOT made** — the 2026-08-24 pass was an audit. B1 was fixed by Ihor on 2026-08-26 but is not yet committed.
+⚠ **B4 and B5 are shippable WITH a stated limitation if Ihor accepts them. That is his call.**
+
+---
+
 ## Before launch
 
 1. **Live DOM capture — main vs similar list.** **done** (2026-08-13). Structure recorded in `AMAZON_SELECTORS.md`: the summary panel is a **sibling** of the results, not a container.
@@ -177,7 +193,34 @@ CHANGELOG (2026-08-14) and §29.1 below.
 
 29a. **Stage A — REMOVAL FIRST.** **done** (2026-08-14). **Removed:** `waitForSheet()`, `cancelSheetPoll()`, `sheetFingerprint()`, `readSheetData()`, `parseStopBlock()` and every `.css-<hash>` selector they carried (338 lines from `content/inlinePanel.js`), the poller state, the sheet-poll call in the manual handler, and `await sleep(800)` plus both `showInlinePanel()` calls in `content/content.js`. **KEPT against the brief — `SHEET_SELECTOR`:** Fast Book reads Amazon's LIVE sheet through it to find the Book button, so removing it would have broken Fast Book. Its load id comes from the CARD, never the scrape, so that half needed nothing. **No regression, per Ihor:** the manual handler never intercepted the click — no `preventDefault`, no `stopPropagation`, no programmatic click — so Amazon's own detail sheet opens exactly as it would with the extension uninstalled. The fallback holds by construction, not by a branch anyone has to keep correct. **Untouched:** the dispatcher's click and its stop-the-loop, START/STOP, 7b ordering (now trivially true — nothing awaits after the stop), the auto-switch, `enforcePanelAnchor()`, the `data-load-id` binding, detection, alert, filtering, PAT. ⚠ **No panel renders until Stage B.** `gateStillOpen()` is orphaned and marked so, not deleted. 56 new checks; 1134 green. *Verify: clicking a card opens AMAZON'S sheet and still stops the loop; no `.css-` string remains in inlinePanel.js; Fast Book still books.*  🔴 **CAUSED A REGRESSION — Post-a-Truck is broken (confirmed live 2026-08-19).** PAT read its stop count and load times from the sheet this task removed. Smoke item (e) now FAILS. Tracked as PLAN 30 / BACKLOG 0h. This task is NOT to be re-opened or reverted — the removal was correct; the fix is to re-source PAT from the captured projection.
 29b. **Stage B — RENDER FROM DATA.** **done** (2026-08-14). ⚠ **Shipped unwired and was fixed the same day** — `showInlinePanel()` had no caller, because Stage A removed it from the manual handler and this stage never restored it; 1220 green tests included one asserting the absence. Now wired, with a `PANEL GATE` trace and `wiring-suite`, which dispatches a real click end to end. The panel is built from the load's own captured record, keyed by work-opportunity id, inserted under that id's card. **Source:** a CURATED projection emitted by `projectRecord()` in `networkObserver.js` — an explicit field list, never the raw body: 772 bytes/record, 41.6 KB for a 50-record page against 299.8 KB raw (13.9%). Stored in `_cityRecordById`, evicted with the coordinates from one shared order list, cleared on teardown. **Four binding rules, each returning false:** no id on the card; no record for that id (**no interception — Amazon's own sheet opens**); id not in the rendered main list or hidden by the city filter (`visibleAnchorFor`); otherwise render. **Segments iterate `loads[]`** — verified as segment order four independent ways on all 71 multi-load records (chained stop codes, non-decreasing first CHECKIN, non-decreasing last CHECKOUT, rising `stopSequenceNumber`). **Times render in STOP-LOCAL time** via each stop's own `location.timeZone` — 31% of records span two zones, so one zone per load would be wrong on a third of them. Segment duration DERIVED (last CHECKOUT − first CHECKIN), which closes Stage E. 83 new checks; 1220 green. *Verify: open a single-leg and a multi-leg load and read the panel against Amazon's own sheet side by side — the arrival/departure times must match exactly.*
-29c. **Stage C — WIRE INTO AUTO-OPEN.** blocked (on 29b). Opens with **no fixed delay**: there is nothing left to wait for, because the data is already in memory before the card renders. The loop still stops before any await (7b). *Verify: a new load's panel appears in the same frame as the highlight, with no visible gap.*
+29c. **Stage C — WIRE INTO AUTO-OPEN.** ✅ **DE FACTO CLOSED — traced 2026-08-27, source only.**
+
+    🔑 **EVIDENCE.** Auto-open never needed its own render call: its synthetic click bubbles to
+    the SAME delegated handler a real click uses, and that handler renders the panel.
+    `detailOpener.js:201-214` builds `new MouseEvent('click', { bubbles: true, ... })` and
+    calls `target.dispatchEvent(ev)`; it bubbles to the `document` listener registered at
+    `inlinePanel.js:1753`, which resolves the card at `:1757` and calls
+    `showInlinePanel(card)` at `:1859`. **Nothing anywhere checks `event.isTrusted`** —
+    the only two occurrences (`detailOpener.js:469`, `:609`) READ it for a diagnostic line
+    and never branch on it.
+
+    ⚠ **THE OLD "zero showInlinePanel calls in content.js" OBSERVATION IS STILL LITERALLY TRUE**
+    — and the inference drawn from it was wrong. The render happens through the shared handler,
+    not through a call in `content.js`. Ihor reports live (2026-08-24) that the panel appears
+    after auto-open every time, which matches this trace.
+
+    ⚠ **NOT GUARANTEED BY CONSTRUCTION — one branch does not render.** `detailOpener.js:161-166`
+    falls back to dispatching at the CARD CONTAINER when `elementFromPoint` resolves outside
+    the card; the container guard at `inlinePanel.js:1787` then rejects exactly that click.
+    On the normal path the hit-test point (30% width, 50% height of the card,
+    `detailOpener.js:133-135`) lands on a descendant and the guard passes. **Whether the
+    fallback ever fires on a real board is UNMEASURED.**
+
+    **Remaining before this is called closed outright:** confirm the fallback is not firing —
+    the `resolved target outside card, falling back to card element` warning must be absent
+    from the console across a run of auto-opens.
+
+    *Original goal, unchanged: opens with no fixed delay; the loop still stops before any await (7b).*
 29d. **Stage D — MEASURE.** blocked (on 29c). Log detection -> panel-visible in ms, before and after, so the gain is a number rather than an impression. *Verify: one console line per open reading `panel ready in Nms`; N is well under the 800 it replaces.*
 29e. **Stage E — the one MISSING field.** **done** (2026-08-14, delivered inside Stage B). Per-segment **duration** has no field on `loads[]` (only `layoverDuration`). Derive it from `stops[].actions[]`: last `CHECKOUT.plannedTime` − first `CHECKIN.plannedTime`. Show nothing rather than a guess if either is absent. *Verify: a multi-leg load shows a duration per leg, and the sum is consistent with `totalDuration`.*
 29f. **Stage F — the fields we do NOT show yet.** next. Deliberately excluded from Stage B so they are added on purpose, not by drift. All present and measured (§29.1): `aggregatedCostItems[]` (Base Rate / Fuel Surcharge / Toll Charge), `loads[i].specialServices[]` (`SWING_DOOR`, `SLIDE_TANDEMS`, `STRAPS`, `LUMPER`), `totalLayover` (non-zero on 21 of 154), `loads[i].equipmentType` (already projected, not yet rendered), `stops[j].trailerDetails[].assetOwner`, `stops[j].pickupInstructions` / `.deliveryInstructions`, `stops[j].weight`, `stops[j].stopCategory`, `deadhead`, `firstPickupTime` / `lastDeliveryTime`, `workOpportunityArrivalWindows[]`, `transitOperatorType`. Each needs a projection field AND a render slot. *Verify: a load with SWING_DOOR or a non-zero layover shows it; a plain load shows no empty rows.*

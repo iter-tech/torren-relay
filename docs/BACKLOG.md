@@ -45,6 +45,113 @@ Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.m
 ## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
 
 
+### 0ak. 🔜 1.1 CANDIDATE — a distinct audio cue for a price increase
+
+**Surge uses the same alert sound as a new load; a dispatcher cannot tell them apart by ear.
+Distinct audio cue for a price increase. Not in 1.0.**
+
+Both paths call the same `playAlert()` — the surge one at `content/priceSurge.js:146`.
+A dispatcher hearing it has no way to know whether a **new load** arrived or an **existing**
+one got more valuable, and those call for different reactions.
+
+⚠ **NOT IN 1.0.** Recorded so it is not re-derived later, not so it is picked up now.
+
+
+### 0aj. 🟠 FIXED 2026-08-27 — AWAITING IHOR. **Not closed.**
+
+⚠ **The fix has NOT been seen working.** It is a scroll: the only way to know is to watch a few
+auto-opens. Do not close this on the strength of the test suite.
+
+**What was done:** `rescrollOpenedCard()` in `content/detailOpener.js` re-scrolls the card
+one frame **after** the dispatch, by which point `showInlinePanel()` has already inserted the
+panel synchronously and the page is its final height. Bounded: one frame, one attempt, clean
+give-up if the card is gone or unlaid-out. Reuses `autoOpenNextFrame()`, so a hidden tab
+falls back to a timer instead of hanging.
+
+⚠ **The pre-click scroll was NOT removed** — it is load-bearing for a different reason
+(`elementFromPoint` cannot hit an off-screen target). There are deliberately two.
+
+**To close it:** Ihor lets several new loads auto-open in a row, foreground **and** background,
+and confirms the opened card lands in view without the wheel.
+
+### 0aj-was. 🟡 AUTO-OPEN DOES NOT SCROLL THE OPENED CARD INTO VIEW — reported live 2026-08-24
+
+**Auto-open does not scroll the opened card into view. Reported live by Ihor 2026-08-24: the
+load opens and the tab switches every time, but the page is sometimes not scrolled to the
+newly-opened card and he must scroll manually. Cosmetic, not a launch blocker. Unstarted.**
+
+⚠ **This is SEPARATE from PLAN 29c.** 29c is about whether the panel RENDERS; this is about
+where the viewport is pointing afterwards. Do not merge them — the render is now traced as
+working (29c), and this remains open.
+
+Note for whoever picks it up: `detailOpener.js` already calls
+`el.scrollIntoView({ block: 'center', inline: 'nearest' })` **before** the 250 ms settle,
+i.e. before the panel is inserted. The panel is inserted as a sibling of the card afterwards,
+which changes the page height. **Nothing re-scrolls after the insert.** That is a hypothesis
+from source, not a diagnosis — it has not been measured.
+
+
+### 0ah. 👁 SURGE INDICATOR HAS NEVER BEEN OBSERVED LIVE — simulation hook added 2026-08-26
+
+**Surge indicator has never been observed live. Simulation hook added 2026-08-26; visual
+confirmation still owed by Ihor.**
+
+Payouts change too rarely on a real board to catch one, so the price-increase visual has shipped
+through every review unseen. ⚠ **We must not ship a visual nobody has looked at.**
+
+**The hook:** `__EXT_DEBUG.simulateSurge(loadId, newPayout)` in `content/priceSurge.js`,
+with `__EXT_DEBUG.surgeCandidates()` to list ids and payouts off the current board.
+
+🔑 **It does NOT call `highlightSurge()` directly.** That would prove only that the renderer
+runs. It seeds `priceHistory[loadId]` — the one input the real comparison reads — so the next
+ordinary tick fires detection, threshold, alert and auto-open through the whole real path.
+
+⚠ **It clears itself after one tick** (`checkPriceSurge()` rebuilds `priceHistory` from
+scratch every cycle), it never touches the `surgeEnabled` setting, and it adds no production
+branch — it writes the same tabState key the normal flow already rewrites every tick.
+
+**Still owed:** Ihor looking at the badge on a real card and saying whether it is right.
+PLAN 20 stays **blocked** — the capture is still owed and this hook does not substitute for it.
+
+### 0ai. 🔜 1.1 CANDIDATE — deadhead-adjusted RPM in the inline panel
+
+**Deadhead-adjusted RPM in the inline panel. Data already in the projection: `payout.value`,
+`deadhead.value`, `totalDistance.value`. Not in 1.0 — feature freeze.**
+
+All three fields already cross the postMessage boundary in `projectRecord()`, so this needs no
+new capture, no new endpoint and no new permission — only a rendering decision.
+
+⚠ **NOT IN 1.0.** Recorded so it is not re-derived later, not so it is picked up now.
+
+
+### 0ag. 🔑 SETTLED 2026-08-24 — CITY-LEVEL STOPS AND THE RADIUS CLAMP ARE TWO DIFFERENT BUGS
+
+**Read this before 0af or 0ae. It resolves which story is true.**
+
+It was suggested that the radius clamp **superseded** the city-level-stop investigation. ⚠ **It
+does not, and the source settles it:**
+
+```js
+cityAssign.js:1916   if (!pickup) { unresolved++; ...; continue; }   // no coordinates -> out
+cityAssign.js:1950   var eff = effectiveRadiusFor(resolved[m]);      // the clamp lives HERE
+```
+
+🔑 **A load with no coordinates returns at line 1916 and never reaches the radius test at all.**
+No radius value — clamped, raw, or 150 — can rescue it. The clamp is arithmetic on a distance,
+and there is no distance to compute.
+
+| symptom | cause | fix |
+|---|---|---|
+| "NO COORDINATES", 16 of 17 unassigned (2026-08-21/24) | `stops[0]` is a **city-level** stop: `latitude`/`longitude` both `null`. **6 of 8 records** in the saved capture. | `resolvePendingCityStops()` — resolve the stop's own `city`/`state` through `resolveCityCoords()` |
+| Loads at 13.64 / 16.15 mi unassigned at radius 10 (2026-08-24) | coordinates were **present**; the load was simply outside his configured radius | `MIN_OPERATING_RADIUS = 25` |
+
+**So: does missing coordinates on city-level stops remain a real issue? NO — but not because of
+the clamp.** It was closed by its own fix, which is in the code and is tested end-to-end against
+Ihor's real capture (`citystop-suite`, 57 checks). ⚠ **Neither fix is verified on a live**
+**board.** If city-level loads reappear on All, the clamp is the wrong place to look.
+
+⚠ **Do not delete either fix on the belief that one supersedes the other.**
+
 ### 0af. ✅ CITY-LEVEL STOPS — FIXED 2026-08-24
 
 **Loads whose pickup is a city rather than an Amazon facility now resolve.** The MAIN world carries
@@ -896,7 +1003,10 @@ then, a rejected or silently-narrowed post is the symptom to watch for.
 The summary line still reads `Equipment: <label> (Provided)` with "Provided" hardcoded. Out of
 scope for the 2026-08-19 fixes by instruction. Recorded here so it is not lost.
 
-### 0i. 🔴 PAT modal does not appear at all — diagnosed 2026-08-19, NOT fixed
+### 0i. ✅ FIXED 2026-08-19 — PAT modal crash and silence (heading corrected 2026-08-24)
+
+⚠ **Stale heading, corrected.** Ihor confirmed the modal opens on both a P and an R load,
+2026-08-20.
 
 **Cause, proven by running the real `openPostModal` against a real sample record:**
 
@@ -992,7 +1102,10 @@ resolve with nothing missing.
    `maxNumberOfStops`. D3 says it must equal the card's stop count — step 6 of TC-PAT-RECORD is
    the check.
 
-### 0h. 🔴 POST-A-TRUCK IS BROKEN — regression from PLAN 29a. Analysis 2026-08-19, NOT fixed.
+### 0h. ✅ FIXED 2026-08-19 — POST-A-TRUCK re-sourced (heading corrected 2026-08-24)
+
+⚠ **Stale heading, corrected.** PAT is fully re-sourced from the captured record and verified
+against eleven real upserts.
 
 **Confirmed live by Ihor 2026-08-19. Smoke item (e) FAILS. The docs previously implied PAT works;
 they were wrong.** The modal opens, the STOPS field and both date/time fields are empty, the two
@@ -1117,7 +1230,10 @@ load id as the **first** `div[id]` in the card with **no UUID-shape filter**, wh
 contain `div[id="STARTING_SOON"]`. CLICKDIAG C2 flags it when the resolved id is not a bare UUID.
 No live click has yet produced a non-UUID id, so there is nothing to fix from — watch C2.
 
-### 0f. ⛔ CLICK-ZONE MISMATCH — under measurement 2026-08-19, NOT fixed
+### 0f. ✅ FIXED 2026-08-19 — CLICK-ZONE MISMATCH (heading corrected 2026-08-24)
+
+⚠ **Stale heading, corrected.** Closed by the container-target guard — the rule is TARGET
+IDENTITY, never geometry.
 
 **Reported live.** Clicking the CENTRE of a card highlights it, opens Amazon's side sheet and
 expands our accordion. Clicking the very EDGE — a few pixels at the top or bottom — expands
@@ -1195,7 +1311,11 @@ overstates the working set, and `currentPageKey()` embeds that count — so a du
 page detection. ⚠ The 2026-08-19 deadhead reconcile is **deliberately keyed on the value element,
 not the id**, precisely so that fixing or not fixing this cannot change what is rendered.
 
-### 0a. ⛔⛔ FILTER FEEDBACK LOOP — diagnosed 2026-08-19, NOT fixed. Fix this first.
+### 0a. ✅ FIXED 2026-08-19 — FILTER FEEDBACK LOOP (heading corrected 2026-08-24)
+
+⚠ **This entry said "NOT fixed" until 2026-08-24 and was wrong.** Closed by the idempotent
+deadhead substitution: a card already showing the right value is left completely untouched.
+Original diagnosis kept below.
 
 Selecting a city on a board with at least one multi-city load puts the extension into an unbounded
 loop at roughly one iteration per animation frame:
@@ -1234,7 +1354,10 @@ recommendations block re-rendering on its own flips the key and is read as a PAG
 REPLACES the assignment map. Measured harmless today because the merged coords map re-derives
 everything — but the signal is not measuring what its name claims.
 
-### 0. ⛔ THE >50 DEGRADATION — diagnosed 2026-08-18, NOT fixed (product decision needed)
+### 0. ✅ FIXED 2026-08-19 — THE >50 DEGRADATION (heading corrected 2026-08-24)
+
+⚠ **Stale heading, corrected.** The degradation was the filter feedback loop (0a); idempotence
+closed it. No product decision was needed after all.
 
 A load beyond `CITY_ASSIGN_MAX_MILES` (150) of every active chip is **unassigned**, therefore
 **never hidden**, therefore **visible under every city tab** — and `publishUnassignedCount()`

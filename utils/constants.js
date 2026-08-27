@@ -39,7 +39,7 @@ const EXT_VERSION = '0.1.0';
 // only logger.debug consulted this constant, so with 183 logger.log calls against 5
 // logger.debug the knob silenced roughly 3% of output and was effectively non-functional —
 // the console stayed fully verbose at every setting.
-const DEBUG_LEVEL = 3;
+const DEBUG_LEVEL = 1;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEVELOPMENT SWITCH — response-body capture. Shipped OFF, deliberately no UI, no storage
@@ -81,7 +81,7 @@ const CAPTURE_RESPONSES = false;
 // decides whether ids and coordinates cross the postMessage boundary at all. Gating only on
 // the isolated side would send them and then discard them, which is precisely what
 // summariseAndDiscard()'s "no ids, no cities, no addresses" contract exists to prevent.
-const CITY_ASSIGN_DEBUG = true;
+const CITY_ASSIGN_DEBUG = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FEATURE SWITCH — per-city card filtering (2026-08-13). Shipped OFF.

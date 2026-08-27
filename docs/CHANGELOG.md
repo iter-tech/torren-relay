@@ -2,6 +2,100 @@
 
 ## [Unreleased]
 
+### 2026-08-27 — the auto-opened card is scrolled back into view (BACKLOG 0aj)
+
+**File:** `content/detailOpener.js`.
+
+Ihor, live: the load opens **every time** and the tab switches, but the page is sometimes not
+scrolled to the newly-opened card and he has to reach for the wheel. **The open itself was never
+the problem — this is scroll only.**
+
+#### Why a SECOND scroll is right regardless of why the first one missed
+
+The existing scroll runs **before** the click, and it has to: `elementFromPoint` cannot resolve
+a target that is off-screen, so the card must be in view before the hit-test.
+
+🔑 **By the time the click returns, the page is a different height.** `showInlinePanel()` is
+**synchronous** (`inlinePanel.js:1159` — a plain function, no `await`, no `setTimeout`),
+and it runs inside `dispatchEvent`, inserting our panel as a **sibling of the card**. So the
+first scroll computed its offset against a page that no longer exists. Amazon's own detail sheet
+can move it again. Whatever the cause on any given open, the remedy is the same: scroll again
+once the layout that follows the click has settled.
+
+#### What was added
+
+`rescrollOpenedCard(el, loadId)`, called immediately after the dispatch. **One frame later,
+one attempt, no loop.** It gives up cleanly and says so if the card has left the DOM or has no
+layout box.
+
+#### The three constraints, and how each is met
+
+| constraint | how |
+|---|---|
+| ⚠ **Do not remove or move the first scroll** | Untouched. There are now **two** `scrollIntoView` calls and the suite asserts **exactly two**, so removing either one fails. |
+| ⚠ **PLAN 7b ordering is untouchable** | This runs inside the **already-scheduled** settle callback, after the dispatch. `openTopNewLoad()` is still a plain function that returns synchronously, and the file contains **no `await` at all** — verified, the only match is a comment. |
+| ⚠ **rAF is suspended in background tabs** | It reuses `autoOpenNextFrame()`, the existing helper that already falls back to a 16 ms timer when `document.visibilityState === 'hidden'`. No second copy of that hazard. |
+
+It uses the same `{ block: 'center', inline: 'nearest' }` as the first scroll — `center` is
+what puts the card **and the panel beneath it** in view together — and stays instant rather than
+smooth, because a smooth scroll would still be animating when the dispatcher looks, and is
+throttled in a hidden tab anyway.
+
+**Tests.** `autodiag-suite` → **104 checks**. Two assertions were updated rather than removed:
+*"scrollIntoView still runs exactly once"* became **exactly twice**, with both reasons written
+down; and the X4 elapsed-time check had pinned literal totals (`1300`), which the extra frame
+shifted to `1316` — it now asserts the **property** it was written to prove (the line reports
+real elapsed time, never below the nominal) instead of a literal any added frame moves.
+**2437 green.**
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here. The scroll
+is NOT verified.**
+
+### 2026-08-26 — the price-increase badge reads as its own thing
+
+**File:** `content/priceSurge.js`. **Visual only — detection, trigger and value are untouched.**
+
+Ihor saw the badge live on 2026-08-26 and it rendered correctly: `↑ +$53` beside the payout.
+**Nothing was broken.** The problem was legibility — the delta was 10px, carried the **same**
+`#7a4f00` as the tinted payout next to it, and sat 4px away, so the two read as one blob.
+
+| | before | after |
+|---|---|---|
+| colour | `#7a4f00` — identical to the payout tint | `var(--ext-success)` |
+| font-size | `10px` | `11px` — one step up this file's own ladder |
+| margin-left | `4px` | `20px` — a **+16px** growth |
+
+#### The token, and why this one
+
+`--ext-success` is the only green in the system: `#157347` on `:root` and `#37b06f`
+under `html.ext-night` (`utils/designTokens.js:17,58`). **No new hex literal was written.**
+The semantics fit rather than merely being convenient — a price *increase* is a positive outcome
+for the dispatcher, which is what a success token means.
+
+⚠ **The dark-mode override had to move with it**, or dark mode would have stayed amber and the
+change would have been half-done. It now points at the same token, which already carries its own
+dark value. The `!important` and `-webkit-text-fill-color` are kept exactly as they were —
+they are what stops Amazon's dark styling repainting the text.
+
+🔑 **`content/nightMode.js` WAS NOT TOUCHED, and did not need to be** — it carries no surge rule
+at all. The dark counterpart lives in `priceSurge.js` itself. The standing constraint holds.
+
+#### What was deliberately NOT done
+
+- ⚠ **No decrease state.** `checkPriceSurge()` triggers on `delta >= threshold` only, so a
+  fall never reaches the renderer. **No red state, no down-arrow, no new branch** — Ihor ruled it
+  out explicitly, and the code had no such path to begin with.
+- **The payout's own amber tint (`.ext-surge-price`) is unchanged.** Two colours on two things
+  is the point: amber marks *which* payout moved, green states *by how much*.
+- Nothing about when the badge appears, what triggers it, or the value it shows.
+
+The badge keeps `data-testid="ext-surge-badge"` (`priceSurge.js:78`), and the sweep that
+removes it still selects on that testid (`:67`).
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here.** The
+change is entirely visual and has not been seen. `__EXT_DEBUG.simulateSurge()` is how to look
+at it; see BACKLOG 0ah.
+
 ### 2026-08-24 (later) — MINIMUM OPERATING RADIUS: a 25 mi floor for city membership
 
 **File:** `content/cityAssign.js`.

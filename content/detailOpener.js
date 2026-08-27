@@ -65,6 +65,60 @@ function autoOpenNextFrame(fn) {
   }
 }
 
+// ── RE-SCROLL AFTER THE PANEL LANDS (2026-08-27, BACKLOG 0aj) ─────────────────────────────
+//
+// REPORTED LIVE by Ihor: the load opens EVERY time and the tab switches, but the page is
+// sometimes not scrolled to the newly-opened card and he has to reach for the wheel.
+//
+// WHY A SECOND SCROLL IS CORRECT REGARDLESS OF WHY THE FIRST ONE MISSED. The scroll above
+// runs BEFORE the click. Our inline panel is inserted as a SIBLING of the card, synchronously,
+// during dispatchEvent — so by the time the click returns the page is TALLER than it was when
+// that first scroll computed its offset, and the card has moved under it. Amazon's own detail
+// sheet opening can move it again. Whatever the cause on any given open, the fix is the same:
+// scroll again once the layout that follows the click has settled.
+//
+// ⚠ THE FIRST SCROLL IS NOT REMOVED AND NOT MOVED. It is load-bearing for a different reason —
+// elementFromPoint cannot resolve a target that is off-screen, so the card has to be in view
+// BEFORE the hit-test. This one is purely about where the dispatcher is left looking.
+//
+// ⚠ PLAN 7b IS UNAFFECTED. This runs inside the already-scheduled settle callback, after the
+// dispatch. openTopNewLoad() still returns synchronously and content.js still stops the loop
+// before any await — no await is added to that path.
+function rescrollOpenedCard(el, loadId) {
+  logger.log('detailOpener', 'rescrollOpenedCard called', { loadId: loadId });
+  try {
+    // BOUNDED AND SINGLE-SHOT. One frame, one attempt, no loop. If the card is gone or has no
+    // box by then, give up cleanly — a missing scroll is a nuisance, and a retry loop chasing a
+    // detached node is a real bug.
+    autoOpenNextFrame(function () {
+      try {
+        if (!el || !document.contains(el)) {
+          logger.log('detailOpener', 'rescroll skipped — the card is no longer in the DOM',
+            { loadId: loadId });
+          return;
+        }
+        if (!hasLayoutBox(el)) {
+          logger.log('detailOpener', 'rescroll skipped — the card has no layout box',
+            { loadId: loadId });
+          return;
+        }
+        // Same options as the first scroll, deliberately: 'center' is what puts the card AND
+        // the panel beneath it in view together. Instant, not smooth — a smooth scroll would
+        // still be animating when the dispatcher looks, and is throttled in a hidden tab.
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        logger.log('detailOpener', 'opened card re-scrolled into view after the panel landed',
+          { loadId: loadId });
+      } catch (e2) {
+        logger.error('detailOpener', 're-scroll failed — the load is still open and usable, the ' +
+          'dispatcher may just have to scroll to it', { error: e2, loadId: loadId });
+      }
+    });
+  } catch (e) {
+    logger.error('detailOpener', 'rescrollOpenedCard could not be scheduled — the load is still ' +
+      'open, only the scroll is lost', { error: e, loadId: loadId });
+  }
+}
+
 // The centre of the element we actually intend to hit.
 //
 // ── THE COORDINATES (measured 2026-08-20) ────────────────────────────────────────────────
@@ -224,6 +278,11 @@ function attemptNeutralZoneClick(load, el, attemptsLeft, scheduledAt, seqNo) {
       clientX: Math.round(pt.x),
       clientY: Math.round(pt.y)
     });
+
+    // BACKLOG 0aj. HERE, not earlier: showInlinePanel() is synchronous and runs inside the
+    // dispatch above, so the panel is already in the DOM on this line and the page is its final
+    // height. One frame later is when the browser has laid that out.
+    rescrollOpenedCard(el, load.loadId);
 
     // AUTODIAG: X4 at two checkpoints, because a background tab may be SLOW rather than broken.
     // Each prints its own ACTUAL elapsed time, since these timers are throttled exactly like the

@@ -333,6 +333,16 @@ Injected below the clicked load card. No data-testid (dynamic, managed by `PANEL
 
 ## Price Surge highlight (content/priceSurge.js)
 
+| testid / class | Type | Function |
+|---|---|---|
+| **ext-surge-badge** | span | **The increase amount.** Text is `↑ +$<rounded delta>`, set with `textContent` (`priceSurge.js:79`), inserted **immediately after** the payout element (`:80`). ⚠ **Restyled 2026-08-26** after Ihor saw it live: it was 10px in `#7a4f00` — the *same* colour as the tinted payout beside it — 4px away, and the two read as one blob. Now `color:var(--ext-success)` (the only green token: `#157347` light, `#37b06f` dark), `font-size:11px` (one step up this file's ladder), `margin-left:20px` (+16px). **No new hex literal.** The dark rule points at the same token and keeps its `!important` + `-webkit-text-fill-color`, which is what stops Amazon's dark styling repainting it. 🔑 `content/nightMode.js` carries **no** surge rule — the dark counterpart lives in `priceSurge.js` — so that file was not touched. Removed by `clearSurgeHighlights()` (`:67`), which selects on this testid. |
+| (ext-surge-price) | class on the payout element | **The tint marking WHICH payout moved.** `#7a4f00` on `rgba(212,167,44,.12)`; `#f0c040` in night mode. ⚠ **Deliberately left amber in the 2026-08-26 change** — two colours on two things is the point: amber says which, green says how much. ⚠ These are **hardcoded literals, not tokens** — a pre-existing house-rule deviation, recorded rather than fixed, because widening the change was not asked for. No `data-testid`: it is a class applied to *Amazon's* element, not one we create. |
+
+⚠ **NO DECREASE STATE EXISTS.** `checkPriceSurge()` triggers on `delta >= threshold` only,
+so a price fall never reaches the renderer. Ihor ruled a red/down-arrow branch out explicitly
+(2026-08-26). **Do not add one.**
+
+
 Injected on the payout element of a surge-triggered card. Never on the whole card.
 
 | testid / class | Type | Function |
