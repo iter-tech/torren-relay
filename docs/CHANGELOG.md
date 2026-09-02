@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### 2026-09-02 — Icons wired into the manifest; version 0.1.0 → 1.0.0
+
+**File:** `manifest.json`. Closes release blocker **B2** (no icons) and the version item.
+
+```
++  "version": "1.0.0"                    (was 0.1.0)
++  "icons":              { 16, 32, 48, 128 }   -> icons/icon<N>.png
++  "action.default_icon": { 16, 32, 48, 128 }  -> icons/icon<N>.png
+```
+
+⚠ **`default_icon` was ADDED to the existing `action` key.** `default_title` and
+`default_popup` are preserved and asserted — replacing that key would have unwired the popup,
+which is the smoke item that would then fail.
+
+**Verified, not assumed:** all four files exist at the exact paths, every declared path resolves
+on disk, each is a real PNG (signature checked), and the JSON re-parses.
+
+#### ⚠ TWO THINGS TO KNOW ABOUT THE ICON FILES
+
+**1. All four PNGs are BYTE-IDENTICAL — the same 128×128 image copied four times.** Same md5
+(`eb0f2df8…`), same 16924 bytes, and each reports `128x128` in its IHDR header. Only the
+filenames differ.
+
+**This is not a blocker and nothing is broken:** they are valid PNGs, Chrome accepts them and
+downscales 128→48/32/16 on demand, so the toolbar and `chrome://extensions` will both show the
+icon. ⚠ **It is a QUALITY point:** a 128px image scaled to 16px by the browser is usually muddier
+than one drawn at 16px, and the toolbar icon is the one users see constantly. **Ihor's call —
+purely cosmetic, and shipping as-is is a legitimate choice.**
+
+**2. 🔴 THE ICONS ARE NOT COMMITTED.** `git status` shows `?? icons/`; `git ls-files icons/`
+returns **zero** tracked files. They are not gitignored — simply never added. ⚠ **This is the same
+failure class as PKG-1 (`utils/supabaseConfig.js`) in RELEASE_AUDIT.md: a zip built from a clean
+clone would have no icons and would be rejected for exactly the reason this change exists to
+fix.** `git add icons/` closes it.
+
+**Tests: `pagegate-suite` 86 → 98. 2724 green.** The icon block is pinned — both keys present with
+all four sizes, 128 specifically (the store requires it), every referenced file existing on disk
+and being a real PNG, the two blocks naming the same files, `default_popup`/`default_title`
+surviving, and the version off `0.1.0`.
+
+⚠ **Not verified in a browser — there is no browser here.**
+
 ### 2026-08-31 (fourth) — Domain coverage audit: manifest and code cross-checked against the 11
 
 **Audit + one comment correction.** No behaviour changed.

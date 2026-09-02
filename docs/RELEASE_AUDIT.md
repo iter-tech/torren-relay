@@ -57,9 +57,9 @@ states the opposite of its value.
 
 | item | status | evidence |
 |---|---|---|
-| `icons` key | ❌ **ABSENT** | not present anywhere in `manifest.json` |
-| `action.default_icon` | ❌ **ABSENT** | `manifest.json:97-99` — `action` has only `default_title` and `default_popup` |
-| PNG files in repo | ❌ **NONE** | no `icons/` directory; `find . -name "*.png"` returns nothing |
+| `icons` key | ✅ **ADDED 2026-09-02** | all four sizes → `icons/icon<N>.png`, every file verified present |
+| `action.default_icon` | ✅ **ADDED 2026-09-02** | added to the existing `action`; `default_title`/`default_popup` preserved |
+| PNG files in repo | ⚠ **PRESENT but UNTRACKED** | four PNGs in `icons/`, all byte-identical 128×128 copies; `git ls-files icons/` returns **0** — `git add icons/` still needed |
 | `scripting` permission | ✅ **REMOVED 2026-08-27** | was `manifest.json:7`; permissions are now `["storage", "clipboardWrite"]` |
 | `chrome.scripting` uses | ✅ **STILL ZERO** | `grep -rn "chrome\.scripting"` → no matches in any file |
 
@@ -107,7 +107,6 @@ Judged **by consequence to a dispatcher**, not by age. Three verdicts only.
 
 | id | what it is | why it blocks |
 |---|---|---|
-| **B2** | No `icons`, no `action.default_icon`, no PNG in repo (`manifest.json:97`) | **The Chrome Web Store requires a 128×128 icon.** Submission is rejected without it. |
 | **PKG-1** | ⚠ **`utils/supabaseConfig.js` is REQUIRED by the manifest but NOT COMMITTED** — `.gitignore:8`; `git ls-files` lists only `supabaseConfig.example.js` | The manifest loads it as content script #5 (`manifest.json:47`). **A zip built from a clean checkout is missing it and the extension breaks on load.** It exists only on this machine. |
 | **DESC** | `manifest.json:5` says *"Does NOT book loads"* while Fast Book books loads (`inlinePanel.js:562`, `:614`) | A false statement in the listing, to both the reviewer and the user. **CWS treats description/behaviour mismatch as a policy violation.** |
 | **0ad / PLAN 21** | The search radius is a **bare number with no unit**; `radiusUnitCaveat()` (`cityAssign.js:2226`) warns on a non-`.com` host | 🔑 **The manifest ships to TEN non-US Relay domains** — eleven in total with `.com` (`.ca .co.jp .co.uk .cz .de .es .fr .it .in .pl`, `manifest.json:9-19`, mirrored in `content_scripts.matches`). On a metric board the number is read as miles and the filter is wrong. ⚠ **AND THE WARNING IS INVISIBLE IN A SHIPPED BUILD** — all three call sites (`:2009`, `:2075`, `:3173`) are `logger.log`, which `DEBUG_LEVEL = 1` silences. **Either narrow the manifest to `.com` or get one non-`.com` capture.** |

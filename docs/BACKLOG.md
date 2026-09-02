@@ -44,6 +44,33 @@ Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.m
 
 ## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
 
+### 0aw. ✅ CLOSED 2026-09-02 — ICONS WIRED, VERSION BUMPED TO 1.0.0
+
+Release blocker **B2** is closed. `manifest.json` now declares a top-level `icons` block and
+`action.default_icon`, both at 16/32/48/128 → `icons/icon<N>.png`. ⚠ `default_icon` was **added
+to** the existing `action` key — `default_title` and `default_popup` are preserved and asserted,
+because replacing that key would have unwired the popup. Version `0.1.0` → `1.0.0`.
+
+Pinned by `pagegate-suite` (98 checks): both blocks present at all four sizes, 128 specifically,
+every referenced file existing on disk and being a real PNG, and the popup keys surviving.
+
+### 0ax. 🟠 TWO OPEN POINTS ON THE ICONS — neither blocks, both are Ihor's call
+
+**1. 🔴 THE FILES ARE NOT COMMITTED.** `git status` → `?? icons/`; `git ls-files icons/` → **0**.
+Not gitignored, just never added. ⚠ **Same failure class as PKG-1 (`utils/supabaseConfig.js`): a
+zip from a clean clone has no icons and is rejected for the very reason B2 was raised.**
+`git add icons/` closes it. **Until then the manifest points at files the repository does not
+contain.**
+
+**2. 🟡 All four PNGs are the SAME IMAGE.** Byte-identical — md5 `eb0f2df8…`, 16924 bytes each,
+and every one reports **128×128** in its PNG header. Only the filenames differ.
+
+**Nothing is broken:** they are valid PNGs, Chrome accepts them and downscales as needed, so the
+icon will appear correctly in the toolbar and on `chrome://extensions`. ⚠ **Purely a quality
+question** — a browser-downscaled 128→16 is usually muddier than an icon drawn at 16px, and the
+toolbar icon is the one seen constantly. **Shipping as-is is a legitimate choice**; producing four
+properly-drawn sizes is a polish step, not a fix.
+
 ### 0av. ✅ CLOSED 2026-08-31 — THE PATHNAME IS NOW MEASURED, AND THE REAL CAUSE WAS A STALE CACHE
 
 **✅ THE PATH IS CONFIRMED.** Ihor ran `__EXT_DEBUG.pageGate()` on the live board:
