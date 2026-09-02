@@ -377,12 +377,39 @@ function showSimplePatModal(message, testidKey) {
     if (ev.key === 'Escape') { removePatModal(); document.removeEventListener('keydown', onKey); }
   }
   document.addEventListener('keydown', onKey);
+  // LEAK FIX 2026-08-28 — the handle goes ON THE ELEMENT so removePatModal() can reach it.
+  // Same pattern as the sidebar's drag listeners (content.js:795-797 reads _extDragMove /
+  // _extDragUp off the element it is about to remove); reused rather than reinvented.
+  overlay._extPatKeydown = onKey;
 }
 
+// 🔑 THE SINGLE TEARDOWN POINT FOR THE PAT MODAL. Every close path goes through here — the
+// backdrop (:331, :1094), the header × and footer Close, Confirm's delayed close (:1635),
+// Escape, and a second modal REPLACING the first (:325, :1088). Nothing outside this file
+// removes the overlay, so cleaning up here covers all of them BY CONSTRUCTION rather than by
+// each call site remembering to.
+//
+// ⚠ LEAK FIX 2026-08-28 (leak inventory). The keydown listener used to be removed ONLY inside
+// its own Escape branch, so every modal closed any OTHER way left one listener on the document
+// for the life of the page — each closing over its own modal's scope, which kept the whole
+// modal alive too. It was the only listener in the extension that accumulated with ordinary
+// dispatcher use.
 function removePatModal() {
   logger.log('patModal', 'removePatModal called');
   var el = document.getElementById(PAT_MODAL_ID);
-  if (el) el.remove();
+  if (!el) return;
+
+  // Read the handle BEFORE detaching the node, so the order of these two lines can never matter.
+  //
+  // ⚠ The Escape branch ALSO removes this listener, so on that path removeEventListener runs
+  // twice with the same arguments. That is deliberately left alone and is harmless: removing a
+  // listener that is not registered is a defined no-op in the DOM spec, not an error. The Escape
+  // branch is untouched so this change cannot alter WHEN or HOW the modal closes.
+  if (el._extPatKeydown) {
+    document.removeEventListener('keydown', el._extPatKeydown);
+    el._extPatKeydown = null;
+  }
+  el.remove();
 }
 
 // Helper: make a select element with given options array [[value, label], ...]
@@ -1530,6 +1557,9 @@ async function openPostModalInner(loadId) {
     }
   }
   document.addEventListener('keydown', onKeydown);
+  // LEAK FIX 2026-08-28 — see removePatModal(). The handle lives on the element so EVERY close
+  // path is covered by construction, not by each call site remembering.
+  overlay._extPatKeydown = onKeydown;
 
   // --- Async city resolution (post-render) ---
   var originCityObj = null;

@@ -151,6 +151,12 @@ reinstate the exact defect.
 
 ## Post-launch / unscheduled
 
+> ✅ **2026-08-28 — the PAT origin radius "defect" is CLOSED AS CORRECT BEHAVIOUR** (BACKLOG 0aq),
+> by Ihor's product decision. A Post-a-Truck is anchored to the **pickup of the load being taken**,
+> not to the driver's home city, so a 25-mile default is right and the dropdown covers the rest.
+> ⚠ **`MIN_OPERATING_RADIUS` was DISPROVED as the cause and does not reach the payload; the
+> per-city search radius is available at PAT time and is deliberately NOT used.** Do not "fix" it.
+
 14. **Multi-Driver Monitor UI** — driver sub-tabs, per-driver new-load counter, colour stripe on the "All" view. *Verify: a new load for one driver highlights that driver's tab and flashes the card.*
 15. **Re-capture the five-city response into `samples/`, re-confirm findings 1, 3, 4.** *Verify: nothing on screen — a file exists and matches.*
 16. **Tune `CITY_ASSIGN_MAX_MILES` (150) and `CITY_ASSIGN_SETTLE_MS` (700) against real logs.** *Verify: no load lands in the wrong city and none goes unmatched on a normal board.*
@@ -178,6 +184,8 @@ reinstate the exact defect.
 26. **Status-handling decisions** — sustained 404 loud log, 401/403 auth re-check instead of backoff. *Verify: nothing on screen normally; a stale watch path becomes visible in the console.*
 27. **`supabase.min.js` deferral + `authGate.js` local-first.** measure before deciding. *Verify: popup and page activation feel no slower and nobody gets logged out.*
 28. **`SAFETY.md` pass for the two new surfaces** — background service worker, MAIN-world fetch/XHR observer. *Verify: nothing on screen — docs only.*
+34. **Chat button on the load card — 1.1 candidate, NOT STARTED.** Open Amazon's negotiation chat bound to **that** load. Today the chat opens on the **topmost negotiable load**, so reaching the third one means opening and closing it three times. Ihor reports competitors have this, so it is feasible; **HOW is unknown.** 🔴 **BLOCKED on a Network capture from Ihor:** which requests fire when the chat button is pressed, whether any carries a work-opportunity id, and whether the URL changes. ⚠ **If no load id is passed the feature is not possible as described — establish that before any design.** See BACKLOG 0ar. *Verify: pressing chat on the third negotiable load opens that load's chat, not the topmost one.*
+35. **Quick-phrase inserts for negotiation chat — 1.1 candidate, NOT STARTED.** 10-15 canned dispatcher phrases inserted with one click instead of typing. ⚠ **Depends entirely on item 34** — with no per-load chat there is nothing to insert into. See BACKLOG 0as. *Verify: one click drops the chosen phrase into the chat box, ready to send.*
 
 ---
 

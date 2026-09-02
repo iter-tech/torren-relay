@@ -200,16 +200,21 @@
          added confusion. content/filterSimilar.js is unchanged and still does the hiding; it
          is just no longer asked whether to. popup.js keeps its null-guarded wiring. -->
 
-    <div class="popup-divider"></div>
+    <!-- GATE 2 of 3 — wrapped 2026-08-27 so popup.js can REMOVE the whole Booking section when
+         FAST_BOOK_ENABLED is false. The divider and the section title go with it; leaving an
+         empty "Booking" heading behind would look like a bug rather than a decision. -->
+    <div id="popup-booking-block" data-testid="popup-booking-block">
+      <div class="popup-divider"></div>
 
-    <div class="popup-section-title">Booking</div>
+      <div class="popup-section-title">Booking</div>
 
-    <div class="popup-row">
-      <label class="popup-label" for="popup-fast-book">Fast Book</label>
-      <label class="toggle-switch">
-        <input type="checkbox" id="popup-fast-book" data-testid="popup-fast-book">
-        <span class="toggle-track"></span>
-      </label>
+      <div class="popup-row">
+        <label class="popup-label" for="popup-fast-book">Fast Book</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="popup-fast-book" data-testid="popup-fast-book">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
     </div>
 
     <div class="popup-divider"></div>

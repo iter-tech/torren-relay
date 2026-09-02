@@ -817,15 +817,116 @@ if (typeof onAuthGateChange === 'function') {
   });
 }
 
+// ── SPA NAVIGATION WATCH (2026-08-31) ─────────────────────────────────────────────────────
+//
+// ⚠ THE PART A MANIFEST-ONLY FIX WOULD MISS. Amazon does NOT reload the page when the dispatcher
+// clicks between Dashboard and Load Board, so a check that runs once at document_idle is right
+// exactly once and wrong from the first click onward. This watches for in-page navigation in
+// BOTH directions: leaving the board tears our UI down, arriving at it activates normally.
+//
+// WHICH SIGNAL, AND WHY THIS ONE:
+//   - popstate alone is NOT enough — it fires on back/forward only, never on the pushState() an
+//     SPA uses for an ordinary in-app click, which is the case in the bug report.
+//   - Patching history.pushState would catch those, but it means writing to a global of Amazon's
+//     page from a content script. This extension does not modify Amazon's JS anywhere, and a
+//     visibility fix is not the place to start.
+//   - chrome.webNavigation would need a new permission, days after the permission set was cut to
+//     the two that are actually used.
+// So: a cheap poll of location.pathname, PLUS popstate so back/forward feels instant. The poll is
+// one string comparison; it must keep running while we are INACTIVE, because that is the state
+// we have to notice leaving.
+var _navWatchInterval = null;
+var _navWatchLastPath = null;
+
+// 🔑 THIS RECONCILES STATE; IT IS NOT AN EDGE DETECTOR. That distinction is the whole fix.
+//
+// The first version only acted when the path CHANGED, and that could not see the state Ihor hit:
+// the gate was composed early (nightMode.js is content script #12, this file is #31) at the
+// pre-route path, then the SPA routed to the board BEFORE this watch seeded its first path. The
+// seed therefore recorded the already-current path, the path never changed again, and the stale
+// `onLoadBoard: false` was permanent. An edge detector cannot detect an edge it started after.
+//
+// So the question each tick is not "did the path change?" but "does the gate still AGREE with the
+// page?". That is true regardless of ordering, regardless of what the path was at any moment, and
+// it self-heals — which an edge detector never can once it has missed the edge.
+function onPossibleNavigation() {
+  try {
+    var path       = (window.location && window.location.pathname) || '';
+    var moved      = (path !== _navWatchLastPath);
+    var nowOnBoard = (typeof isLoadBoardPage === 'function') ? isLoadBoardPage() : null;
+    var gateThinks = (typeof authGateOnLoadBoardSync === 'function')
+      ? authGateOnLoadBoardSync() : null;
+
+    // DISAGREEMENT is the real signal. null means the gate has not composed yet — not a
+    // disagreement, just "too early", so it is left alone.
+    var stale = (gateThinks !== null && nowOnBoard !== null && gateThinks !== nowOnBoard);
+
+    if (!moved && !stale) return;
+    _navWatchLastPath = path;
+
+    if (stale) {
+      logger.log('content', 'the gate disagrees with the page — recomposing', {
+        gateThinksOnLoadBoard: gateThinks, actuallyOnLoadBoard: nowOnBoard
+      });
+    } else {
+      logger.log('content', 'in-page navigation detected', { onLoadBoard: nowOnBoard });
+    }
+
+    // Re-runs the gate, which composes the page check, and fires the existing activate/deactivate
+    // listeners on a real transition. Nothing bespoke happens here.
+    //
+    // ⚠ NO RECHECK STORM. recheckAuthGate() updates the composed page half, so the disagreement
+    // is resolved by the very call it triggers — even when the SESSION is invalid, because the
+    // comparison is on onLoadBoard alone and never on active.
+    recheckAuthGate();
+    if (typeof warnIfUnrecognisedRelayPage === 'function') warnIfUnrecognisedRelayPage();
+  } catch (e) {
+    logger.error('content', 'navigation watch failed — the extension may not follow the next ' +
+      'in-page navigation', { error: e });
+  }
+}
+
+function startNavigationWatch() {
+  logger.log('content', 'startNavigationWatch called');
+  try {
+    if (_navWatchInterval !== null) return;           // idempotent
+    _navWatchLastPath = (window.location && window.location.pathname) || '';
+    window.addEventListener('popstate', onPossibleNavigation);
+    // The same typeof convention the rest of this file uses for cross-file globals. In a real
+    // build constants.js is content script #2 and this is never taken; a bare undefined would
+    // make setInterval busy-loop at 0 ms, which is too sharp an edge to leave unguarded.
+    var pollMs = (typeof NAV_WATCH_POLL_MS === 'number') ? NAV_WATCH_POLL_MS : 500;
+    _navWatchInterval = setInterval(onPossibleNavigation, pollMs);
+  } catch (e) {
+    logger.error('content', 'startNavigationWatch failed — in-page navigation will not be ' +
+      'followed, so the bar may persist off the load board', { error: e });
+  }
+}
+
 // Async init: gated on an active Supabase session (utils/authGate.js) at content-script
 // startup. If the dispatcher isn't logged in, none of our UI is built at all, and the
 // Amazon Relay page is left completely untouched — same as the extension being
 // uninstalled. Live login/logout after this point is handled by the onAuthGateChange
 // listener above, not this IIFE (which only ever runs once, at page load).
 (async function () {
+  // 🔑 THE WATCH STARTS FIRST, AND UNCONDITIONALLY — before the gate is even read.
+  // It has to run in the state where we are INACTIVE, because "the dispatcher navigated FROM the
+  // dashboard TO the load board" is a transition only an inactive tab can observe. Starting it
+  // after the early return below would mean the extension never woke up on a tab that opened on
+  // /dashboard — which is the whole bug, just moved.
+  startNavigationWatch();
+
   var gate = await getAuthGate();
   if (!gate.active) {
-    logger.log('content', 'auth gate closed — extension inactive on this page load', {});
+    // Says WHICH gate closed. "not logged in" and "not on the load board" are different problems
+    // and must not look alike in a console someone is debugging from.
+    logger.log('content', 'gate closed — extension inactive on this page load', {
+      sessionActive: gate.sessionActive === true,
+      onLoadBoard:   gate.onLoadBoard === true
+    });
+    // 🔴 On a domain whose load-board path has never been captured, say so out loud. Silence on
+    // ten of eleven domains would be worse than the bug this fixes.
+    if (typeof warnIfUnrecognisedRelayPage === 'function') warnIfUnrecognisedRelayPage();
     return;
   }
   // PII (2026-07-30): was `{ email: gate.email }`. The dispatcher's email must never reach

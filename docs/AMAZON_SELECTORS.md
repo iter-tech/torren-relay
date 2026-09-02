@@ -460,3 +460,78 @@ alarm is wired in code (`SELECTOR DRIFT SUSPECTED` warn) to surface breakage imm
 ⚠️ Re-verify ALL hashed selectors whenever Amazon deploys a CSS rebuild.
    The drift alarm (`logger.warn 'SELECTOR DRIFT SUSPECTED'`) fires in readSheetData()
    if the sheet is present but expanders are absent, or if all segments parse empty.
+
+## 🔑 The SELECTED card — where the OPEN load's id comes from ✅
+Verified: 2026-08-27 (Ihor, live board)
+Used by: `content/inlinePanel.js` → `sheetOpenLoadId()` — the Fast Book identity gate.
+
+```
+.load-card__selected
+```
+
+Amazon marks the card whose detail sheet is open with this class. **It is semantic, not a
+`css-<hash>` class**, so it is safe to select on under the rule in "Count cards by ID SHAPE".
+
+**Measured on the open load:** exactly ONE bare UUID inside the selected card, and the same
+single UUID at the nearby level. The extension takes the DISTINCT UUID-shaped ids under the
+marker and **requires exactly one** — no selected card, no UUID, or more than one distinct UUID
+all return `null` and refuse the booking. Ambiguity is never guessed.
+
+### ⛔ THE DETAIL SHEET DOES NOT CARRY THE LOAD ID — measured, do not re-derive
+
+A full attribute scan of `#selected-work-sheet` on an open load found **ZERO UUIDs** and **no
+work/load/opportunity-named attribute**. It contains exactly eight elements with an id:
+
+```
+rlb-book-btn                        alert-:r7j:
+rlb-book-trip-no-btn                alert-:r7j:-children
+rlb-book-trip-confirm-booking-btn   expanded-header
+alert-:r7k:                         alert-:r7k:-children
+```
+
+**None is a load id.** The id is not in the URL either — it stays `/loadboard/search`.
+
+⚠ This is recorded because the extension *did* read the sheet for the id, which returned `null`
+every time and left Fast Book blocked on every press (BACKLOG 0al). **If this class ever stops
+matching, the fix is to re-measure the board — not to go back to the sheet.**
+
+### 🔴 If this class changes, the extension says so LOUDLY
+
+`sheetOpenLoadId()` `logger.error`s *"THE SELECTED-CARD MARKER WAS NOT FOUND"* and Fast Book
+aborts with its own distinct wording and button state (`ext-action-fastbook-blocked-marker`),
+separate from an ordinary id mismatch. A silent permanent block is the exact defect that made
+this measurement necessary.
+
+## 🔑 The LOAD BOARD PATH — where the extension is allowed to run ✅⚠
+Verified: 2026-08-31 (`.com` only — see the warning below)
+Used by: `utils/constants.js` → `isLoadBoardPage()`, the ONE page check.
+
+```
+/loadboard/search        <- MEASURED, relay.amazon.com
+```
+
+The rule matches the **first path segment** (`loadboard`), not the full path. So `/loadboard`,
+`/loadboard/search` and any future `/loadboard/<whatever>` all count, while `/dashboard`,
+`/trips`, `/loadboards` and `/app/loadboard` do not. Deliberately broader than the measured
+string: an exact match on `/loadboard/search` would make a sibling board route look like a
+non-board page, and the extension would go dark with no explanation.
+
+### What is MEASURED vs what is ASSUMED
+
+| domain | load board path | status |
+|---|---|---|
+| `relay.amazon.com` | `/loadboard/search` | ✅ **MEASURED — reconfirmed 2026-08-31 live via `__EXT_DEBUG.pageGate()`, segments ["","loadboard","search"]** — AMAZON_SELECTORS.md (sheet measurement 2026-08-27), TEST_CASES.md, BACKLOG.md and `inlinePanel.js` all independently record that the URL "stays /loadboard/search" |
+| `.ca .co.jp .co.uk .cz .de .es .fr .it .in .pl` | assumed identical | 🔴 **ASSUMED — NEVER CAPTURED** |
+
+🔴 **Every capture on disk is from `relay.amazon.com`.** The other ten domains appear exactly
+once each — in the manifest's own host list — and in no capture, sample or measurement.
+
+⚠ **THE ASSUMPTION IS NOT SILENT.** On a non-`.com` Relay page where we do not activate,
+`warnIfUnrecognisedRelayPage()` emits a `console.warn` naming the host and the path, saying the
+extension did not activate and that the path is measured on `.com` only. **`console.warn`, not
+`logger.warn`** — `logger.warn` is silenced at the shipped `DEBUG_LEVEL` of 1, which is exactly
+how the radius-unit caveat ended up invisible in a shipped build.
+
+**What closes this:** open the load board on ONE non-`.com` domain and read the address bar. If
+the first path segment is `loadboard`, the table above becomes measured for that domain. If it is
+not, the warning will already be in the console naming the real path.

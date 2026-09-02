@@ -178,3 +178,157 @@ order-upsert API. This is not a click site and does not touch Amazon's DOM.
 - [ ] `isForbiddenElement()` called before every `.click()`
 - [ ] No new `.click()` sites introduced by popup wiring (Step 3) or any backlog feature
 - [ ] 30-minute live test on Load Board
+
+## Fast Book — THE IDENTITY RULE (added 2026-08-27)
+
+🔑 **FAST BOOK MUST NEVER CLICK BOOK UNLESS THE LOAD OPEN IN AMAZON'S SHEET IS THE LOAD THE
+BUTTON IS BOUND TO.**
+
+This is the only place the extension clicks Amazon's real Book button, and it is the only place
+that spends the dispatcher's money. The rule is enforced immediately before the dispatch, at
+`content/inlinePanel.js`, `executeFastBook()`:
+
+```js
+var sheetOpen = sheetOpenLoadId();
+var openId    = sheetOpen ? sheetOpen.id : null;
+if (!sheetLoadId || !openId || sheetLoadId !== openId) { /* abort, no click */ }
+```
+
+### The rule in words
+
+1. **Strict equality on the UUID string.** No normalising, no case folding, no prefix matching.
+   Both ids come from the `.id` DOM property of Amazon's own markup, so a difference of any
+   kind means the two sides disagree — which is when to abort, not when to paper over.
+2. ⚠ **FAIL CLOSED.** Three separate aborts: the ids differ; the **bound** id is missing; the
+   **sheet** id is missing. **An absent id NEVER compares equal and is never treated as
+   "probably fine."** `sheetOpenLoadId()` returns `id: null` on every failure — no sheet,
+   no UUID in it, or an exception — precisely so that callers cannot proceed on an unread sheet.
+3. ⚠ **THE ABORT IS VISIBLE.** A silent abort is not acceptable: the dispatcher pressed Fast
+   Book and expects a booking, and if nothing happens he presses again. The button is left
+   **disabled**, reading **"Blocked — wrong load open"**, carrying a `title` that says what
+   to do. It is deliberately **not** reset to "Fast Book" — a button that looks ready to press
+   is itself a silent failure.
+4. **ONE definition of the id-shape rule.** `sheetOpenLoadId()` is the single implementation;
+   `clickDiagSheetLoadId()` delegates to it. ⚠ Three copies of a card lookup have already
+   cost this project once — that is not repeated on a booking check.
+
+### The confirm poll
+
+After the Book click, a poll (100 ms, 5 000 ms ceiling) looks for Amazon's confirm button. The
+exact-id lookup `#rlb-book-trip-confirm-booking-btn` stays **document-wide**, because the
+dialog may be portalled outside the sheet and an exact id cannot match another load's button.
+
+⚠ **The TEXT fallback is scoped to the sheet.** It previously swept
+`document.querySelectorAll('button')` across the whole page for five seconds, clicking the
+first button whose text was `Book`, `Confirm` or `Confirm booking`. **If the dialog is
+ever portalled out AND its id changes, Fast Book now times out instead of guessing.** On a
+booking action that is the correct direction to fail: a timeout is recoverable, a wrong click
+is not.
+
+⚠ **The poll is cancellable.** Its handle is module-level and `removeInlinePanel()` clears it,
+which covers all four `enforcePanelAnchor()` removal sites. A new Fast Book also cancels a
+poll still running from an earlier one.
+
+## Fast Book — THE IDENTITY RULE, corrected source (2026-08-27)
+
+⚠ **This SUPERSEDES the source named in the section above.** The rule is unchanged; where the
+open load's id comes from has changed, because the original source never worked.
+
+🔑 **FAST BOOK MUST NEVER CLICK BOOK UNLESS THE LOAD AMAZON HAS OPEN IS THE LOAD THE BUTTON IS
+BOUND TO.** Two independent gates now stand behind that, and both are checked immediately before
+the click, in `content/inlinePanel.js` → `executeFastBook()`.
+
+### ⛔ DEAD HYPOTHESIS — the sheet does not carry the load id
+
+The check originally read the id out of `#selected-work-sheet`. **Measured on a real board
+2026-08-27: the sheet contains no UUID anywhere**, in any id or any attribute (see
+AMAZON_SELECTORS.md for the eight ids it does contain). So `sheetOpenLoadId()` returned `null`
+on every press, and because the guard fails closed by design, **Fast Book was blocked outright —
+every press, with `openLoadId: '(missing)'`.**
+
+That is worth stating plainly: **a correct fail-closed guard reading a source that can never
+succeed is a permanent outage, and it looked exactly like the guard working.** Hence rule 3 below.
+
+### GATE 1 — identity, from the SELECTED CARD
+
+The open load's id comes from `document.querySelector('.load-card__selected')` and the **existing**
+UUID-shape rule (`clickDiagUuidRe()` → cityAssign's `CARD_UUID_RE`).
+
+1. **Strict equality on the UUID string.** No normalising, no case folding, no prefix matching.
+2. ⚠ **FAIL CLOSED.** `null` on: no selected card, no UUID under it, **more than one DISTINCT
+   UUID**, or any exception. **An absent id never compares equal.** Ambiguity is refused, never
+   guessed.
+3. ⚠ **`cardLoadIdFor()` IS DELIBERATELY NOT USED HERE.** It falls back to the first `div[id]`
+   when no UUID is present — right for *rendering* a panel, wrong for a *booking* gate, where it
+   would hand back a badge id and let a press through on an unidentified load.
+4. ⚠ **THE SHEET IS STILL REQUIRED.** Only the source of the *id* moved. The sheet is what carries
+   the Book button, so its absence still refuses the booking.
+
+### GATE 2 — the payout
+
+The record captured for the bound id carries a payout; Amazon's open sheet prints one. If they
+disagree, **abort**. This catches what ids cannot: a stale or mis-keyed record.
+
+- ⚠ **NO LOCALISED WORD IS AN ANCHOR.** It does not look for "Payout" or "Total" — those are
+  translated. It parses **amounts only**, and asks whether the record's payout is among them.
+- ⚠ **IT ABSTAINS RATHER THAN BLOCKS.** No record, no payout on the record, or nothing parseable
+  in the sheet → verdict `abstain`, booking proceeds on gate 1 alone, and **the abstain is
+  logged** so it never looks like a pass. **A second line of defence that can itself break
+  booking is a liability, not a defence.** It aborts only on a positive contradiction.
+- Tolerance is one cent: the record keeps a full float (`668.1707937465877`), the board prints
+  `$668.17`.
+
+### 🔴 RULE 3 — A CHANGED AMAZON CLASS MUST BE LOUD
+
+If `.load-card__selected` matches nothing, that is **not** an id mismatch and must never be
+reported as one. It gets:
+
+- `logger.error` naming the marker, saying **"EVERY Fast Book press will block"**
+- its own outcome `abort-no-marker`
+- its own button state — *"Blocked — cannot identify open load"*,
+  `data-testid="ext-action-fastbook-blocked-marker"` — whose title says this is an
+  extension-side problem that reopening the load will **not** clear
+
+⚠ **A silent permanent block is the defect this exists to prevent.** Three abort states are
+deliberately distinguishable: `abort-no-marker` (Amazon changed), `abort-identity` (wrong load
+open), `abort-payout` (the money disagrees).
+
+## 🔑 1.0 SHIPS WITH BOOKING UNREACHABLE (2026-08-27)
+
+**`FAST_BOOK_ENABLED = false` in `utils/constants.js`.** In the 1.0 build there is no reachable
+path from any UI control, any stored setting, or any console call to Amazon's Book button.
+
+⚠ **THIS IS A BUILD-TIME CONSTANT, NOT A DEFAULT SETTING, AND THE DISTINCTION IS THE ENTIRE
+POINT.** The store listing states that the extension does not book loads. For that sentence to be
+true it has to be true of the **shipped source**, which a reviewer reads — not merely of the
+default value of a toggle that one storage write would flip.
+
+### The three gates, and why there are three
+
+Each of these makes a booking click unreachable **on its own**. They are deliberately redundant:
+no single edit, mistake, or leftover listener can re-open the path.
+
+| # | where | what it does |
+|---|---|---|
+| **1** | `content/inlinePanel.js` → `buildActionBar()` | The Fast Book button is **never created or inserted**. Not hidden, not disabled — absent. `showInlinePanel()`'s wiring block then finds no node, so no click listener is attached either. |
+| **2** | `popup/popup.js` (markup wrapped in `popup/popup.html`) | The whole **Booking section is REMOVED from the DOM**, divider and heading included. The toggle cannot be seen, checked, or scripted. |
+| **3** | `content/inlinePanel.js` → `executeFastBook()` | **Refuses at entry**, as the first statement, **above every DOM read** — above the sheet lookup and above the rehearsal flag. Returns `'disabled'`. A direct `__EXT_DEBUG` call, a hand-added button, or a stale listener all stop here. |
+
+🔑 **Gate 3 is the one that holds alone under any circumstance**, which is why it sits before any
+DOM access rather than merely before the click: so the refusal is true of the whole function, and
+the log line "No DOM was read" is a fact rather than a hope.
+
+⚠ **ALL THREE GUARDS FAIL CLOSED ON A MISSING CONSTANT.** Each is written
+`typeof FAST_BOOK_ENABLED === 'undefined' || FAST_BOOK_ENABLED !== true`, so a context that never
+loaded `utils/constants.js` refuses rather than proceeding. Asserted by `fastbook-suite`.
+
+### What did NOT change
+
+⚠ **Nothing was deleted.** The two-step click sequence, the identity gate, the payout gate, the
+rehearsal helpers and the whole of `fastbook-suite` are present and unmodified. The suite runs
+with the flag **forced true** so every guard stays covered, and **not one existing assertion was
+weakened** to accommodate the gate. Flipping the constant to `true` restores the 2026-08-27
+behaviour exactly.
+
+⚠ **THE MANIFEST DESCRIPTION'S TRUTH NOW DEPENDS ON THIS CONSTANT.** They must change together.
+See BACKLOG 0ao.

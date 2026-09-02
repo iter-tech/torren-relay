@@ -13,7 +13,10 @@ function injectHighlightStyle() {
   document.head.appendChild(style);
 }
 
-injectHighlightStyle();
+// 2026-08-31 — gated on the ONE page check. This ran at module load on EVERY Relay page, so the
+// highlight CSS was in the <head> of the Dashboard too. Inert without our elements, but it is
+// still markup we put on a page we have no business touching.
+if (typeof isLoadBoardPage === 'function' && isLoadBoardPage()) injectHighlightStyle();
 
 function highlightNewLoads(newLoads) {
   logger.log('highlighter', 'highlightNewLoads called', { count: newLoads.length });

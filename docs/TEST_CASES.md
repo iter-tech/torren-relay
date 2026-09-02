@@ -1,5 +1,128 @@
 # Test Cases
 
+## TC-FASTBOOK-IDENTITY — Fast Book must abort if the sheet shows another load (2026-08-27)
+
+> ⚠ **UPDATED LATER THE SAME DAY.** The identity check below was correct but read the load id
+> from a place that never had it, so **Fast Book was blocked on every press**. The id now comes
+> from `.load-card__selected` on the board, and a **second gate (payout)** was added. The steps
+> in *"Rehearsing the guard"* are the current ones. See the DEAD HYPOTHESIS note below.
+
+### ⛔ DEAD HYPOTHESIS — do not test this, and do not re-derive it
+
+**The detail sheet does not carry the load id.** Measured on a live board 2026-08-27: zero UUIDs
+anywhere in `#selected-work-sheet`, in any id or attribute; the URL stays `/loadboard/search`.
+Any future "read the id from the sheet" idea is this bug returning.
+
+### The three abort states are DELIBERATELY distinguishable
+
+| what happened | outcome | button reads | testid |
+|---|---|---|---|
+| `.load-card__selected` matched nothing (**Amazon changed**) | `abort-no-marker` | Blocked — cannot identify open load | `ext-action-fastbook-blocked-marker` |
+| the open load is a different one | `abort-identity` | Blocked — wrong load open | `ext-action-fastbook-blocked` |
+| the payout disagrees | `abort-payout` | Blocked — payout mismatch | `ext-action-fastbook-blocked-payout` |
+
+🔑 **If Fast Book ever reads "Blocked — cannot identify open load", that is not a wrong-load
+refusal — it means every press will block until the marker is re-measured.** Report it.
+
+🔑 **THIS CASE CANNOT BE PRODUCED ON DEMAND ON A REAL BOARD.** It requires Amazon's sheet to be
+showing a *different* load from the panel's at the instant Fast Book is pressed. **The guard is
+therefore asserted by `fastbook-suite` and by nothing else** (the console rehearsal below lets
+you *watch* it fire on a live board, but it does not replace the suite) — treat that suite as the
+evidence, and do not weaken it.
+
+### What the suite asserts (`fastbook-suite`, 85 checks)
+
+| case | expected |
+|---|---|
+| sheet id **==** bound id | Book **is** clicked, the confirm poll starts, no error — the happy path is unchanged |
+| sheet id **≠** bound id | **NO click, NO poll**, `logger.error` naming **both** ids, button left disabled reading *"Blocked — wrong load open"* |
+| sheet has **no** UUID | **NO click** — fail closed |
+| **bound** id missing | **NO click** — fail closed |
+| **both** missing | **NO click** — ⚠ `null` must never equal `null` here |
+| bound id is an **empty string** | **NO click** — fail closed |
+| **no sheet at all** | **NO click** — fail closed |
+
+### What Ihor CAN check on a real board — the HAPPY path only
+
+1. Open a load, press **Fast Book**. **PASS:** it books exactly as before — button goes
+   `Booking...` then `Booked!`. **FAIL:** it now says *"Blocked — wrong load open"* on a
+   normal booking, which would mean the sheet id and the card id disagree on an ordinary open —
+   report it immediately and **do not** press again.
+2. Repeat on a **recently-added** (highlighted) card, whose id comes through the UUID-shape rule.
+3. **PASS:** the confirm dialog is still found and clicked within the usual time. **FAIL:** it
+   sits at `Booking...` for 5 s then reverts — that is the scoped fallback no longer finding
+   the confirm button, which would mean Amazon portals the dialog outside the sheet.
+
+### Rehearsing the guard from the console — added 2026-08-27
+
+🔑 **The abort path still cannot be produced on demand on a real board.** These two helpers let
+Ihor *watch* the guard decide, on the live sheet, with **no booking possible**. They are console
+helpers on `__EXT_DEBUG` — no UI, no new branch in the normal flow.
+
+**A. `__EXT_DEBUG.fastBookDryRun()` — runs every real check, stops before the click**
+
+1. Open a load card so the inline panel is showing.
+2. In the DevTools console: `__EXT_DEBUG.fastBookDryRun()`
+3. **PASS (normal case):** the block ends `-> WOULD CLICK` and `NOTHING WAS CLICKED.`, with the
+   two ids identical and `outcome : dry-run-would-click`.
+4. **FAIL:** `-> WOULD ABORT` on an ordinary open — the sheet id and the panel's bound id
+   disagree where they should agree. Capture the block and report it; **do not** press Fast Book.
+5. With no panel open it prints `no inline panel is open. Click a load card first.` and returns
+   `null`.
+
+**B. `__EXT_DEBUG.fastBookForceMismatch()` — makes the NEXT real press abort, once**
+
+1. Open a load card. Run `__EXT_DEBUG.fastBookForceMismatch()` — it prints `ARMED for ONE press`.
+2. Press **Fast Book** for real.
+3. **PASS:** nothing is booked; the button is left **disabled** reading
+   **"Blocked — wrong load open"** with `data-testid="ext-action-fastbook-blocked"`; the console
+   carries a `REHEARSAL` warning naming the real id and an `executeFastBook: ABORTED` error
+   naming **both** ids.
+4. **FAIL:** anything books. That would mean the identity check did not run.
+5. **It is one-shot.** Press Fast Book again on the same panel and it books normally — that
+   second press is part of the test, and confirms the flag cleared itself.
+
+⚠ **WHAT THESE HELPERS DO NOT COVER.** A dry run returns *before* `bookBtn.click()`, and a forced
+mismatch aborts before it, so **the two real clicks (Book, then confirm) and the confirm poll are
+never exercised by either helper**. Nothing but a **genuine booking on a real board** covers those
+— steps 1-3 of the section above remain the only evidence for them, and remain unperformed.
+
+### The dry run now prints BOTH gates (2026-08-27)
+
+`__EXT_DEBUG.fastBookDryRun()` prints the marker state, then gate 1 and gate 2 separately.
+**PASS on an ordinary open load:**
+
+```
+      sheet present                 : true
+      selected-card marker          : found
+
+      GATE 1  identity
+        bound load id (this panel)  : 9f2c1d40-…-2e6d4b90a771
+        load id on the SELECTED card: 9f2c1d40-…-2e6d4b90a771
+        ids match                   : true
+
+      GATE 2  payout
+        record payout               : $835.73
+        amounts read from the sheet : $835.73, $2.17
+        verdict                     : PASS  (the record payout appears in the open sheet)
+
+      -> WOULD CLICK  (both gates cleared; a real press would book this load)
+      NOTHING WAS CLICKED.
+```
+
+**Then open a DIFFERENT load, leaving the panel bound to the first, and run it again. PASS:**
+`ids match : false`, `outcome : abort-identity`, and `-> WOULD ABORT`.
+
+⚠ **`verdict : ABSTAINED` is NOT a failure.** It means the payout gate had nothing to compare —
+usually no captured record for that load yet — and the booking rests on gate 1 alone. The final
+line then reads `WOULD CLICK (identity cleared, payout abstained)`, which is the design.
+
+⚠ **`selected-card marker : NOT FOUND` IS a failure**, and a serious one: every press will block
+until `.load-card__selected` is re-measured against the live board.
+
+⚠ **If the blocked state ever appears, that is the guard working, not a bug.** Capture the
+`executeFastBook: ABORTED` console line — it carries both ids — and send it.
+
 ## TC-CITY-STOP — a load whose pickup is a CITY, not a facility (2026-08-24)
 
 **Why:** 16 of 17 loads went unassigned because their first stop was city-level —

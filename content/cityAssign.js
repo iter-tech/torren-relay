@@ -3916,6 +3916,142 @@ function teardownCityAssign() {
 //   __EXT_DEBUG.cityAssignments()          -> the current id -> city map, to pick a valid key
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};
 // PART 2 (2026-08-20): dump the collected badge-letter + record pairs, for the PM.
+// ── MEMORY PROBE (2026-08-28) ─────────────────────────────────────────────────────────────
+//
+// MEASURE-ONLY. Ihor proposes a "flush memory by reloading the tab" feature for 1.1. The figure
+// motivating it — "hundreds of MB to GB" — is an ASSUMPTION, not a measurement. This exists so
+// the feature can be designed against real numbers, or dropped if the growth is not there.
+//
+// Read-only: it changes nothing, schedules nothing, and is reachable only from the console.
+//
+// ⚠ IT KEEPS NO HISTORY, DELIBERATELY. A memory probe that accumulated its own readings would
+// grow the very heap it is measuring. Each call allocates one small flat object of numbers,
+// returns it, and retains nothing — no element references, no arrays of nodes, no previous
+// report. Ihor keeps the history, by pasting the lines somewhere.
+var _memProbeLoadedAt = Date.now();
+
+// Counts matching nodes WITHOUT materialising anything that outlives the call. querySelectorAll
+// returns a static NodeList here; .length is read and the list is dropped on return.
+function _memCountSel(sel) {
+  try {
+    var n = document.querySelectorAll(sel).length;
+    return n;
+  } catch (e) {
+    // -1 rather than 0: a selector that threw is NOT the same as a count of none, and a probe
+    // that reported zero here would look like the leak had gone away.
+    logger.error('cityAssign', 'memReport: a node count failed — reporting -1 for it so an ' +
+      'error is not mistaken for an empty result', { error: e, selector: sel });
+    return -1;
+  }
+}
+
+function memReport() {
+  logger.log('cityAssign', 'memReport called');
+  try {
+    var out = {};
+
+    // ── HEAP ────────────────────────────────────────────────────────────────────────────
+    // performance.memory is Chrome-only, non-standard, and coarse (it is quantised and can lag).
+    // It is still the ONLY in-page number for this, so it is reported as-is and labelled.
+    var mem = (typeof performance !== 'undefined') ? performance.memory : null;
+    if (mem && typeof mem.usedJSHeapSize === 'number') {
+      out.heapUsedMB  = Math.round(mem.usedJSHeapSize / 1048576);
+      out.heapTotalMB = Math.round(mem.totalJSHeapSize / 1048576);
+      out.heapLimitMB = Math.round(mem.jsHeapSizeLimit / 1048576);
+    } else {
+      // Say so plainly rather than reporting a zero that reads like a measurement.
+      out.heapUsedMB = 'UNAVAILABLE — performance.memory is not exposed in this browser/context';
+    }
+
+    // ── THE TWO RECORDED LEAKS ──────────────────────────────────────────────────────────
+    // 1. The sidebar <style>. buildSidebar() appends one and deactivateExtensionUI() does not
+    //    remove it, so one accumulates per deactivate->activate (i.e. per logout->login) cycle.
+    //    ⚠ NOT per refresh cycle — on a normal shift this is expected to read 1 all day.
+    out.sidebarStyleTags = _memCountSel('style[data-testid="ext-sidebar-styles"]');
+    // Every other injected <style> is id-guarded and should read 1; listed so a second one is
+    // visible rather than assumed impossible.
+    out.otherStyleTags = _memCountSel('#ext-inline-panel-style, #ext-origin-cities-style, ' +
+      '#ext-pat-modal-style, #ext-surge-style, #ext-highlight-style');
+
+    // 2. The bounded stores. All six share ONE eviction list, so they should move together.
+    out.pickupCoords   = countKeys(_cityPickupById);
+    out.pickupOrderLen = _cityPickupOrder.length;
+    out.pickupMax      = CITY_PICKUP_MAX;
+    out.recordStore    = countKeys(_cityRecordById);
+    out.trailerLabels  = countKeys(_cityTrailerLabelById);
+    out.stopLabels     = countKeys(_cityStopById);
+    // ⚠ NOT on the shared eviction list — these grow with distinct ids/cities seen and are only
+    // cleared on teardown. Small per entry, but unbounded within a session, so they are the ones
+    // to watch if the bounded stores sit at their cap and the heap still climbs.
+    out.noCoordIds_UNBOUNDED   = countKeys(_cityNoCoordIds);
+    out.cityCoordCache_UNBOUNDED = countKeys(_cityCoordCache);
+
+    // ── OUR DOM FOOTPRINT ───────────────────────────────────────────────────────────────
+    // Attached nodes only — querySelectorAll never sees a detached one, which is the point:
+    // a rising number here means we are adding to the page and not cleaning up.
+    out.ourNodes = _memCountSel('[data-testid^="ext-"], [id^="ext-"]');
+    out.panels   = _memCountSel('#ext-inline-panel');
+    out.sidebars = _memCountSel('#ext-sidebar');
+
+    // ── TIMERS ──────────────────────────────────────────────────────────────────────────
+    // Only what the code actually tracks. Three setInterval sites exist and all three keep a
+    // handle, so intervals are answerable. ⚠ TIMEOUTS ARE NOT: 21 setTimeout sites exist and
+    // only 4 keep a handle, so a live count is NOT AVAILABLE and is not estimated here.
+    var iv = 0;
+    var sb = document.getElementById('ext-sidebar');
+    if (sb && sb._memoryPollInterval) iv++;
+    if (typeof tabAlertTimer !== 'undefined' && tabAlertTimer !== null) iv++;
+    if (typeof _fastBookPollInterval !== 'undefined' && _fastBookPollInterval !== null) iv++;
+    out.liveTrackedIntervals = iv;
+    out.liveTimeouts = 'NOT TRACKED — 17 of 21 setTimeout sites keep no handle; not estimated';
+
+    // ── UPTIME / CYCLES ─────────────────────────────────────────────────────────────────
+    out.uptimeMin = Math.round((Date.now() - _memProbeLoadedAt) / 60000);
+    // ⚠ NO CYCLE COUNTER EXISTS anywhere in the extension — not in content.js, refreshManager,
+    // tabState or storage. Reported as absent rather than inferred from uptime and the refresh
+    // interval, which would be a guess dressed as a measurement.
+    out.cyclesCompleted = 'NOT TRACKED — no cycle counter exists in the codebase';
+
+    console.log('[EXT] MEM REPORT  ' + new Date().toISOString());
+    console.table(out);
+    return out;
+  } catch (e) {
+    logger.error('cityAssign', 'memReport failed — measurement only, nothing else is affected',
+      { error: e });
+    return null;
+  }
+}
+
+window.__EXT_DEBUG.memReport = memReport;
+
+// ── PAGE GATE PROBE (2026-08-31) ──────────────────────────────────────────────────────────
+//
+// Added after the extension failed to activate on a URL the page check should have accepted, and
+// the only way to find out why was to read source. This prints the ACTUAL pathname the check
+// sees, its segments, and the verdict — so "why is nothing showing up" is answerable in one line
+// from the console instead of by inspection.
+window.__EXT_DEBUG.pageGate = function () {
+  logger.log('cityAssign', 'pageGate called');
+  try {
+    var path = (window.location && window.location.pathname) || '(none)';
+    var segs = path.toLowerCase().split('/');
+    var onBoard = (typeof isLoadBoardPage === 'function') ? isLoadBoardPage() : null;
+    console.log('[EXT] PAGE GATE' +
+      '\n      host            : ' + ((window.location && window.location.hostname) || '(none)') +
+      '\n      pathname        : ' + path +
+      '\n      segments        : ' + JSON.stringify(segs) +
+      '\n      looking for     : a segment equal to "' +
+        (typeof LOAD_BOARD_PATH_SEGMENT === 'string' ? LOAD_BOARD_PATH_SEGMENT : '(undefined!)') + '"' +
+      '\n      isLoadBoardPage : ' + onBoard +
+      '\n      -> ' + (onBoard ? 'ON the load board — the page check is not what is stopping it'
+                                : 'NOT recognised as the load board — this is why nothing rendered'));
+    return { path: path, segments: segs, onLoadBoard: onBoard };
+  } catch (e) {
+    logger.error('cityAssign', 'pageGate failed — diagnostic only', { error: e });
+    return null;
+  }
+};
+
 window.__EXT_DEBUG.dumpTrailerLabels = dumpTrailerLabels;
 // PART 1 (2026-08-20): prints the captured /search REQUEST so Ihor can save it into samples/,
 // which is gitignored and so cannot be written from here. See docs/api-samples.md §6.9.

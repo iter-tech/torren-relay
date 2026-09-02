@@ -22,8 +22,25 @@ var PANEL_ID                  = 'ext-inline-panel';
 // would break Fast Book, which is a dependency to preserve. It is a stable id selector, not one
 // of the hashed classes the scrape used. See the report for the full dependency trace.
 var SHEET_SELECTOR            = '#selected-work-sheet';
+// Amazon's marker for the card whose detail sheet is open. Measured 2026-08-27: a semantic
+// class, NOT a css-<hash> one, and the open card carries exactly one bare UUID. This is the
+// ONLY source of the open load id — the sheet itself does not carry it. See AMAZON_SELECTORS.md.
+var SELECTED_CARD_SELECTOR    = '.load-card__selected';
+// One cent. The record keeps a full float (e.g. 668.1707937465877) and the board prints it
+// rounded ("$668.17"), so an exact comparison would fail on every load.
+var PAYOUT_TOLERANCE          = 0.01;
 var currentPanelCard          = null; // owned by showInlinePanel (set on success) and removeInlinePanel (clear)
 var _fastBookStorageListener  = null; // storage.onChanged listener for Fast Book visibility — cleaned up in removeInlinePanel
+// ⚠ THE CONFIRM POLL'S HANDLE, MODULE-LEVEL ON PURPOSE (2026-08-27, BACKLOG 0al item 3).
+// It used to be a local inside executeFastBook(), which nothing outside could clear — so a
+// 5-second poll that clicks a confirm button OUTLIVED the panel being torn down. On a booking
+// path that is the wrong kind of survivor. removeInlinePanel() now clears it.
+var _fastBookPollInterval     = null;
+// ⚠ REHEARSAL ONLY (2026-08-27). Set by __EXT_DEBUG.fastBookForceMismatch() and cleared the
+// instant it is read, so it survives exactly ONE press and never a refresh. It is false in
+// every ordinary press — nothing in the product can set it, only the console helper — so
+// pressing Fast Book without invoking that helper behaves exactly as it did before it existed.
+var _fastBookForceMismatchOnce = false;
 
 
 function injectPanelStyle() {
@@ -356,8 +373,41 @@ function injectPanelStyle() {
 // Executes the two-step Fast Book sequence: click Amazon's Book button, then click Confirm.
 // Triggered ONLY by user's explicit Fast Book button click (Click 4 in SAFETY.md).
 // isForbiddenElement() is called before each Amazon DOM click per the binding safety rule.
-function executeFastBook(sheetLoadId, fastBookBtn) {
-  logger.log('inlinePanel', 'executeFastBook called', { loadId: sheetLoadId, intent: ALLOWED_CLICK_INTENTS.FAST_BOOK });
+// `dryRun` (2026-08-27) is a REHEARSAL flag, and its ONLY effect is to return immediately before
+// the Book click — so the two clicks and the confirm poll are skipped. Every check above that
+// point runs unchanged: same sheet lookup, same Book-button lookup, same forbidden test, same
+// identity comparison. Nothing is reimplemented, which is the entire point — a rehearsal that
+// ran different code would prove nothing about the real path.
+//
+// Returns a short outcome string so the console helpers can report what happened without
+// re-deriving it. No caller in the product reads the return value.
+function executeFastBook(sheetLoadId, fastBookBtn, dryRun) {
+  logger.log('inlinePanel', 'executeFastBook called', { loadId: sheetLoadId, dryRun: !!dryRun, intent: ALLOWED_CLICK_INTENTS.FAST_BOOK });
+
+  // 🔑 GATE 3 of 3 (2026-08-27) — THE LAST WORD, AND DELIBERATELY THE FIRST STATEMENT.
+  // It sits ABOVE every DOM read, above the rehearsal flag, and above the sheet lookup, so there
+  // is no path through this function that touches the page before it. A direct __EXT_DEBUG call,
+  // a hand-added button, a listener left over from a previous panel — none of them reaches a
+  // click while this is false. `typeof` guard so a context missing constants.js fails CLOSED.
+  if (typeof FAST_BOOK_ENABLED === 'undefined' || FAST_BOOK_ENABLED !== true) {
+    logger.warn('inlinePanel', 'executeFastBook: REFUSED — Fast Book is disabled in this build ' +
+      '(FAST_BOOK_ENABLED is false). No DOM was read and no click was sent.', {
+        loadId: sheetLoadId, dryRun: !!dryRun
+      });
+    return 'disabled';
+  }
+
+  // REHEARSAL: corrupt the BOUND id only, for one press. The sheet is untouched, Amazon's DOM is
+  // untouched, and the comparison below is the real one — it simply now has two ids that differ.
+  if (_fastBookForceMismatchOnce) {
+    _fastBookForceMismatchOnce = false;
+    var forcedFrom = sheetLoadId;
+    sheetLoadId = 'FORCED-MISMATCH-' + String(sheetLoadId);
+    logger.warn('inlinePanel', 'executeFastBook: REHEARSAL — the bound load id was deliberately ' +
+      'corrupted for this ONE press, so the identity check must abort', {
+        realBoundId: forcedFrom, corruptedTo: sheetLoadId
+      });
+  }
 
   if (fastBookBtn) {
     fastBookBtn.disabled = true;
@@ -368,7 +418,7 @@ function executeFastBook(sheetLoadId, fastBookBtn) {
   if (!sheet) {
     logger.error('inlinePanel', 'executeFastBook: sheet not found', { selector: SHEET_SELECTOR });
     if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
-    return;
+    return 'no-sheet';
   }
 
   // Step 1: find Amazon's Book button
@@ -383,34 +433,191 @@ function executeFastBook(sheetLoadId, fastBookBtn) {
   if (!bookBtn) {
     logger.error('inlinePanel', 'executeFastBook: Book button not found in sheet');
     if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
-    return;
+    return 'no-book-button';
   }
   if (isForbiddenElement(bookBtn)) {
     logger.error('inlinePanel', 'executeFastBook: bookBtn matched FORBIDDEN_SELECTORS — aborting', { id: bookBtn.id });
     if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
-    return;
+    return 'forbidden';
+  }
+
+  // ── 🔑 IDENTITY CHECK — THE LOAD IN THE SHEET MUST BE THE LOAD THIS BUTTON IS BOUND TO ────
+  //
+  // BACKLOG 0al, 2026-08-27. Before this, sheetLoadId was passed in and used for ONE thing: a
+  // log line. Nothing compared it to anything, so Fast Book clicked Book on whatever load
+  // happened to be open in #selected-work-sheet. Nothing would have noticed or reported a
+  // divergence — including the dispatcher, who would have seen a successful booking.
+  //
+  // ⚠ FAIL CLOSED, AND IT IS THE POINT OF THE CHECK. Three separate ways to abort:
+  //   - the ids differ
+  //   - the BOUND id is missing        (the panel could not read its card)
+  //   - the SHEET id is missing        (no sheet, no UUID in it, or it could not be read)
+  // An absent id NEVER compares equal and is never treated as "probably fine". This is the one
+  // place in the extension that spends the dispatcher's money.
+  //
+  // ⚠ STRICT EQUALITY ON THE UUID STRING, no normalising. Both ids are read from the .id DOM
+  // property of Amazon's own markup, so a casing difference would mean the two sides disagree
+  // about something — which is exactly when this must abort rather than paper over it.
+  var sheetOpen = sheetOpenLoadId();
+  var openId    = sheetOpen ? sheetOpen.id : null;
+  var openWhy   = sheetOpen ? sheetOpen.reason : 'error';
+
+  // A CHANGED AMAZON CLASS GETS ITS OWN, LOUDER ABORT. 'the marker is gone' and 'these are two
+  // different loads' are completely different problems: the first blocks EVERY press until
+  // someone re-measures the board, the second is the guard doing its job on one press. Giving
+  // them the same wording is how a permanent block hides as a routine refusal — which is exactly
+  // what happened when this read the sheet for an id the sheet never carried.
+  if (openWhy === 'no-selected-card') {
+    logger.error('inlinePanel', 'executeFastBook: ABORTED — THE SELECTED-CARD MARKER WAS NOT ' +
+      'FOUND ON THE BOARD, so the open load cannot be identified at all. This is NOT a mismatch ' +
+      'between two loads: nothing matches the marker, which is what a changed Amazon class looks ' +
+      'like. EVERY Fast Book press will block until the marker is re-measured. NO booking click ' +
+      'was sent.', {
+        selector: SELECTED_CARD_SELECTOR,
+        boundLoadId: sheetLoadId || '(missing)',
+        sheetPresent: !!(sheetOpen && sheetOpen.present),
+        intent: ALLOWED_CLICK_INTENTS.FAST_BOOK
+      });
+    if (fastBookBtn) {
+      fastBookBtn.disabled = true;
+      fastBookBtn.textContent = 'Blocked — cannot identify open load';
+      fastBookBtn.setAttribute('title',
+        'Fast Book was blocked. The extension could not tell which load Amazon has open, ' +
+        'because the marker it reads is no longer on the page. Booking is disabled until this ' +
+        'is fixed — this is an extension-side problem, not something reopening the load will ' +
+        'clear. Please report it.');
+      fastBookBtn.setAttribute('aria-label', 'Fast Book blocked — cannot identify the open load');
+      fastBookBtn.setAttribute('data-testid', 'ext-action-fastbook-blocked-marker');
+    }
+    return 'abort-no-marker';
+  }
+
+  if (!sheetLoadId || !openId || sheetLoadId !== openId) {
+    logger.error('inlinePanel', 'executeFastBook: ABORTED — THE BOARD DOES NOT HAVE THIS ' +
+      'BUTTON\'S LOAD SELECTED. The load Amazon currently has open is a different one, so ' +
+      'booking would have taken the wrong load. NO booking click was sent.', {
+        boundLoadId: sheetLoadId || '(missing)',
+        openLoadId: openId || '(missing)',
+        sheetPresent: !!(sheetOpen && sheetOpen.present),
+        intent: ALLOWED_CLICK_INTENTS.FAST_BOOK
+      });
+    // ⚠ A SILENT ABORT IS UNACCEPTABLE. He pressed Fast Book and expects a booking; if nothing
+    // happens and nothing says why, he presses it again. The button is left DISABLED carrying
+    // the reason — deliberately NOT reset to 'Fast Book', because a button that looks ready to
+    // press is itself a silent failure. Reopening the panel is what clears it.
+    if (fastBookBtn) {
+      fastBookBtn.disabled = true;
+      fastBookBtn.textContent = 'Blocked — wrong load open';
+      fastBookBtn.setAttribute('title',
+        'Fast Book was blocked. Amazon\'s open load does not match this panel\'s load, so ' +
+        'booking would have taken the wrong one. Close the panel, reopen the load you want, ' +
+        'and try again.');
+      fastBookBtn.setAttribute('aria-label', 'Fast Book blocked — the open load does not match');
+      fastBookBtn.setAttribute('data-testid', 'ext-action-fastbook-blocked');
+    }
+    return 'abort-identity';
+  }
+
+  logger.log('inlinePanel', 'executeFastBook: identity check PASSED — the board has the bound ' +
+    'load selected', { loadId: sheetLoadId });
+
+  // GATE 2 — THE PAYOUT. The ids agreeing means the DOM says these are the same load; the money
+  // agreeing means Amazon's own sheet says so too, through a completely independent field. It
+  // catches the case the id check cannot: a stale or mis-keyed record.
+  //
+  // IT ABSTAINS UNLESS IT HAS A POSITIVE CONTRADICTION — see payoutGateFor(). An absent payout
+  // never blocks; only two numbers that disagree do.
+  var payGate = payoutGateFor(sheetLoadId, sheet);
+  if (payGate.verdict === 'mismatch') {
+    logger.error('inlinePanel', 'executeFastBook: ABORTED — THE PAYOUT DISAGREES. The ids ' +
+      'matched, but the amount Amazon is showing in the open sheet is not the payout captured ' +
+      'for this load. Something is stale or mis-keyed and this booking could be for a different ' +
+      'amount than the panel shows. NO booking click was sent.', {
+        loadId: sheetLoadId,
+        recordPayout: payGate.recordPayout,
+        sheetAmounts: payGate.sheetAmounts.slice(0, 8),
+        intent: ALLOWED_CLICK_INTENTS.FAST_BOOK
+      });
+    if (fastBookBtn) {
+      fastBookBtn.disabled = true;
+      fastBookBtn.textContent = 'Blocked — payout mismatch';
+      fastBookBtn.setAttribute('title',
+        'Fast Book was blocked. The payout shown in the open load does not match the ' +
+        'payout recorded for this load, so booking was refused. Close the panel, reopen the ' +
+        'load, and check the amount before booking.');
+      fastBookBtn.setAttribute('aria-label', 'Fast Book blocked — the payout does not match');
+      fastBookBtn.setAttribute('data-testid', 'ext-action-fastbook-blocked-payout');
+    }
+    return 'abort-payout';
+  }
+  if (payGate.verdict === 'abstain') {
+    // Recorded, not silent: an abstain means the second gate contributed NOTHING to this booking,
+    // and that should be visible rather than looking like a pass.
+    logger.warn('inlinePanel', 'executeFastBook: the payout gate ABSTAINED — it could not check ' +
+      'this booking, so the identity check is the only thing standing behind it. Booking ' +
+      'continues, deliberately.', { loadId: sheetLoadId, why: payGate.why });
+  } else {
+    logger.log('inlinePanel', 'executeFastBook: payout gate PASSED', {
+      loadId: sheetLoadId, recordPayout: payGate.recordPayout
+    });
+  }
+  // 🔑 THE REHEARSAL STOP. HOW "IT CANNOT CLICK" IS GUARANTEED, not hoped:
+  // executeFastBook() contains exactly TWO .click() calls — bookBtn.click() on the next line and
+  // confirmBtn.click() inside the poll, which is started after it. BOTH are below this return,
+  // so a dry run reaches neither. There is no third dispatch site and no path around this line.
+  if (dryRun) {
+    logger.log('inlinePanel', 'executeFastBook: DRY RUN — every check passed and the Book button ' +
+      'was found. Stopping here; nothing was clicked.', { id: bookBtn.id, loadId: sheetLoadId });
+    return 'dry-run-would-click';
   }
 
   logger.log('inlinePanel', 'executeFastBook: clicking Book button', { id: bookBtn.id, intent: ALLOWED_CLICK_INTENTS.FAST_BOOK });
   bookBtn.click();
 
   // Step 2: poll for Amazon's confirm dialog button and click it
+  // ⚠ TIMINGS UNCHANGED (2026-08-27) — 100 ms tick, 5 000 ms ceiling, and the
+  // `confirmBtn !== bookBtn` exclusion below are all exactly as they were. Only WHERE the
+  // fallback looks, and WHO can cancel the poll, changed.
   var MAX_WAIT_MS   = 5000;
   var POLL_MS       = 100;
   var elapsed       = 0;
-  var pollInterval  = setInterval(function () {
+
+  // ITEM 3 (BACKLOG 0al): a previous poll must never run alongside a new one. Two live polls
+  // would race to click a confirm button, and only one of them belongs to the load on screen.
+  if (_fastBookPollInterval !== null) {
+    clearInterval(_fastBookPollInterval);
+    _fastBookPollInterval = null;
+    logger.warn('inlinePanel', 'executeFastBook: cancelled a confirm poll that was still ' +
+      'running from an earlier Fast Book');
+  }
+
+  _fastBookPollInterval = setInterval(function () {
     elapsed += POLL_MS;
+    // ⚠ THE ID LOOKUP STAYS DOCUMENT-WIDE, DELIBERATELY. Amazon's confirm dialog is a modal and
+    // may well be portalled to the document root rather than rendered inside the sheet;
+    // scoping this one to the sheet could break booking outright. It is an EXACT id, so it
+    // cannot match a button belonging to another load.
     var confirmBtn = document.querySelector('#rlb-book-trip-confirm-booking-btn');
     if (!confirmBtn) {
-      // Fallback: button with text "Book" inside any modal/overlay that appeared after step 1
-      var allBtns = document.querySelectorAll('button');
-      for (var j = 0; j < allBtns.length; j++) {
-        var t = allBtns[j].textContent.trim();
-        if (t === 'Book' || t === 'Confirm' || t === 'Confirm booking') { confirmBtn = allBtns[j]; break; }
+      // ITEM 2 (BACKLOG 0al): the FALLBACK is scoped to the sheet. It used to sweep
+      // document.querySelectorAll('button') across the WHOLE page and click the first thing
+      // whose text was 'Book' / 'Confirm' / 'Confirm booking' — for five seconds, on a booking
+      // path. Any such button anywhere on the page was a candidate. It now looks only inside
+      // the sheet element resolved above.
+      //
+      // ⚠ A CONSEQUENCE, STATED RATHER THAN HIDDEN: if Amazon portals the confirm dialog
+      // outside the sheet AND changes that button's id, the fallback will no longer find it and
+      // Fast Book will time out at 5 s instead of guessing. That is the correct direction to
+      // fail on a booking action — a timeout is recoverable, a wrong click is not.
+      var sheetBtnsForConfirm = sheet.querySelectorAll('button');
+      for (var j = 0; j < sheetBtnsForConfirm.length; j++) {
+        var t = sheetBtnsForConfirm[j].textContent.trim();
+        if (t === 'Book' || t === 'Confirm' || t === 'Confirm booking') { confirmBtn = sheetBtnsForConfirm[j]; break; }
       }
     }
     if (confirmBtn && confirmBtn !== bookBtn) {
-      clearInterval(pollInterval);
+      clearInterval(_fastBookPollInterval);
+      _fastBookPollInterval = null;
       if (isForbiddenElement(confirmBtn)) {
         logger.error('inlinePanel', 'executeFastBook: confirmBtn matched FORBIDDEN_SELECTORS — aborting', { id: confirmBtn.id });
         if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
@@ -422,7 +629,8 @@ function executeFastBook(sheetLoadId, fastBookBtn) {
         fastBookBtn.textContent = 'Booked!';
       }
     } else if (elapsed >= MAX_WAIT_MS) {
-      clearInterval(pollInterval);
+      clearInterval(_fastBookPollInterval);
+      _fastBookPollInterval = null;
       logger.error('inlinePanel', 'executeFastBook: confirm button not found within timeout', { elapsed: elapsed });
       if (fastBookBtn) { fastBookBtn.disabled = false; fastBookBtn.textContent = 'Fast Book'; }
     }
@@ -641,6 +849,15 @@ function buildActionBar() {
       ' aria-hidden="true">' + def[2] + '</svg>';
     bar.appendChild(btn);
   });
+
+  // GATE 1 of 3 (2026-08-27) — WITH FAST_BOOK_ENABLED FALSE THE BUTTON IS NEVER CREATED.
+  // Not hidden, not disabled: absent. Nothing to un-hide from the console, and the wiring block
+  // in showInlinePanel() finds no node, so no click listener is ever attached either.
+  // `typeof` guard so a context that has not loaded constants.js fails CLOSED, not open.
+  if (typeof FAST_BOOK_ENABLED === 'undefined' || FAST_BOOK_ENABLED !== true) {
+    logger.log('inlinePanel', 'buildActionBar: Fast Book is disabled in this build — no button');
+    return bar;
+  }
 
   // Fast Book button — text only, hidden until fastBookEnabled is confirmed
   var fastBookBtn = document.createElement('button');
@@ -1381,6 +1598,27 @@ function removeInlinePanel() {
   var old = document.getElementById(PANEL_ID);
   if (old) old.remove();
   currentPanelCard = null;
+
+  // ⚠ THE CONFIRM POLL DIES WITH THE PANEL (2026-08-27, BACKLOG 0al item 3). It used to be a
+  // local inside executeFastBook() that nothing outside could reach, so a 5-second poll that
+  // clicks a confirm button survived teardown.
+  //
+  // 🔑 THIS ONE SITE COVERS ALL FOUR enforcePanelAnchor() REMOVALS — verified 2026-08-27:
+  // enforcePanelAnchor() removes the panel by calling removeInlinePanel(), never by touching
+  // the node itself, on both of its removal branches. cityAssign.js:1806 / :3209 / :3311 and
+  // content.js:670 therefore all land here.
+  //
+  // ⚠ WHAT IT DOES NOT COVER, AND THAT IS OUT OF SCOPE BY INSTRUCTION: showInlinePanel()
+  // REPLACES a panel with `old.remove()` directly rather than calling this function, so a poll
+  // survives a panel being replaced by another load's. executeFastBook() cancels any live poll
+  // when it starts, which closes the two-polls-racing case; a poll left running after a plain
+  // replacement is still open. See BACKLOG 0al.
+  if (_fastBookPollInterval !== null) {
+    clearInterval(_fastBookPollInterval);
+    _fastBookPollInterval = null;
+    logger.log('inlinePanel', 'removeInlinePanel: cancelled an in-flight Fast Book confirm poll');
+  }
+
   if (_fastBookStorageListener) {
     chrome.storage.onChanged.removeListener(_fastBookStorageListener);
     _fastBookStorageListener = null;
@@ -1487,22 +1725,176 @@ function clickDiagOurLoadId(card) {
   }
 }
 
-// The first bare-UUID id inside Amazon's own detail sheet, if there is one. NOT confirmed from a
-// capture — there is no sheet sample on disk — so the line says so rather than asserting it.
-function clickDiagSheetLoadId() {
+// Every dollar amount in the open sheet, as numbers, de-duplicated.
+//
+// NO LOCALISED WORD IS USED AS AN ANCHOR. It does not look for "Payout", "Total" or any other
+// label — those are translated and re-worded, and anchoring on one would make this break
+// silently in another locale. It parses AMOUNTS ONLY.
+//
+// The sheet prints several amounts (the payout, and rate-per-mile figures), so this returns ALL
+// of them and the caller asks whether the record's payout is AMONG them. A per-mile figure is a
+// couple of dollars and a payout is hundreds, so the two do not realistically collide.
+//
+// If the currency symbol is ever localised away, this returns [] and the gate ABSTAINS. That is
+// the correct direction to fail for a SECOND line of defence: it must never become a new way to
+// block a legitimate booking.
+function sheetPayoutAmounts(sheet) {
+  logger.log('inlinePanel', 'sheetPayoutAmounts called');
   try {
-    var sheet = document.querySelector(SHEET_SELECTOR);
-    if (!sheet) return { present: false, id: null };
-    var re = clickDiagUuidRe();
-    var ids = sheet.querySelectorAll('div[id]');
-    for (var i = 0; i < ids.length; i++) {
-      if (re.test(ids[i].id)) return { present: true, id: ids[i].id };
+    if (!sheet) return [];
+    var text = sheet.textContent || '';
+    var re   = /\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/g;
+    var out = [], m;
+    while ((m = re.exec(text)) !== null) {
+      var v = parseFloat(m[1].replace(/,/g, ''));
+      if (isFinite(v) && out.indexOf(v) === -1) out.push(v);
     }
-    return { present: true, id: null };
+    return out;
   } catch (e) {
-    logger.error('inlinePanel', 'clickDiagSheetLoadId failed — diagnostics only', { error: e });
-    return { present: false, id: null };
+    logger.error('inlinePanel', 'sheetPayoutAmounts failed — returning none, so the payout gate ' +
+      'ABSTAINS rather than blocking a booking it could not read', { error: e });
+    return [];
   }
+}
+
+// THE SECOND GATE. The identity check answers "is this the right load?" from ids; this asks the
+// same question of the MONEY, which is the thing the dispatcher actually cares about being wrong.
+//
+// IT ABSTAINS RATHER THAN BLOCKS. If the record has no payout, or nothing parses out of the
+// sheet, the verdict is 'abstain' and booking proceeds on the identity check alone. A second
+// line of defence that can itself break booking is a liability, not a defence. It ABORTS only
+// when it has both numbers AND THEY DISAGREE — a positive contradiction, never an absence.
+//
+// Returns { verdict: 'match' | 'mismatch' | 'abstain', why, recordPayout, sheetAmounts }.
+function payoutGateFor(boundId, sheet) {
+  logger.log('inlinePanel', 'payoutGateFor called');
+  try {
+    var rec = (typeof getLoadRecord === 'function') ? getLoadRecord(boundId) : null;
+    if (!rec) return { verdict: 'abstain', why: 'no-record', recordPayout: null, sheetAmounts: [] };
+
+    // The curated record flattens payout to a NUMBER (networkObserver.js projectRecord). The raw
+    // API shape is { value, unit }, so both are accepted — the brief named the raw one.
+    var pay = rec.payout;
+    if (pay && typeof pay === 'object' && typeof pay.value === 'number') pay = pay.value;
+    if (typeof pay !== 'number' || !isFinite(pay)) {
+      return { verdict: 'abstain', why: 'record-has-no-payout', recordPayout: null, sheetAmounts: [] };
+    }
+
+    var amounts = sheetPayoutAmounts(sheet);
+    if (!amounts.length) {
+      return { verdict: 'abstain', why: 'no-amount-in-sheet', recordPayout: pay, sheetAmounts: [] };
+    }
+    for (var i = 0; i < amounts.length; i++) {
+      if (Math.abs(amounts[i] - pay) <= PAYOUT_TOLERANCE) {
+        return { verdict: 'match', why: 'matched', recordPayout: pay, sheetAmounts: amounts };
+      }
+    }
+    return { verdict: 'mismatch', why: 'no-amount-matches', recordPayout: pay, sheetAmounts: amounts };
+  } catch (e) {
+    logger.error('inlinePanel', 'payoutGateFor failed — ABSTAINING, so a broken second gate ' +
+      'cannot block a booking the identity check already approved', { error: e });
+    return { verdict: 'abstain', why: 'threw', recordPayout: null, sheetAmounts: [] };
+  }
+}
+
+// The id of the load Amazon currently has OPEN, read from the SELECTED CARD ON THE BOARD.
+//
+// DEAD HYPOTHESIS — DO NOT RE-DERIVE IT (measured on a real board, 2026-08-27)
+// This function used to read the id out of the detail sheet itself. THE SHEET DOES NOT CARRY
+// THE LOAD ID. Measured, not guessed: #selected-work-sheet contains exactly eight elements with
+// an id — rlb-book-btn, rlb-book-trip-no-btn, rlb-book-trip-confirm-booking-btn, alert-:r7j:,
+// alert-:r7j:-children, expanded-header, alert-:r7k:, alert-:r7k:-children — and NONE is a load
+// id. A full attribute scan of the sheet found ZERO UUIDs and no work/load/opportunity-named
+// attribute. The id is not in the URL either; it stays /loadboard/search.
+//
+// THAT DEFECT WAS LIVE. Reading the sheet returned null every single time, so the Fast Book
+// identity guard — which fails closed by design — aborted EVERY press with sheetLoadId
+// '(missing)'. Fast Book was blocked outright. If a future change is tempted back toward the
+// sheet for this id, that is the bug being reintroduced.
+//
+// THE REAL SOURCE, also measured: Amazon marks the open card on the board with the class
+// load-card__selected, and that card contains exactly ONE bare UUID. See AMAZON_SELECTORS.md.
+//
+// ⚠ THIS IS NO LONGER DIAGNOSTICS-ONLY, AND THAT IS WHY IT WAS RENAMED (2026-08-27). The Fast
+// Book identity check depends on it, so a future cleanup must not delete it as debug code or
+// soften its error path. Its old name and its old "diagnostics only" catch message both said it
+// was expendable; neither is true now.
+//
+// 🔑 ONE DEFINITION OF THE ID-SHAPE RULE. clickDiagSheetLoadId() below delegates here rather
+// than keeping its own copy. Three copies of a card lookup have already cost this project once
+// (two were fixed, the third kept the bug alive) — that is not repeated for a booking check.
+//
+// ⚠ EVERY FAILURE RETURNS id: null, DELIBERATELY. Callers must treat "no id" as "do not
+// proceed". A board that is absent, unmarked, or unreadable must never look like agreement.
+//
+// `reason` says WHICH failure it was, because they are not the same problem: 'no-selected-card'
+// means AMAZON'S CLASS CHANGED and every press will now block, whereas 'no-uuid' / 'ambiguous'
+// mean the markup inside the card moved. The caller turns that into distinct wording.
+function sheetOpenLoadId() {
+  logger.log('inlinePanel', 'sheetOpenLoadId called');
+  try {
+    // THE SHEET IS STILL REQUIRED. `present` still means the DETAIL SHEET is open and booking
+    // still refuses without it. Only the SOURCE OF THE ID moved to the board — the sheet is what
+    // carries the Book button, so its absence still means there is nothing to press.
+    var sheet = document.querySelector(SHEET_SELECTOR);
+    if (!sheet) return { present: false, id: null, reason: 'no-sheet' };
+
+    var cards = document.querySelectorAll(SELECTED_CARD_SELECTOR);
+    if (!cards || !cards.length) {
+      // LOUD ON PURPOSE. This is the shape a changed Amazon class takes, and it would block every
+      // booking until someone noticed. It must never be a quiet null — that was the 2026-08-27
+      // defect exactly.
+      logger.error('inlinePanel', 'sheetOpenLoadId: THE SELECTED-CARD MARKER WAS NOT FOUND. ' +
+        'Nothing on the page matches the marker, so the open load cannot be identified and Fast ' +
+        'Book will refuse to book. This is what a changed Amazon class looks like — re-measure ' +
+        'the board and update AMAZON_SELECTORS.md.', { selector: SELECTED_CARD_SELECTOR });
+      return { present: true, id: null, reason: 'no-selected-card' };
+    }
+
+    // THE ID-SHAPE RULE IS REUSED, NOT RECOPIED. clickDiagUuidRe() resolves to cityAssign's
+    // CARD_UUID_RE when that file is loaded, so there is one definition of what a load id looks
+    // like. cardLoadIdFor() is deliberately NOT called here: it falls back to the first div[id]
+    // when no UUID is present, which is right for RENDERING a panel and wrong for a BOOKING gate
+    // — that fallback would hand back a badge id and let a press through on an unidentified load.
+    var re = clickDiagUuidRe();
+    var distinct = [];
+    for (var c = 0; c < cards.length; c++) {
+      var card = cards[c];
+      if (card.id && re.test(card.id) && distinct.indexOf(card.id) === -1) distinct.push(card.id);
+      var els = card.querySelectorAll ? card.querySelectorAll('[id]') : [];
+      for (var i = 0; i < els.length; i++) {
+        var eid = els[i].id;
+        if (eid && re.test(eid) && distinct.indexOf(eid) === -1) distinct.push(eid);
+      }
+    }
+
+    if (!distinct.length) {
+      logger.error('inlinePanel', 'sheetOpenLoadId: the selected card carries NO UUID-shaped id, ' +
+        'so the open load cannot be identified', {
+          selector: SELECTED_CARD_SELECTOR, selectedCards: cards.length
+        });
+      return { present: true, id: null, reason: 'no-uuid' };
+    }
+    if (distinct.length > 1) {
+      // AMBIGUITY IS REFUSED, NEVER GUESSED. Two distinct ids under the selected marker means we
+      // do not know which load is open, and picking one would be inventing the answer.
+      logger.error('inlinePanel', 'sheetOpenLoadId: MORE THAN ONE distinct load id under the ' +
+        'selected-card marker — refusing to guess which load is open', {
+          selector: SELECTED_CARD_SELECTOR, count: distinct.length, ids: distinct.slice(0, 4)
+        });
+      return { present: true, id: null, reason: 'ambiguous' };
+    }
+    return { present: true, id: distinct[0], reason: 'ok' };
+  } catch (e) {
+    logger.error('inlinePanel', 'sheetOpenLoadId failed — reporting NO id, so every caller ' +
+      'fails closed rather than proceeding on an unread board', { error: e });
+    return { present: false, id: null, reason: 'error' };
+  }
+}
+
+// Kept as the CLICKDIAG-facing name so its existing callers do not change. One implementation.
+function clickDiagSheetLoadId() {
+  return sheetOpenLoadId();
 }
 
 function initClickZoneDiagnostic() {
@@ -1887,3 +2279,138 @@ window.__EXT_DEBUG.showPanel        = function () {
 };
 window.__EXT_DEBUG.removePanel      = removeInlinePanel;
 window.__EXT_DEBUG.initManualToggle = initManualToggle;
+
+// ── FAST BOOK REHEARSAL (2026-08-27) ──────────────────────────────────────────────────────
+//
+// WHY: Ihor will not press Fast Book on a live board — a wrong click costs a real load and a
+// cancellation ding. These let him watch the identity guard work with no booking possible.
+//
+// 🔑 THE PROPERTY THAT MAKES THIS SAFE, and it is structural rather than lucky: on a mismatch
+// executeFastBook() aborts BEFORE bookBtn.click(). So a forced mismatch exercises the whole
+// pre-click path and cannot reach a click by construction.
+//
+// console.* on purpose, like the simulate* helpers, so they work at the shipped DEBUG_LEVEL.
+//   __EXT_DEBUG.fastBookDryRun()          rehearse against the sheet that is open NOW
+//   __EXT_DEBUG.fastBookForceMismatch()   make the NEXT real press abort, once
+
+// Runs the REAL pre-click sequence and stops immediately before the Book click.
+//
+// ⚠ IT CANNOT CLICK, AND HERE IS WHY. It passes dryRun = true, and executeFastBook() returns on
+// that flag on the line before bookBtn.click(); the confirm poll is started later still. Those
+// are the only two .click() calls in the function. It also passes fastBookBtn = null, so it
+// cannot even change the button's appearance.
+window.__EXT_DEBUG.fastBookDryRun = function () {
+  logger.log('inlinePanel', 'fastBookDryRun called');
+  try {
+    // Say it plainly rather than running a rehearsal whose every line would read "would abort"
+    // for a reason that has nothing to do with the guards it exists to demonstrate.
+    if (typeof FAST_BOOK_ENABLED === 'undefined' || FAST_BOOK_ENABLED !== true) {
+      console.log('[EXT] Fast Book is DISABLED IN THIS BUILD (FAST_BOOK_ENABLED is false), so ' +
+        'there is nothing to rehearse.' +
+        '\n      No button is created, the popup toggle is not rendered, and executeFastBook()' +
+        '\n      refuses at entry. Set FAST_BOOK_ENABLED = true in utils/constants.js to restore it.');
+      return { disabled: true };
+    }
+    var panel = document.getElementById(PANEL_ID);
+    if (!panel) {
+      console.log('[EXT] fastBookDryRun: no inline panel is open. Click a load card first.');
+      return null;
+    }
+    // The id the panel is BOUND to — the same value the button's closure holds, written to the
+    // panel at render time. Read from the DOM rather than re-derived.
+    var boundId = panel.getAttribute('data-load-id');
+    var open    = sheetOpenLoadId();
+    var openId  = open ? open.id : null;
+    var openWhy = open ? open.reason : 'error';
+    var match   = !!(boundId && openId && boundId === openId);
+
+    // THE REAL FUNCTION, REAL CHECKS. Not a copy of them.
+    var outcome = executeFastBook(boundId, null, true);
+
+    // THE TWO GATES ARE PRINTED SEPARATELY, on purpose. They fail for different reasons and one
+    // can abstain while the other passes; collapsing them into a single verdict would hide which
+    // one actually stood behind the booking.
+    var sheetEl = document.querySelector(SHEET_SELECTOR);
+    var pay     = payoutGateFor(boundId, sheetEl);
+    // Parsed here for DISPLAY. The gate short-circuits before parsing when it has no record to
+    // compare against, so pay.sheetAmounts would read '(none parsed)' on a sheet that plainly
+    // shows a payout — a diagnostic that misreports the page is worse than no diagnostic.
+    var shown   = sheetPayoutAmounts(sheetEl);
+    var money   = function (a) { return '$' + a.toFixed(2); };
+    var payLine;
+    if (pay.verdict === 'match') {
+      payLine = 'PASS  (the record payout appears in the open sheet)';
+    } else if (pay.verdict === 'mismatch') {
+      payLine = 'FAIL  (no amount in the sheet matches the record)';
+    } else {
+      payLine = 'ABSTAINED  (' + pay.why + ' — this gate checked nothing; it does not block)';
+    }
+
+    console.log('[EXT] FAST BOOK DRY RUN' +
+      '\n      sheet present                 : ' + !!(open && open.present) +
+      '\n      selected-card marker          : ' +
+        (openWhy === 'no-selected-card'
+          ? 'NOT FOUND — the Amazon class changed, see the error above'
+          : 'found') +
+      '\n' +
+      '\n      GATE 1  identity' +
+      '\n        bound load id (this panel)  : ' + (boundId || '(missing)') +
+      '\n        load id on the SELECTED card: ' + (openId || '(missing)') +
+      '\n        ids match                   : ' + match +
+      '\n' +
+      '\n      GATE 2  payout' +
+      '\n        record payout               : ' +
+        (pay.recordPayout === null ? '(none captured)' : money(pay.recordPayout)) +
+      '\n        amounts read from the sheet : ' +
+        (shown.length ? shown.map(money).join(', ') : '(none parsed)') +
+      '\n        verdict                     : ' + payLine +
+      '\n' +
+      '\n      Book button found             : ' + (outcome !== 'no-sheet' && outcome !== 'no-book-button') +
+      '\n      outcome                       : ' + outcome +
+      '\n      -> ' + (outcome === 'dry-run-would-click'
+        ? 'WOULD CLICK  (' + (pay.verdict === 'match'
+                              ? 'both gates cleared'
+                              : 'identity cleared, payout abstained') +
+          '; a real press would book this load)'
+        : 'WOULD ABORT  (' + outcome + ' — a real press would NOT click anything)') +
+      '\n      NOTHING WAS CLICKED.');
+    return {
+      boundId: boundId, sheetId: openId, match: match, outcome: outcome,
+      markerFound: openWhy !== 'no-selected-card',
+      payout: pay.verdict, recordPayout: pay.recordPayout, sheetAmounts: pay.sheetAmounts
+    };
+  } catch (e) {
+    logger.error('inlinePanel', 'fastBookDryRun failed — rehearsal only, the booking path is ' +
+      'unaffected', { error: e });
+    return null;
+  }
+};
+
+// Arms a ONE-SHOT corruption of the BOUND id, so the next real press of the Fast Book button
+// takes the abort branch. The sheet is untouched and Amazon's DOM is untouched — only our own
+// side of the comparison is spoiled, which is the half we are allowed to spoil.
+//
+// ⚠ It clears itself the instant executeFastBook() reads it, so it survives exactly ONE press,
+// and it does not survive a refresh. If it is armed and never used, a reload clears it.
+window.__EXT_DEBUG.fastBookForceMismatch = function () {
+  logger.log('inlinePanel', 'fastBookForceMismatch called');
+  try {
+    if (typeof FAST_BOOK_ENABLED === 'undefined' || FAST_BOOK_ENABLED !== true) {
+      console.log('[EXT] Fast Book is DISABLED IN THIS BUILD (FAST_BOOK_ENABLED is false). ' +
+        'Nothing was armed — there is no press for the flag to affect.');
+      return false;
+    }
+    _fastBookForceMismatchOnce = true;
+    console.log('[EXT] FAST BOOK FORCE MISMATCH — ARMED for ONE press.' +
+      '\n      Now press the Fast Book button on the open panel.' +
+      '\n      Expect: NO booking, the button disabled reading "Blocked — wrong load open",' +
+      '\n              and an "executeFastBook: ABORTED" line naming both ids.' +
+      '\n      The click is unreachable: the abort returns before bookBtn.click().' +
+      '\n      Clears itself after that one press, or on refresh.');
+    return true;
+  } catch (e) {
+    logger.error('inlinePanel', 'fastBookForceMismatch failed — nothing was armed', { error: e });
+    return false;
+  }
+};
+

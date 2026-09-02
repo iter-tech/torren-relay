@@ -2,6 +2,695 @@
 
 ## [Unreleased]
 
+### 2026-08-31 (fourth) — Domain coverage audit: manifest and code cross-checked against the 11
+
+**Audit + one comment correction.** No behaviour changed.
+
+**Manifest — all three lists are EXACT.** Verified by set comparison, not by eye or by count:
+`host_permissions`, `content_scripts[0].matches` (the 30 isolated-world files) and
+`content_scripts[1].matches` (MAIN world, `networkObserver.js`) each contain exactly the eleven
+confirmed Relay domains — **no missing region, no extra, no duplicate, no typo**, and the three
+agree with each other. The only non-Relay host permission is `https://*.supabase.co/*`, which is
+the auth backend.
+
+**Domain matching — all eleven are equal.** `isLoadBoardPage()` **never reads the hostname at
+all**; it matches on the path segment alone, so activation, injection and gating cannot vary by
+domain. `warnIfUnrecognisedRelayPage()` reads the host **only to print it** — no comparison, no
+suppression, since the `.com` silence was removed earlier the same day.
+
+🔑 **There is exactly ONE live host comparison in the entire extension** — measured across twelve
+shipped files, one literal, in `radiusUnitCaveat()` (`content/cityAssign.js`). ⚠ That asymmetry
+is **deliberate and unrelated to domain support**: it concerns the radius UNIT being unknown on a
+metric board, and it **gates no behaviour** — it appends a caveat to a diagnostic line.
+
+⚠ **Edge case checked, since `.co.uk` and `.co.jp` share the `relay.amazon.co` prefix:** that
+comparison is `indexOf('relay.amazon.com')`, and all eleven classify correctly — no near-miss is
+misread as `.com`.
+
+#### The one discrepancy found, and fixed
+
+`utils/constants.js` — the header above `warnIfUnrecognisedRelayPage()` still said *"On
+relay.amazon.com the path is measured, so not activating on /dashboard is CORRECT and stays
+quiet. On the other ten domains…"*. **That behaviour was removed earlier the same day and the
+comment was left behind**, so the header stated the opposite of the code beneath it — the same
+trap the `CITY_FILTER_ENABLED` "Shipped OFF" header set. Corrected, and it now also records where
+the single deliberate `.com` asymmetry lives, so the next reader does not have to grep for it.
+
+**Tests — `pagegate-suite` 76 → 86. 2712 green.** The manifest check was **strengthened from a
+count to an exact set comparison** (a count of 11 would pass with a typo'd domain and a missing
+one cancelling out), extended to the MAIN-world block, and now asserts the three lists agree with
+each other. A new section drives all eleven hosts through the gate: each activates on
+`/loadboard/search`, each declines on `/dashboard`, and **each warns — no domain is silenced**.
+The single-host-comparison count is pinned so the asymmetry cannot spread.
+
+⚠ One assertion I wrote read a field the helper does not return and failed for all eleven; that
+was the test catching my mistake, not the code's. Fixed to invoke the function.
+
+### 2026-08-31 (third) — 🔴 ROOT CAUSE: the gate cached the page check and went stale
+
+**Files:** `utils/authGate.js`, `content/content.js`. **This is the actual cause of the
+non-activation.** The two earlier same-day entries fixed real things but not this.
+
+#### The evidence that settled it
+
+Ihor ran both probes on the live board:
+
+```
+__EXT_DEBUG.pageGate()   ->  pathname /loadboard/search, isLoadBoardPage : true
+getAuthGate()            ->  { active:false, sessionActive:true, onLoadBoard:false }
+```
+
+🔑 **The page check said TRUE and the gate said FALSE at the same instant.** That is not a path
+bug — it is a **stale cached value**, and it ruled out everything the previous two fixes touched.
+
+#### The mechanism
+
+`getAuthGate()` cached the **composed** result — session **and** page — for the life of the page:
+
+```js
+if (!_authGatePromise) _authGatePromise = _checkAuthGateOnce().then(_handleGateResult);
+return _authGatePromise;                      // composed ONCE, frozen forever
+```
+
+The first caller is **`content/nightMode.js`, content script #12**; `content/content.js` is
+**#31**. On an SPA that routes after load, the gate was composed nineteen scripts early, while the
+pathname was still the pre-route one, and `onLoadBoard: false` was frozen. Every later caller —
+including the one that activates the UI — got the stale answer.
+
+⚠ **AND THE NAVIGATION WATCH COULD NOT RESCUE IT.** It was an **edge detector**: it seeded
+`_navWatchLastPath` with the *current* path when `content.js` (#31) ran — by then already
+`/loadboard/search` — and then only acted when the path CHANGED. It never changed again.
+**An edge detector cannot detect an edge it started after.**
+
+#### Fix 1 — the session check and the page check no longer share a cache
+
+The session check is expensive (storage read plus a Supabase `setSession`/refresh) and is rightly
+cached. **The page check is a string split.** Caching the cheap one alongside the costly one is
+what made a stale answer permanent. Now the **session result** is cached and the **page check is
+recomposed on every call**, so `getAuthGate()` is correct whenever it is asked. ⚠ The expensive
+check still runs exactly once — asserted.
+
+#### Fix 2 — the watch reconciles STATE instead of detecting an edge
+
+Each tick now asks **"does the gate still agree with the page?"** (`authGateOnLoadBoardSync()` vs
+`isLoadBoardPage()`) rather than "did the path change?". That is true regardless of script
+ordering, regardless of what the path was at any moment, and **it self-heals** — which an edge
+detector never can once it has missed the edge. A not-yet-composed gate (`null`) is not treated as
+disagreement. ⚠ No recheck storm: the comparison is on `onLoadBoard` alone, never on `active`, so
+the call it triggers resolves the disagreement even when the session is invalid.
+
+#### Tests — `pagegate-suite` 60 → **76**. **2702 green**
+
+A new section reproduces the exact live sequence: compose the gate at a pre-route path, route to
+the board, and assert `getAuthGate()` agrees. 🔑 **NEGATIVE CONTROL RUN** — with the old shared
+cache restored it returns
+`{"active":false,"sessionActive":true,"onLoadBoard":false}`, **character-for-character the shape
+Ihor pasted.**
+
+⚠ **Three of my own test defects, found and fixed rather than worked around:**
+1. An assertion I had just written ended `? true : true` and **could never fail**. Deleted; the
+   awaited version beside it does the real check.
+2. Two assertions encoded the OLD behaviour — "an unchanged path does no work" is precisely what
+   left the extension dead. Now conditional: no work **while the gate agrees**.
+3. Two regexes were mangled by shell escaping (`\\(` collapsing to `(`) and silently matched
+   nothing. Replaced with `indexOf` on exact source lines — nothing left to mangle.
+
+🔑 **The deeper lesson, recorded in BACKLOG 0av:** the original suite tested `isLoadBoardPage()`
+with a stub location and the gate composition with a **stubbed** `isLoadBoardPage`. Both halves
+passed while the real pair, sharing one global and one cache, was broken. **Two correct halves
+tested separately are not a tested whole.**
+
+### 2026-08-31 (later) — FIX: the page gate rejected the load board itself
+
+**File:** `utils/constants.js` (+ a probe in `content/cityAssign.js`). **Same-day follow-up to
+the page-gate change above, which broke activation on the one page it was meant to allow.**
+
+#### What was reported
+
+Nothing rendered on `relay.amazon.com/loadboard/search` — no sidebar, no top bar. Scripts loaded
+with no console errors, `sessionActive: true`, and `onLoadBoard: false`.
+
+#### ⚠ The stated root cause did not hold as written, and saying so mattered
+
+`isLoadBoardPage()` was **provably correct for the literal string `/loadboard/search`** — the
+source was byte-checked, and driving the real `constants.js` and `authGate.js` together in one
+shared global returned `{active:true, onLoadBoard:true}` for exactly that pathname. **The bug was
+therefore not the string comparison, and "fixing" it would have changed correct code.**
+
+🔑 **What that leaves is the only reading consistent with both facts: the live
+`window.location.pathname` was NOT the literal `/loadboard/search`.** A prefix — locale, region,
+app root — is the ordinary reason, and the old rule required `loadboard` to be the **FIRST**
+segment, which rejects every prefixed form.
+
+⚠ **WHICH prefix is still unknown, and is NOT guessed here.** The fix accepts all of them.
+
+#### The fix
+
+**`isLoadBoardPage()` now matches ANY path segment equal to `loadboard`**, not just the first.
+`/loadboard/search`, `/us/loadboard/search`, `/app/loadboard` and any deeper prefix all activate.
+
+⚠ **Still SEGMENT equality, not a substring test.** `/loadboards/search`, `/loadboard-archive`,
+`/myloadboard` and `/x/loadboards/y` are all still correctly rejected — a substring test would
+have accepted every one.
+
+#### 🔑 The second fix, and the more important one: the diagnostic was silenced where it was needed
+
+The warning added earlier the same day **returned early on `relay.amazon.com`**, reasoning that
+the path was measured there so declining was always correct and a warning would be noise.
+
+**That was the wrong call and it is now removed.** When the extension failed to activate on
+`.com`, the one line that would have printed the real pathname was suppressed on precisely the
+domain where it was needed, and the answer had to be reconstructed from source. **A gate that
+declines silently is the exact failure this warning exists to prevent; the domain it happens on
+does not change that.** The cost is one deduped console line per distinct non-board path.
+
+**New: `__EXT_DEBUG.pageGate()`** prints the actual `pathname`, the segments it split into, what
+it was looking for, and the verdict in words — so "why is nothing showing up" is answerable in
+one line from the console instead of by inspection.
+
+#### Tests — `pagegate-suite` 46 → **60**. **2686 green** (from 2672)
+
+New section for prefixed board paths. ⚠ **TWO assertions were REVERSED deliberately, each
+labelled in place with why:**
+1. `/app/loadboard` asserted it must **not** match. That exclusion was my own invention — no
+   evidence required it — and the first-segment rule it encoded is exactly what rejects a
+   prefixed board path. Tolerating a prefix is worth more than excluding a hypothetical route,
+   because the observed failure was the extension not starting at all.
+2. `.com` asserted the warning must stay **silent**. That silence is what made this
+   undiagnosable.
+
+⚠ One guard was **narrowed, not weakened**: "nobody re-derives the rule" banned any mention of the
+segment name, which `pageGate()` trips by printing it. It now forbids a **comparison** —
+`=== LOAD_BOARD_PATH_SEGMENT` or a `'loadboard'` literal — outside `constants.js`. Verified
+against two planted second copies, both caught, while the diagnostic interpolation is allowed.
+
+⚠ **Not verified live.** The gap that produced this bug — my suite tested `isLoadBoardPage()` and
+the gate composition in **separate** sandboxes, never the real pair together — is now closed by a
+shared-global check.
+
+### 2026-08-31 — FIX: the extension now runs ONLY on the Load Board
+
+**Files:** `utils/constants.js`, `utils/authGate.js`, `content/content.js`,
+`content/highlighter.js`, `content/priceSurge.js`.
+
+#### The defect
+
+**There was no page check anywhere — only a LOGIN check.** Every module gated on
+`getAuthGate()`, which asks "is the dispatcher signed in", and nothing asked "is this the load
+board". So the top bar appeared on any Relay page, and on `/dashboard` it floated mid-screen over
+Amazon's own UI about half a second after the page opened.
+
+#### 1. ONE definition — `isLoadBoardPage()` (`utils/constants.js`)
+
+Matches on the **first path segment** (`loadboard`). ⚠ Deliberately NOT an exact match on the
+measured `/loadboard/search`: a sibling board route would then read as a non-board page and the
+extension would go dark with no explanation. `/loadboards`, `/app/loadboard` and
+`/loadboard-archive` are all correctly excluded.
+
+🔑 **It is defined once and nothing re-derives it.** `pagegate-suite` asserts that no other file
+contains the segment name at all — they may only *call* it. ⚠ `content.js` reads
+`location.pathname`, but only to notice that navigation **happened**; the decision is delegated.
+
+#### 2. The check composes into the gate, so nothing is scattered
+
+`utils/authGate.js` `_handleGateResult()` — the single funnel every check already passes
+through — now returns `active = sessionActive && isLoadBoardPage()`.
+
+🔑 **This covers every consumer with one line and no new plumbing.** content.js's
+activate/deactivate pair, nightMode, filterSimilar, filterTags — all already subscribe to
+`onAuthGateChange` and all already have working teardown. Leaving the board fires the SAME
+transition a logout does, so `deactivateExtensionUI()` and every sibling deactivate run through
+paths that are already tested.
+
+⚠ **The session result is NOT overwritten.** The gate now carries `sessionActive` and
+`onLoadBoard` separately, and the startup log reports both — "not logged in" and "not on the load
+board" are different problems and must never look alike in a console someone is debugging from.
+
+⚠ **`authGate.js` is a content script only; `popup.html` does not load it.** Logging in from the
+popup therefore still works on every page, which is what we want.
+
+#### 3. SPA navigation — the part a manifest-only fix would miss
+
+Amazon does **not** reload the page between Dashboard and Load Board, so a check that runs once at
+`document_idle` is right exactly once and wrong from the first click onward.
+
+**The signal chosen, and why:** a **poll of `location.pathname` plus `popstate`.**
+- `popstate` alone is not enough — it fires on back/forward only, never on the `pushState()` an
+  SPA uses for an ordinary in-app click, which is the case in the bug report.
+- Patching `history.pushState` would catch those, but it means writing to a global of Amazon's
+  page. **This extension does not modify Amazon's JS anywhere, and a visibility fix is not the
+  place to start.**
+- `chrome.webNavigation` would need a new permission, days after the permission set was cut to
+  the two that are actually used.
+
+One `setInterval` at `NAV_WATCH_POLL_MS = 500` doing a single string comparison, plus `popstate`
+so back/forward feels instant. 🔑 **It starts BEFORE the gate's early return**, because "navigated
+FROM the dashboard TO the board" is a transition only an INACTIVE tab can observe — starting it
+after would mean a tab opened on `/dashboard` never woke up, which is the same bug moved.
+
+#### 4. Everything else we inject — audited, and two were leaking off-board
+
+| what | before | now |
+|---|---|---|
+| top bar / sidebar + `ext-sidebar-styles` | on every Relay page — **the reported symptom** | gated |
+| city buttons, inline panel, cityAssign, night mode, Similar-matches hide, filterTags | gated on login only | gated — they compose through the same gate |
+| **`highlighter.js` CSS** | ❌ **injected at MODULE LOAD on every Relay page** | gated |
+| **`priceSurge.js` CSS** | ❌ **injected at MODULE LOAD on every Relay page** | gated |
+| `inlinePanel` / `patModal` CSS | injected lazily on first use — never off-board | unchanged |
+| `tabAlert` listeners | registered at load, but only *fire* from the pipeline | unchanged, inert |
+
+⚠ **ONE thing is deliberately NOT gated: `utils/designTokens.js`.** It injects `:root` custom
+properties and is listed **first** in `content_scripts` **by deliberate design** — its own header
+says so, "so all `--ext-*` custom properties are on `:root` before any other extension script
+runs". It therefore loads before `constants.js` and cannot see `isLoadBoardPage()`. Gating it
+would mean reordering the load sequence against an explicit design note. **It is inert off-board
+— custom properties only, matching nothing of Amazon's — so it is reported rather than reordered
+unilaterally.** Ihor's call.
+
+#### 🔴 The path is measured on ONE domain out of eleven
+
+Every capture on disk is from `relay.amazon.com`; the other ten appear once each in the
+manifest's host list and in no capture. **So the path is not guessed for them** — the rule is the
+broadest the evidence supports (first segment), and an unrecognised Relay page on a non-`.com`
+domain emits a **`console.warn`** naming the host and path and saying the extension did not
+activate. ⚠ **`console.warn`, not `logger.warn`** — the latter is silenced at `DEBUG_LEVEL 1`,
+which is how the radius caveat ended up invisible in a shipped build. Deduped per path.
+
+⚠ **The manifest was NOT narrowed**, as instructed: all eleven domains remain in
+`host_permissions` and `content_scripts.matches`, and the gating is in code — so a wrong pattern
+cannot cut off a whole domain. `pagegate-suite` asserts the count is still eleven.
+
+#### Tests — new `pagegate-suite`, 46 checks. **2672 green** (from 2626)
+
+On/off-board paths including the near-misses; the warning's content, dedupe and `.com` silence;
+the gate composition in all four session×page combinations; the SPA watch ordering; both style
+injections; and that the manifest still matches eleven domains.
+
+🔑 **NEGATIVE CONTROL RUN.** With the composition reverted the suite fails 5, and the gate returns
+`{"active":true}` on a non-board page — the reported bug, reproduced.
+
+⚠ Two harness gaps fixed rather than worked around: `autoopen-suite`'s `logger.log` stub
+discarded its data argument (its `error` stub already kept it), and its bail assertion matched the
+old message text. The assertion was **strengthened**, not relaxed — it now also asserts the log
+says WHICH gate closed.
+
+⚠ **Not verified live — there is no browser here.**
+
+### 2026-08-28 — FIX: the PAT modal's accumulating keydown listener
+
+**File:** `content/patModal.js`. **Teardown only** — nothing about when the modal closes, what
+closes it, or the PAT flow itself was touched.
+
+#### The defect
+
+`onKey` was attached to `document` at build time but removed **only inside its own Escape
+branch**. `removePatModal()` removed the element and nothing else. So every modal closed by the
+**backdrop** (`:331`, `:1094`), by **Confirm** (`:1635`), by the **× or footer Close**, or
+**replaced** by opening another (`:325`, `:1088`) left one keydown listener on `document` for the
+life of the page — each closing over its own modal's scope, so **the modal itself could not be
+collected either**.
+
+🔑 **This was the ONLY listener the 2026-08-28 leak inventory found that accumulates with ordinary
+dispatcher use.** Everything else registers once or has matching teardown. ⚠ Replacement is the
+common path: every Post A Truck click replaces whatever modal was there.
+
+#### The fix — one place, covering every close path by construction
+
+The handler is stored **on the overlay element** and `removePatModal()` removes it. ⚠ **The
+pattern was REUSED, not invented** — it is exactly what the sidebar's drag listeners already do
+(`content.js:795-797` reads `_extDragMove` / `_extDragUp` off the element it is about to remove).
+
+Because **nothing outside `patModal.js` removes the overlay** (verified: `PAT_MODAL_ID` appears in
+no other file), `removePatModal()` is the single teardown point, so cleaning up there covers
+every close path **by construction rather than by each call site remembering**.
+
+⚠ **The Escape branches are UNCHANGED and still remove the listener themselves.** On that path
+`removeEventListener` therefore runs twice with the same arguments, which is a **defined no-op in
+the DOM spec, not an error**. Leaving them alone is deliberate: it guarantees this change cannot
+alter when or how the modal closes. The handle is read **before** the node is detached, so the
+order of those two lines can never matter.
+
+#### Also found, and deliberately NOT fixed (out of scope for this task)
+
+- 🟡 **`patModal.js:1522-1523` — the drag listeners are removed LAZILY.**
+  `document.addEventListener('mousemove'/'mouseup')` are removed inside `onDragEnd` only when
+  `!overlay.isConnected` (`:1516-1519`), i.e. on the **next mouseup anywhere on the page** after
+  the modal closes. In practice the dispatcher clicks again within seconds, so they do clear —
+  but if a modal is closed with Escape and the mouse is never used again, two listeners persist.
+  **Bounded and self-healing, unlike the keydown leak, which was permanent.**
+- ✅ **Nothing else is left behind.** `patModal.js` registers **no intervals**, **no storage
+  subscriptions** and **no tabState subscriptions**. Its two `setTimeout`s (`:308` 200 ms date
+  hide, `:1632`/`:1635` the 300 ms close after Confirm) are untracked but self-completing, and
+  `setTimeout(removePatModal, 300)` on an already-closed modal is harmless — `getElementById`
+  returns null and the function returns.
+
+#### Tests — new `patleak-suite`, 28 checks
+
+A separate file, because `patmodal-suite` stubs `document.addEventListener` as a **no-op**, which
+is precisely why it could never have caught this. The new harness **tracks** document listeners
+and captures element listeners so the backdrop click can be fired for real. It drives **all four
+close paths** — Escape, backdrop, Confirm/×/Close, and **replacement** — against both
+`showSimplePatModal()` and the real `openPostModal()`.
+
+🔑 **NEGATIVE CONTROL RUN, not assumed.** With the fix reverted the suite fails **15 of 28**, and
+the counts read the leak exactly: *"still ONE after five opens"* reported **5**. Escape kept
+passing — it always worked — which is what proves the suite discriminates rather than just
+failing loudly. **2625 green with the fix restored.**
+
+⚠ **Not verified live — there is no browser here.** See the report for what Ihor must check.
+
+### 2026-08-27 — 🔑 Fast Book GATED OFF for 1.0 (`FAST_BOOK_ENABLED = false`)
+
+**Ihor's product decision.** **Files:** `utils/constants.js`, `content/inlinePanel.js`,
+`popup/popup.html`, `popup/popup.js`.
+
+#### Why a build-time constant and not a default
+
+The manifest says the extension *"does NOT book loads"*, while Fast Book clicks Amazon's Book
+button and its confirm button. **For 1.0 that sentence has to be true of the SHIPPED BUILD, not
+of the default settings** — a reviewer reads the source, and a booking path sitting one storage
+write away from firing does not match the description.
+
+#### Three independent gates — any ONE is sufficient
+
+1. **`buildActionBar()`** — the button is **never created**. Not hidden: absent. The wiring block
+   in `showInlinePanel()` then finds no node, so **no click listener is attached either**.
+2. **`popup.js`** — the **Booking section is REMOVED from the DOM** (the markup is now wrapped in
+   `#popup-booking-block`). ⚠ Divider and heading go with it — an empty "Booking" heading would
+   read as a bug rather than a decision.
+3. **`executeFastBook()`** — **refuses at entry**, returning `'disabled'`. 🔑 It is the **first
+   statement, above every DOM read** — above the sheet lookup and above the rehearsal flag — so
+   the refusal covers the whole function and the "No DOM was read" log line is a fact.
+
+⚠ **All three fail CLOSED on a missing constant** (`typeof … === 'undefined' || … !== true`), so
+a context that never loaded `constants.js` refuses rather than proceeding.
+
+#### Nothing was deleted
+
+The click sequence, identity gate, payout gate, rehearsal helpers and `fastbook-suite` are all
+present and unmodified. **Flipping the constant to `true` restores today's behaviour exactly.**
+This is a 1.1 re-enable behind one line, not a removal.
+
+#### The debug helpers stay honest
+
+`__EXT_DEBUG.fastBookDryRun()` prints **"Fast Book is DISABLED IN THIS BUILD"**, names the flag,
+says where to flip it, and returns `{ disabled: true }`. ⚠ It deliberately does **not** print a
+rehearsal, because every line would read "would abort" for a reason unrelated to the guards it
+exists to demonstrate. `fastBookForceMismatch()` arms nothing and says so.
+
+**Tests: 2597 green, 0 fail** (from 2563). `fastbook-suite` **85 → 110**, `fbrehearsal-suite`
+**41 → 50**. ⚠ **Both run with the flag FORCED TRUE by default so every existing guard assertion
+still executes — not one was weakened.** New coverage: each gate proven sufficient alone; the
+entry gate proven to sit before the sheet lookup, the rehearsal flag and the click; fail-closed
+with the constant genuinely **absent**; the action bar still renders minus one button; and the
+"nothing was deleted" claim asserted against source.
+
+⚠ **One test bug found and fixed in the writing:** the fail-closed case first passed
+`fastBookEnabled: undefined`, which the destructuring default turned straight back into `true` —
+it would have passed for the wrong reason. It now deletes the global outright via an `'OMIT'`
+sentinel.
+
+⚠ **Not verified live — there is no browser here.** See the report for what Ihor must check.
+
+### 2026-08-27 — Manifest and constants hygiene (pre-submission)
+
+**Files:** `manifest.json`, `utils/constants.js`. **Mechanical. No behaviour change intended,
+and none of the three edits touches a value that runs.**
+
+#### 1. `scripting` REMOVED
+
+`grep -rn "chrome\.scripting"` returns **no match in any file**. The permission was requested and
+never used. Unused permissions are a review-rejection trigger and widen the install warning for
+nothing.
+
+#### 2. `activeTab` REMOVED — resolved from source, not assumed
+
+The complete `chrome.*` surface in this extension is **five** call sites:
+
+| API | count | permission needed |
+|---|---|---|
+| `chrome.storage.local` | 60 | `storage` |
+| `chrome.storage.onChanged` | 20 | `storage` |
+| `chrome.runtime.sendMessage` | 5 | none |
+| `chrome.tabs.onRemoved` | 3 | **none** — it fires without any tabs permission |
+| `chrome.runtime.onMessage` | 1 | none |
+
+**No `executeScript`, no `captureVisibleTab`, no `insertCSS`, no `tabs.query`, and no read of
+`tab.url`** — those are the APIs `activeTab` exists to unlock, and none is present. Page access
+already comes from `host_permissions`.
+
+⚠ **`activeTabsQueueTail` (`background.js:181`) and `_activeTabCount` (`sidebar.js:614`) are NOT
+uses of this permission.** They are the extension's own tab-counting bookkeeping and the name
+collision is coincidental — worth stating, because a future grep for "activeTab" hits them first.
+
+#### 3. `clipboardWrite` KEPT — and here is the one line why
+
+**The clipboard write is separated from its user gesture by TWO async boundaries**, which is
+exactly the case where the permission rather than the gesture is what carries it:
+
+```
+camera click (gesture)  ->  html2canvas(...).then(...)  ->  canvas.toBlob(cb)  ->  navigator.clipboard.write()
+   inlinePanel.js:1449          :726                          :735                    :738
+```
+
+🔑 **Source cannot prove it is removable, so per the standing rule it stays.** html2canvas
+rendering a card and `toBlob` encoding a PNG both take real time, so transient user activation may
+well be spent by the time the write runs. ⚠ **And the failure would be quiet:** on rejection the
+handler only calls `logger.error` (`:744`) and `flashActionSuccess` never fires, so the camera
+button would simply do nothing with no message to the dispatcher. Removing it on a guess trades a
+harmless permission for a silently broken feature.
+
+**Final permissions: `["storage", "clipboardWrite"]`** — down from four.
+
+#### 4. The `CITY_FILTER_ENABLED` comment corrected
+
+`utils/constants.js` called it *"FEATURE SWITCH … **Shipped OFF**"* from 2026-08-13 until today,
+directly above `const CITY_FILTER_ENABLED = true;`. It described the state the flag was BUILT in,
+not the state it SHIPS in.
+
+⚠ **This was a live trap, not a typo.** Every other flag header in that file says "Shipped OFF"
+and means it. Anyone returning the flags to their shipped values by reading these headers — the
+exact task on the pre-launch list — would have turned off per-city filtering, and the city buttons
+would have stayed on screen and quietly stopped filtering. It now reads **"PRODUCT FLAG — SHIPPED
+ON"** and cites HANDOFF rule 11. ⚠ **The value was not touched.**
+
+**Tests: 2563 green, 0 fail** — unchanged; `manifest.json` re-validated as JSON and
+`utils/constants.js` re-parsed.
+
+⚠ **Not verified live — there is no browser here.** See the two checks in the report.
+
+### 2026-08-27 — 🔴 FIX: Fast Book was blocked on EVERY press (`sheetOpenLoadId`)
+
+**File:** `content/inlinePanel.js`. **This was a live defect**, introduced the same day by the
+identity check itself.
+
+#### What was wrong
+
+`sheetOpenLoadId()` looked for a bare-UUID `div[id]` inside `#selected-work-sheet`. **The sheet
+does not carry the load id.** Measured by Ihor on a real board: the sheet holds exactly eight
+elements with an id — `rlb-book-btn`, `rlb-book-trip-no-btn`,
+`rlb-book-trip-confirm-booking-btn`, `alert-:r7j:`, `alert-:r7j:-children`, `expanded-header`,
+`alert-:r7k:`, `alert-:r7k:-children` — **and none is a load id**. A full attribute scan found
+zero UUIDs; the URL stays `/loadboard/search`.
+
+So the function returned `null` every time, and the guard — which fails closed by design —
+aborted **every** press with `sheetLoadId: '(missing)'`. ⚠ **The lesson is worth keeping: a
+correct fail-closed check pointed at a source that can never succeed is a permanent outage that
+looks exactly like the check working.** That is why the marker now fails loudly (below).
+
+⛔ **DEAD HYPOTHESIS, recorded in three places so nobody re-derives it** — the function's own
+header, AMAZON_SELECTORS.md, and BACKLOG 0al.
+
+#### 1. The id now comes from the SELECTED CARD
+
+`document.querySelector('.load-card__selected')` — measured the same day, and semantic rather
+than a `css-<hash>` class. **The UUID-shape rule is REUSED, not recopied:** `clickDiagUuidRe()`,
+which resolves to cityAssign's `CARD_UUID_RE`.
+
+Returns `null` — and so refuses the booking — on no selected card, no UUID, **more than one
+distinct UUID**, or any exception. ⚠ **`cardLoadIdFor()` is deliberately NOT called here**: its
+first-`div[id]` fallback is right for rendering a panel and wrong for a booking gate, where it
+would return a badge id and let the press through.
+
+⚠ **THE SHEET IS STILL REQUIRED** — only the id's source moved. It carries the Book button.
+
+#### 2. 🔑 SECOND GATE — the payout
+
+The captured record's payout is compared against the amounts printed in the open sheet. ⚠ **No
+localised word is used as an anchor** — it parses amounts only, never "Payout"/"Total", and asks
+whether the record's figure is among them (the sheet also prints a rate-per-mile). Tolerance one
+cent, because the record keeps a full float and the board prints rounded.
+
+⚠ **IT ABSTAINS RATHER THAN BLOCKS**, and the abstain is logged: no record, no payout on the
+record, or nothing parseable → booking proceeds on gate 1 alone. **A second line of defence that
+can itself break booking is a liability.** It aborts only on a positive contradiction, as
+`abort-payout`.
+
+Both raw `{ value, unit }` and the flattened number are accepted — ⚠ **the brief specified
+`payout.value`, but our curated record flattens it to a plain number** at
+`networkObserver.js:349`, so the code handles both rather than assuming the brief's shape.
+
+#### 3. 🔴 A changed Amazon class is LOUD
+
+A missing marker gets `logger.error`, its own outcome `abort-no-marker`, wording that says
+**"EVERY Fast Book press will block"**, and its own button state
+(`ext-action-fastbook-blocked-marker`) whose title says reopening the load will not help. Three
+abort states are now distinguishable: `abort-no-marker`, `abort-identity`, `abort-payout`.
+
+#### Naming corrected
+
+The mismatch error said *"the sheet is not showing the load…"* and its data field was
+`sheetLoadId`, both of which now name the wrong thing. They are *"THE BOARD DOES NOT HAVE THIS
+BUTTON'S LOAD SELECTED"* and `openLoadId`. ⚠ The `executeFastBook(sheetLoadId, …)` **parameter**
+keeps its name — it is the bound id, and the binding closure is out of scope.
+
+#### Dry run
+
+`__EXT_DEBUG.fastBookDryRun()` prints the two gates **separately** — collapsing them would hide
+which one stood behind a booking — plus the marker's state. It also parses the sheet amounts
+itself for display, because the gate short-circuits before parsing when it has no record, and a
+diagnostic that misreports the page is worse than none.
+
+**Tests. 2563 green.** `fastbook-suite` 44 → **85**, covering the dead hypothesis, the loud
+marker case, ambiguity refusal, and eleven payout cases including abstention, rounding, thousands
+separators, the raw `{value}` shape, and that **identity runs first so a payout match cannot
+rescue a wrong load**. Three stale assertions were repaired rather than deleted:
+
+- `fastbook-suite`'s "exactly ONE sheet-id scan" named code that no longer exists → now names the
+  real source and additionally asserts the sheet scan is **gone**.
+- `clickdiag-suite`'s "every catch logs" compared *totals* (11 catch vs 14 `logger.error`), which
+  broke on the three deliberate non-catch error logs. Totals were only ever a proxy → it now
+  asserts the actual intent, that **no catch is silent** (verified against a planted silent catch).
+- `stagea-suite`'s 4000-char proximity window → 12000; the click sits 9246 chars in now. **The
+  click itself is unchanged.**
+
+**Verification.** ⚠ **Nothing was exercised on a real board — there is no browser here.** The
+happy path remains unverified live; see BACKLOG 0al.
+
+### 2026-08-27 — Fast Book console-only rehearsal (`__EXT_DEBUG.fastBookDryRun` / `fastBookForceMismatch`)
+
+**File:** `content/inlinePanel.js`. **No booking logic changed.** ⚠ The Fast Book closed-topic
+constraint was lifted for this task and is back in force.
+
+**Why.** The identity check added earlier the same day is asserted by `fastbook-suite` and by
+nothing else, because **the abort path cannot be produced on demand on a real board**. Ihor will
+not press Fast Book on a live board to find out — a wrong click costs a real load and a
+cancellation ding. These let him watch the guard work with no booking possible.
+
+#### 🔑 How "it cannot click" is guaranteed — structurally, not by care
+
+`executeFastBook()` gained an optional third parameter, `dryRun`, whose **only** effect is to
+return immediately before the Book click:
+
+```js
+if (dryRun) { /* log, then */ return 'dry-run-would-click'; }
+bookBtn.click();
+```
+
+The function contains **exactly two `.click()` calls** — `bookBtn.click()` on the next line, and
+`confirmBtn.click()` inside the confirm poll, which is *started after it*. **Both are below that
+return**, so a dry run reaches neither, and there is no third dispatch site and no path around
+the line. `fastBookDryRun()` additionally passes `fastBookBtn = null`, so it cannot so much as
+change the button's appearance. **Every check above that point runs unchanged** — same sheet
+lookup, same Book-button lookup, same forbidden test, same identity comparison. Nothing is
+reimplemented: a rehearsal running different code would prove nothing about the real path.
+
+#### No new branch in the normal flow
+
+`fastBookForceMismatch()` sets a module-level `_fastBookForceMismatchOnce`, which
+`executeFastBook()` **clears the instant it reads it**, so it survives exactly one press and
+never a refresh. It ships `false`; **nothing in the product can set it — only the console
+helper** — so pressing Fast Book without invoking a helper behaves exactly as it did before these
+existed. It corrupts **our own bound id only**: the sheet is untouched, Amazon's DOM is untouched,
+and the comparison that follows is the real one, now with two ids that differ.
+
+The four terminal exits gained short outcome strings (`no-sheet`, `no-book-button`, `forbidden`,
+`abort-identity`, `dry-run-would-click`) so the helpers can report what happened without
+re-deriving it. **These are return values, not branches**; no caller in the product reads them.
+
+**Tests.** New **`fbrehearsal-suite`, 41 checks**, in a separate file **because `fastbook-suite`
+had to keep passing unchanged — it does, 44/44, unadjusted.** The new suite drives the real
+`executeFastBook()` and asserts the claim that matters: **zero clicks and zero polls started** in
+every rehearsal path, the dry-run return provably ordered before both click sites, exactly two
+`.click()` calls in the function, the blocked button state after a forced mismatch, and that the
+**next** press books normally. **2522 green.**
+
+⚠ Two stale assertions in `stagea-suite` / `stageb-suite` began failing: both assert the sheet
+lookup sits within 600 characters of the function opening, and the new comment block pushed it to
+736. **The lookup is byte-identical**; the windows were widened to 1200 with a note saying why.
+This was a proximity assertion moving, not behaviour.
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here.** ⚠ **The
+helpers do not cover the two real clicks or the confirm poll**, which they return before reaching.
+Only a genuine booking covers those, and **the happy path remains unverified live.**
+
+### 2026-08-27 — Fast Book safety hardening (BACKLOG 0al items 1-3)
+
+**File:** `content/inlinePanel.js`. ⚠ **The Fast Book closed-topic constraint was lifted by
+Ihor for this task and is back in force.** Scope was exactly three items; nothing else in Fast
+Book was redesigned. **Behaviour-preserving on the happy path.**
+
+#### 1. 🔑 THE IDENTITY CHECK — the finding the trace turned up
+
+`executeFastBook(sheetLoadId, …)` received the bound load id and used it for **one thing: a
+log line**. Nothing compared it to anything, so it clicked Book on **whatever load happened to be
+open in `#selected-work-sheet`** — and nothing would have noticed or reported a divergence,
+including the dispatcher, who would have seen a successful booking.
+
+The check now runs immediately before `bookBtn.click()`, with strict equality and three
+fail-closed aborts (ids differ / bound id missing / sheet id missing). See **docs/SAFETY.md**,
+where this is stated as a rule rather than an implementation detail.
+
+**⚠ ONE DEFINITION, NOT A SECOND COPY.** `clickDiagSheetLoadId()` was renamed to
+`sheetOpenLoadId()` and the old name kept as a thin delegate, so its two CLICKDIAG callers
+and `detailOpener.js:480`'s `typeof` probe are untouched. The rename matters: the old
+name and its *"diagnostics only"* catch message both advertised the function as expendable, and
+a booking check now depends on it.
+
+**⚠ A PREMISE IN THE BRIEF THAT DID NOT HOLD.** It said to reuse "the existing visible-failure
+dialog that PAT uses". **PAT has no such dialog** — it has an in-modal status line
+(`ext-pat-status`, `patModal.js:1396`) that only exists while its own modal is open. Fast
+Book has no modal. Rather than invent a new UI pattern, the abort uses **the Fast Book button's
+own existing text-state mechanism** — the same one that already writes `Booking...` and
+`Booked!` — leaving it disabled and reading **"Blocked — wrong load open"**, with a
+`title` explaining what to do and `data-testid="ext-action-fastbook-blocked"`. **If Ihor
+wants a louder surface, that is a deliberate next decision, not something to assume.**
+
+#### 2. The confirm fallback is scoped to the sheet
+
+It swept `document.querySelectorAll('button')` across the **whole page** for five seconds.
+Now `sheet.querySelectorAll('button')`. ⚠ **The exact-id lookup deliberately stays
+document-wide** — the dialog may be portalled outside the sheet, and an exact id cannot match
+another load's button. Timings (100 ms / 5 000 ms) and the `confirmBtn !== bookBtn` exclusion
+are **unchanged**, as instructed.
+
+#### 3. The poll can be cancelled
+
+`pollInterval` was a local nothing outside could clear, so a 5-second poll that **clicks a
+confirm button** outlived panel teardown. The handle is now module-level and
+`removeInlinePanel()` clears it.
+
+🔑 **All four `enforcePanelAnchor()` removal sites are covered — verified, not assumed.**
+`enforcePanelAnchor()` removes the panel by calling `removeInlinePanel()` on both of its
+removal branches, never by touching the node, so `cityAssign.js:1806` / `:3209` /
+`:3311` and `content.js:670` all land there.
+
+⚠ **WHAT IS STILL NOT COVERED, and is out of scope by instruction:** `showInlinePanel()`
+**replaces** a panel with `old.remove()` directly rather than calling `removeInlinePanel()`
+(the teardown asymmetry from trace item 5). A poll therefore survives a panel being *replaced*.
+`executeFastBook()` cancelling any live poll when it starts closes the two-polls-racing case;
+the plain-replacement case remains open. **Recorded in BACKLOG 0al, not fixed.**
+
+**Tests.** New `fastbook-suite`, **44 checks**, driving the real `executeFastBook()` against
+a stub sheet. It asserts the happy path still books, the mismatch aborts with no click and no
+poll, and **five separate fail-closed cases** — sheet id missing, bound id missing, both missing,
+empty string, no sheet at all. ⚠ One of my own assertions was an over-blunt `!/innerHTML/`
+that flagged four pre-existing static icon-SVG assignments; scoped to the Fast Book path rather
+than silenced. **2481 green.**
+
+**Verification.** **Nothing was exercised on a real board — there is no browser here. The ABORT
+PATH CANNOT BE TRIGGERED ON DEMAND on a real board and is guarded by tests only.**
+
 ### 2026-08-27 — the auto-opened card is scrolled back into view (BACKLOG 0aj)
 
 **File:** `content/detailOpener.js`.

@@ -58,7 +58,9 @@ function injectSurgeStyle() {
   document.head.appendChild(style);
 }
 
-injectSurgeStyle();
+// 2026-08-31 — gated on the ONE page check, same reason as highlighter.js: this injected the
+// surge CSS at module load on every Relay page, Dashboard included.
+if (typeof isLoadBoardPage === 'function' && isLoadBoardPage()) injectSurgeStyle();
 
 function clearSurgeHighlights() {
   logger.log('priceSurge', 'clearSurgeHighlights called');

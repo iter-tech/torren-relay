@@ -44,6 +44,586 @@ Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.m
 
 ## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
 
+### 0av. ✅ CLOSED 2026-08-31 — THE PATHNAME IS NOW MEASURED, AND THE REAL CAUSE WAS A STALE CACHE
+
+**✅ THE PATH IS CONFIRMED.** Ihor ran `__EXT_DEBUG.pageGate()` on the live board:
+
+```
+host     : relay.amazon.com
+pathname : /loadboard/search
+segments : ["","loadboard","search"]
+```
+
+**So `/loadboard/search` is MEASURED, not assumed, on `relay.amazon.com`** — the same string the
+2026-08-27 sheet trace recorded. AMAZON_SELECTORS.md's table can treat `.com` as measured.
+⚠ **The ten non-`.com` domains remain unmeasured — that is BACKLOG 0au, still open.**
+
+**🔴 AND THE PATH WAS NEVER THE PROBLEM.** The same session showed `isLoadBoardPage(): true`
+alongside `getAuthGate() -> { active:false, sessionActive:true, onLoadBoard:false }` — the check
+and the gate disagreeing at the same instant. The cause was a **stale cached gate**: `getAuthGate()`
+froze the composed session+page result at first call, and the first caller is `nightMode.js`
+(script #12) against `content.js` (#31). Fixed by splitting the caches and by making the
+navigation watch reconcile state instead of detecting edges. See CHANGELOG.
+
+⚠ **Recorded so it is not relearned: an edge detector cannot detect an edge it started after**,
+and **two correct halves tested separately are not a tested whole** — the suite drove
+`isLoadBoardPage()` with a stub location and the gate with a stubbed `isLoadBoardPage`, and both
+passed while the real pair was broken.
+
+### 0av-was. The original entry (superseded)
+
+**2026-08-31.** The page gate rejected `relay.amazon.com/loadboard/search` and nothing rendered.
+
+🔑 **The comparison was NOT at fault.** `isLoadBoardPage()` was byte-verified correct for the
+literal `/loadboard/search`, and the real `constants.js` + `authGate.js` driven together in one
+shared global return `onLoadBoard: true` for it. **So the live `window.location.pathname` was not
+that literal string** — a prefix is the ordinary reason, and the old first-segment rule rejected
+every prefixed form.
+
+**Fixed by accepting ANY path segment equal to `loadboard`**, which covers every prefix without
+inventing one. ⚠ **But the actual pathname is still unknown**, and that is worth closing properly
+rather than leaving to a rule that happens to be tolerant enough.
+
+**WHAT CLOSES IT — one line, ten seconds:** on the load board, run
+
+```
+__EXT_DEBUG.pageGate()
+```
+
+and send the `pathname` line. That makes the real path MEASURED, and
+docs/AMAZON_SELECTORS.md can stop calling it assumed.
+
+⚠ **If it now activates and he never runs it, this stays open** — the rule is tolerant, not
+informed, and the next path change would be another blind debugging session.
+
+**Two lessons recorded so they are not relearned:**
+- 🔴 **A silenced diagnostic costs more than a noisy one.** The warning was suppressed on `.com`
+  because the path was "measured" there; that is exactly where it was needed. Silence removed.
+- 🔴 **Two correct halves tested separately are not a tested whole.** `pagegate-suite` drove
+  `isLoadBoardPage()` with a stub location and the gate composition with a **stubbed**
+  `isLoadBoardPage`. Both passed; the pair had never been run together. A shared-global check now
+  covers it.
+
+### 0at. ✅ FIXED 2026-08-31 — THE TOP BAR APPEARED ON EVERY RELAY PAGE
+
+**Reported live by Ihor with a screenshot 2026-08-31:** the Torren Relay top bar appeared on ANY
+Relay page — Dashboard, Trips, anything — about half a second after the page opened, floating
+mid-screen over Amazon's own UI on `/dashboard`.
+
+**Cause: there was no page check at all.** Every module gated on `getAuthGate()` — "is he signed
+in" — and nothing asked "is this the load board".
+
+**Fixed by ONE definition, `isLoadBoardPage()` (`utils/constants.js`), composed into
+`authGate.js`'s `_handleGateResult()`**, which is the single funnel every consumer already
+subscribes to. Leaving the board now fires the same transition a logout does, so the existing,
+already-tested teardown paths run. Plus an SPA navigation watch (poll + `popstate`) in
+`content.js`, started **before** the gate's early return so an inactive tab can notice ARRIVING.
+
+**Two things were found injecting off-board and are also fixed:** `highlighter.js` and
+`priceSurge.js` both injected their `<style>` at **module load** on every Relay page.
+
+New `pagegate-suite`, 46 checks, negative control run (5 fail without the fix). **2672 green.**
+
+⚠ **NOT VERIFIED LIVE.** See the four navigation checks in CHANGELOG.
+
+### 0au. 🔴 THE LOAD BOARD PATH IS UNVERIFIED ON TEN OF ELEVEN DOMAINS
+
+**Separate from 0at, and still open.** `isLoadBoardPage()` recognises the board by its first path
+segment, `loadboard`. That is **MEASURED on `relay.amazon.com` only** — every capture, sample and
+measurement on disk is from `.com`; the other ten Relay domains appear exactly once each, in the
+manifest's own host list, and in **no capture**.
+
+⚠ **If the path differs on any of them, the extension will not activate there.** That would be
+**worse than the bug just fixed**, because nothing on screen would say so.
+
+🔑 **THE MITIGATION IS THAT IT IS NOT SILENT.** On a non-`.com` Relay page where we do not
+activate, `warnIfUnrecognisedRelayPage()` emits a `console.warn` naming the host and the path,
+saying the extension did not activate and that the path is measured on `.com` only. It also says
+plainly that a Dashboard reading this is normal, so it does not cry wolf. ⚠ **`console.warn`, NOT
+`logger.warn`** — the latter is silenced at the shipped `DEBUG_LEVEL` of 1, which is exactly how
+`radiusUnitCaveat()`'s warning ended up invisible in a shipped build (BACKLOG 0ad).
+
+**WHAT CLOSES THIS — one capture, and it is trivial:** open the load board on **any one**
+non-`.com` Relay domain and read the address bar. If the first path segment is `loadboard`, the
+assumption is confirmed for that domain and the table in AMAZON_SELECTORS.md becomes measured. If
+it is not, the console warning will already be there naming the real path.
+
+⚠ **Related but NOT the same as BACKLOG 0ad** (the radius unit on non-`.com`). Both are "we ship
+to eleven domains and have measured one", and **one non-`.com` session would close both.**
+
+### 0aq. ✅ CLOSED 2026-08-28 — THE PAT ORIGIN RADIUS DEFAULT OF 25 IS CORRECT
+
+**Ihor's product decision. NOT a defect, NOT deferred, NOT a candidate for a later fix.**
+
+⚠ **DO NOT "FIX" THIS.** It was reported as a symptom, traced to its line, and then closed as
+intended behaviour. Anyone finding the hardcoded `25` again and reading it as a bug is repeating
+work that is already done — read the reasoning before changing anything.
+
+#### Why 25 is right
+
+**A Post-a-Truck is created FOR a load already on the board that the dispatcher has decided to
+take.** The post is anchored to **that load's own PICKUP location**, which our code fills in from
+the record — **not** to the driver's home city. A 25-mile radius around a specific pickup point is
+the right default, and the dropdown lets him change it when it is not.
+
+🔑 The original symptom — *"I accept 45, our post says 25"* — was comparing the post's radius
+against his **board search** radius. They are different things anchored to different points, and
+they are not supposed to agree.
+
+**Where the value comes from** (unchanged, and correct): `patModal.js:1169`, the third argument to
+`makeSelect(testid, options, defaultVal)` → `patModal.js:1639` → `patApi.js:402`
+`originCityRadius: { value: formState.originRadius, unit: 'mi' }`. Destination defaults to 50
+(`:1199`).
+
+#### ⚠ INVESTIGATED AND SETTLED — do not re-derive any of this
+
+- **`MIN_OPERATING_RADIUS` (=25) does NOT reach the PAT payload.** All **8** occurrences are in
+  `cityAssign.js`: the declaration (`:75`), the clamp inside `effectiveRadiusFor()` (`:97-98`),
+  and five comment/log strings (`:68`, `:77`, `:1947`, `:1970`, `:3170`).
+  `effectiveRadiusFor()`'s four callers — `:112`, `:1950`, `:2056`, `:3142` — are **membership or
+  logging only**, all in the same file. Neither it nor `radiusLabelFor` appears anywhere else, and
+  `patModal.js` / `patApi.js` reference neither. 🔑 **HANDOFF rule 14 HOLDS. The two 25s are a
+  coincidence, and the PM hypothesis that the membership threshold had leaked into the request was
+  DISPROVED.**
+- **The dispatcher's per-city search radius IS available at PAT time and is deliberately NOT
+  used.** `_citySearchRequest.radiusFilters` (`cityAssign.js:3512`, populated `:3521`) with the
+  matcher `findRadiusForCity()` (`:2139`) is live in a shipped build — not debug-gated
+  (`networkObserver.js:806`; listener registered outside the `CITY_ASSIGN_DEBUG` block at
+  `cityAssign.js:3796-3797`). ⚠ **Wiring it into the post would be a REGRESSION, not an
+  improvement**, for the reason above: the board search is anchored to his origin cities, the post
+  is anchored to one load's pickup.
+- **The origin dropdown offers 5 / 10 / 15 / 20 / 25 / 50 / 75 / 100. 45 is not selectable, and by
+  the reasoning above that does not matter.** ⛔ **Do not add values. Do not convert it to free
+  entry.**
+- **A brief-premise correction worth keeping:** the four `samples/pat-upsert-*.json` files carry
+  **NO radius field** — they are curated findings files about equipment / driver / loading-type
+  enums, and their own `_provenance` says *"PARTIAL per capture … Anything not listed is UNKNOWN.
+  Absence is not evidence."* **Radius ground truth lives in `samples/PAT Data}.txt` and
+  `docs/api-samples.md`**: fields `originCityRadius` / `destinationCityRadius`, shape
+  `{ value, unit: "mi" }`, observed values **25 / 50 / 100**. Our shape matches Amazon's.
+
+### 0ar. 🔜 1.1 CANDIDATE — CHAT BUTTON ON THE LOAD CARD. **NOT STARTED, unscoped.**
+
+Open Amazon's negotiation chat **bound to THAT load**. Today the chat opens on the **topmost
+negotiable load**, so reaching the third one means opening and closing it three times.
+
+Ihor reports competitors have this, **so it is feasible; HOW is unknown.**
+
+🔴 **BLOCKED on a Network capture from Ihor.** Needed before any design:
+1. Which requests fire when the chat button is pressed?
+2. Does any of them carry a **work-opportunity id**?
+3. Does the **URL** change?
+
+⚠ **If no load id is passed, the feature is NOT POSSIBLE as described. Establish that first** —
+before any UI, any button, or any estimate.
+
+### 0as. 🔜 1.1 CANDIDATE — QUICK-PHRASE INSERTS FOR NEGOTIATION CHAT. **NOT STARTED, unscoped.**
+
+10-15 canned dispatcher phrases inserted into the chat with one click instead of typing.
+
+⚠ **Depends entirely on 0ar.** If the chat cannot be bound to a specific load, this has nothing to
+insert into and does not begin.
+
+### 0ap. 🔜 1.1 — MEMORY FLUSH WITH SESSION AUTO-RECOVERY (Ihor's spec, 2026-08-28)
+
+**NOT STARTED, and BLOCKED on measurement — see the `memReport()` protocol below.**
+
+⚠ **STILL BLOCKED as of 2026-08-28**, after the PAT keydown leak was fixed. That fix removes the
+one listener that accumulated with ordinary use, but **it does not answer the question this item
+is blocked on** — nobody has yet measured whether the heap actually grows over a shift. **The
+four `heapUsedMB` readings are still owed.**
+
+The proposal: flush memory by reloading the tab, then auto-restore the saved-search tab and the
+refresh loop. ⚠ **The figure motivating it — "hundreds of MB to GB" — is an ASSUMPTION. Nothing
+in this repository has ever measured it.** `__EXT_DEBUG.memReport()` was added on 2026-08-28
+(measure-only, no product UI, no behaviour change) so the feature can be designed against real
+numbers, or dropped if the growth is not there.
+
+#### 🔑 THE PROTOCOL — until these readings exist, this item has no established problem to solve
+
+With the refresh loop running as usual, in the ONE tab he actually works in:
+
+| when | what |
+|---|---|
+| start of shift, right after login | `__EXT_DEBUG.memReport()` |
+| after **1 hour** | `__EXT_DEBUG.memReport()` |
+| after **3 hours** | `__EXT_DEBUG.memReport()` |
+| end of shift | `__EXT_DEBUG.memReport()` |
+
+🔑 **THE SINGLE NUMBER TO WATCH IS `heapUsedMB`.** Everything else in the report exists to say
+*where* it went once that number has been shown to move. **If `heapUsedMB` is flat across the
+four readings, this feature should be dropped, not designed** — a tab reload that interrupts a
+dispatcher mid-shift to solve a problem that is not happening is a net loss.
+
+⚠ `performance.memory` is Chrome-only, coarse and quantised. It is the only in-page number
+available, so treat a change of a few MB as noise and look for a trend, not a delta.
+
+#### What the source already says about the two recorded leaks
+
+- **`ext-sidebar-styles`** — real, but ⚠ **it is NOT a shift-length leak.** `buildSidebar()`
+  appends it (`sidebar.js:205`) and `deactivateExtensionUI()` never removes it, but
+  `buildSidebar()` is reached **only** from `activateExtensionUI()` (`content.js:710`), which
+  early-returns when already active. So one tag accumulates **per logout→login cycle**, not per
+  refresh. On a normal shift `sidebarStyleTags` should read **1 all day**, costing ~11 KB once.
+  **A correctness defect — a logged-out page keeps our CSS — not a memory problem.**
+- **The coordinate map** — bounded at `CITY_PICKUP_MAX = 4000`, evicted oldest-first
+  (`cityAssign.js:159`, `:348`), ~40 bytes per entry, so **~160 KB at its ceiling**. Five other
+  per-id stores share that one eviction list, so they cannot outgrow it either. **Neither of the
+  two recorded leaks can account for hundreds of MB.**
+
+#### ⚠ Design risks recorded by the PM — read before building anything
+
+- **Programmatically clicking Amazon's saved-search tab after reload is the same DOM-coupling
+  class that killed task 7d.** That task read the card's own origin text, shipped, and left
+  **every card unassigned** on the live board. A restore step that depends on finding and
+  clicking an Amazon tab has the same failure shape, with a worse consequence: it fails **after**
+  a reload has already destroyed the session state.
+- **An automatic threshold-triggered reload could fire the moment a high-value load appears** —
+  the exact instant the dispatcher must not lose the board.
+- 🔑 **The PM's recommendation is MANUAL-ONLY, WITH CONFIRMATION.** No threshold, no timer, no
+  automatic trigger.
+
+#### Also found while measuring (2026-08-28) — recorded, NOT fixed
+
+- ✅ **FIXED 2026-08-28 — `patModal.js`, the accumulating `keydown` listener on `document`.** It
+  was the only listener in the extension that accumulated with ordinary use: `onKey` was removed
+  only inside its own Escape branch, so the backdrop, Confirm, the ×, and **replacement by
+  another modal** each left one behind for the life of the page, holding its modal's scope alive
+  with it. `removePatModal()` now removes it, with the handle stored on the overlay element —
+  the sidebar's `_extDragMove` pattern reused. Covers every close path **by construction**, since
+  nothing outside `patModal.js` removes the overlay. New `patleak-suite`, 28 checks, all four
+  close paths; **negative control run — 15 fail without the fix.** See CHANGELOG.
+  ⚠ **Still open, deliberately out of scope:** the drag listeners at `patModal.js:1522-1523` are
+  removed only on the next mouseup after close (`:1516-1519`) — lazy and self-healing, not
+  permanent.
+- 🟡 **STILL OPEN, NOT FIXED — `_cityNoCoordIds` (`cityAssign.js:270`) and `_cityCoordCache`
+  (`:402`) are the only per-id stores NOT on the shared eviction list** — cleared on teardown only. `_cityNoCoordIds` grows
+  with distinct coordinate-less ids seen (~60-100 bytes each); `_cityCoordCache` is bounded in
+  practice by the number of distinct cities searched. Both are in `memReport()` marked
+  `_UNBOUNDED`. **Watch them if the bounded stores sit at their cap and the heap still climbs.**
+- ℹ️ **`ext-sidebar-styles` is the only injected `<style>` without a duplicate guard**, because it
+  is the only one keyed by `data-testid` instead of `id`. Its five siblings all open with
+  `if (document.getElementById(...)) return;`. **The fix pattern already exists five times over.**
+- ℹ️ **No cycle counter and no activation timestamp exist anywhere** — not in `content.js`,
+  `refreshManager.js`, `tabState` or storage. `memReport()` reports `cyclesCompleted` as
+  **NOT TRACKED** rather than inferring it from uptime and the refresh interval.
+- ℹ️ **Timeouts are not countable.** 21 `setTimeout` sites exist; **4** keep a handle. The three
+  `setInterval` sites all keep one, so intervals are reported and timeouts are not.
+
+### 0ao. 🔜 1.1 — RE-ENABLE FAST BOOK AFTER THE FIRST STORE REVIEW
+
+**1.0 ships with `FAST_BOOK_ENABLED = false`** (`utils/constants.js`), so booking is unreachable
+by three independent gates — see docs/SAFETY.md.
+
+🔑 **FLIP THE CONSTANT AND UPDATE THE MANIFEST DESCRIPTION IN THE SAME CHANGE. The description's
+truth depends on this flag.** Today the manifest says the extension *"does NOT book loads"*, and
+that is only accurate because the constant is false. Flipping one without the other ships a false
+statement to the store — which is the exact problem this gate was added to fix.
+
+**What re-enabling involves:** one constant. ⚠ **Nothing was deleted** — the two-step click
+sequence, the identity gate, the payout gate, the rehearsal helpers and `fastbook-suite` (110
+checks, run with the flag forced true) are all intact and unmodified.
+
+**Before flipping it, these are still open and are the reason it is not a one-line change:**
+
+- 🔴 **The happy path has never been exercised live** (0al). The dry run returns before both
+  clicks, so the two real clicks and the confirm poll have never run.
+- 🔴 **`FORBIDDEN_SELECTORS` is an empty array** (`utils/constants.js:1-2`), so
+  `isForbiddenElement()` always returns false — the "never books a load" guard is disarmed.
+  ⚠ **Decide this deliberately before booking is reachable again.**
+- 🟠 **The teardown asymmetry** (0al): `showInlinePanel()` replaces a panel with `old.remove()`,
+  so a confirm poll survives a panel *replacement*.
+
+**Ihor's call, after the first review comes back.**
+
+### 0am. ✅ CLOSED 2026-08-27 — MANIFEST PERMISSIONS RESOLVED
+
+Launch blocker **B3** ("`scripting` requested, used 0 times; verify `activeTab` and
+`clipboardWrite` the same way") is **closed**. All three were settled from source rather than
+guessed.
+
+| permission | verdict | evidence |
+|---|---|---|
+| `scripting` | ❌ **REMOVED** | `grep -rn "chrome\.scripting"` — no match in any file |
+| `activeTab` | ❌ **REMOVED** | The entire `chrome.*` surface is `storage.local`, `storage.onChanged`, `runtime.sendMessage`, `runtime.onMessage`, `tabs.onRemoved`. **No `executeScript` / `captureVisibleTab` / `insertCSS` / `tabs.query` / `tab.url`** — the APIs `activeTab` unlocks. `tabs.onRemoved` (`background.js:235`) needs no permission; page access comes from `host_permissions`. |
+| `clipboardWrite` | ✅ **KEPT** | The write sits **two async hops** past its gesture — click (`inlinePanel.js:1449`) → `html2canvas().then()` (`:726`) → `toBlob(cb)` (`:735`) → `navigator.clipboard.write()` (`:738`). Source cannot establish that transient activation survives that, so the standing rule applies: **keep it**. |
+
+⚠ **`activeTabsQueueTail` / `_activeTabCount` are NOT uses of `activeTab`** — recorded because a
+future grep for the string finds them first and could reverse this decision on a misreading.
+
+**Final: `"permissions": ["storage", "clipboardWrite"]`.**
+
+🔴 **NOT YET PROVEN LIVE.** Two checks close it — see CHANGELOG and RELEASE_AUDIT.md: **(a)** the
+popup opens with no console errors, and **(b)** the Copy Screenshot button still copies a card.
+
+### 0an. 🟠 `utils/supabaseConfig.js` — PACKAGING DECISION FOR IHOR. Not fixed, not committed.
+
+The file is gitignored (`.gitignore:8`) but loaded by `manifest.json:47`, so **a zip built from a
+clean clone has no login and the extension does nothing.** It was NOT committed and its contents
+were NOT printed — this entry records only what the consumers require.
+
+**It must define exactly two globals**, by name, both read as bare globals (no `export`, no
+`window.` prefix), from `utils/supabaseConfig.example.js` and both consumers:
+
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+
+**How it fails when absent — the halves differ, and that matters:**
+
+| consumer | behaviour | loudness |
+|---|---|---|
+| `popup/popup.js:41` | `typeof` guard leaves `supabaseClient = null`; a login attempt shows **"Login not configured."** (`:328`, `:359`) | 🟡 **Visible to the dispatcher** — but only if he tries to log in |
+| `utils/authGate.js:15` | `typeof` guard leaves `_authGateClient = null`; `_checkAuthGateOnce()` logs `logger.warn('supabase client not configured — gate closed')` (`:22`) and returns `{ active: false }` | 🔴 **SILENT IN A SHIPPED BUILD** — `logger.warn` is suppressed at `DEBUG_LEVEL = 1` |
+
+🔑 **So on the load board a missing config produces NO message anywhere.** Nothing throws — the
+`typeof` guards see to that — the gate simply stays closed and the extension is inert. **A packaging
+mistake here looks exactly like an extension that does not work**, which is the worst shape a
+build error can take.
+
+**Recommended packaging approach (Ihor decides):**
+
+⚠ **The anon key ships readable either way** — anyone can unzip a published extension, so
+"keeping it out of git" protects nothing once it is in the store. The decision is only about
+**build reliability**, and on that ground:
+
+1. 🔑 **Preferred — commit the real `utils/supabaseConfig.js` and drop it from `.gitignore`.** The
+   anon key is designed to be public; **its safety comes entirely from row-level security on the
+   Supabase side, not from secrecy.** This makes the repository the single source of truth and
+   removes the whole class of "the zip is missing a file" failure. ⚠ **Only do this after
+   confirming RLS is enforced** — that cannot be checked from this repository.
+2. **Otherwise — add a build step that copies it in, plus a pre-zip check that the file exists
+   and is not the example placeholder.** Keeps it out of git at the cost of a step that must never
+   be forgotten, with no message if it is.
+3. ⛔ **Do NOT rely on remembering.** The failure is silent on the board and only appears when a
+   dispatcher tries to log in.
+
+⚠ **If the key is ever treated as a secret, rotating it is not enough — it must move behind a
+server the extension calls**, because the extension cannot hold a secret at all.
+
+
+### 0al. 🟠 FAST BOOK — items 1-3 FIXED 2026-08-27, then the guard itself had to be fixed.
+
+**🔴 THE GUARD WAS BLOCKING EVERY PRESS — FIXED 2026-08-27 (same day).** The identity check
+shipped correct but read the open load's id from `#selected-work-sheet`, which **does not carry
+it**. It returned `null` every time, and a fail-closed guard on a source that can never succeed
+is a permanent outage. Fast Book refused every press with `openLoadId: '(missing)'`.
+
+⛔ **DEAD HYPOTHESIS — the sheet has no load id. MEASURED, do not re-derive.** A full attribute
+scan of the open sheet found **zero UUIDs** and no work/load/opportunity-named attribute. Its
+only eight ids are `rlb-book-btn`, `rlb-book-trip-no-btn`,
+`rlb-book-trip-confirm-booking-btn`, `alert-:r7j:`, `alert-:r7j:-children`, `expanded-header`,
+`alert-:r7k:`, `alert-:r7k:-children`. The URL stays `/loadboard/search`.
+
+**⚠ IDENTITY NOW DEPENDS ON AN AMAZON CLASS — `.load-card__selected`.** That is a real coupling
+and it is accepted deliberately: it is the only measured source of the open load's id, and it is
+semantic rather than a `css-<hash>` class. **The mitigation is that it fails LOUDLY** —
+`logger.error` naming the marker, its own outcome `abort-no-marker`, and its own button state
+saying reopening the load will not help. 🔑 **That loud-failure requirement is not optional and
+must survive any future refactor of this path**: the whole reason this entry exists is that the
+previous failure was silent and indistinguishable from the guard working correctly.
+
+**A SECOND GATE was added: the payout.** The captured record's payout vs the amounts in the open
+sheet. It **abstains rather than blocks** when it cannot check, and logs the abstain. See
+docs/SAFETY.md.
+
+
+
+⚠ **The Fast Book closed-topic constraint was lifted twice — once for the trace, once for the
+fix — and is BACK IN FORCE.**
+
+**✅ FIXED (`content/inlinePanel.js`, see CHANGELOG and docs/SAFETY.md):**
+
+1. **The identity check.** `executeFastBook()` now compares the bound load id against the id
+   actually open in the sheet, **strict equality, fail closed on either being missing**, with a
+   visible blocked state on abort. One definition of the id-shape rule
+   (`sheetOpenLoadId()`; `clickDiagSheetLoadId()` delegates).
+2. **The confirm fallback is scoped to the sheet.** The exact-id lookup stays document-wide on
+   purpose — the dialog may be portalled out, and an exact id cannot match another load.
+3. **The poll is cancellable.** Module-level handle, cleared by `removeInlinePanel()`, which
+   covers all four `enforcePanelAnchor()` sites (verified — it removes via
+   `removeInlinePanel()`, never by touching the node).
+
+**🔴 STILL OPEN — 1: THE TEARDOWN ASYMMETRY.** `showInlinePanel()` **replaces** a panel with
+`old.remove()` directly (`inlinePanel.js:1165`) instead of calling
+`removeInlinePanel()`, so it skips both the poll clear and the storage-listener removal. A
+confirm poll therefore survives a panel being *replaced* by another load's. ⚠ Out of scope by
+instruction and **deliberately not fixed**. Partly mitigated: `executeFastBook()` cancels any
+live poll when it starts, so two polls cannot race.
+
+**🔴 STILL OPEN — 2: THE AMAZON-SPA QUESTION, owed by Ihor.** From trace item 4: does Amazon
+ever swap the CONTENT of `#selected-work-sheet` in place — same element, different load —
+without our code touching it? **Not knowable from this repository.** To answer it: open a load,
+leave the sheet open, let the board refresh, and watch whether the sheet's inner bare-UUID
+`div[id]` changes while the sheet element persists. **This determines how often the new
+identity check actually fires** — the guard is correct either way, but the frequency is unknown.
+
+⚠ **The abort path cannot be produced on demand on a real board.** It is guarded by
+`fastbook-suite` (85 checks), and since 2026-08-27 it can also be *watched* on a live board
+with no booking possible, via `__EXT_DEBUG.fastBookForceMismatch()`. See TC-FASTBOOK-IDENTITY.
+
+**🟡 STILL OPEN — 3: THE HAPPY PATH IS UNVERIFIED LIVE. Ihor's call.** Every claim about Fast
+Book in this repository rests on `fastbook-suite` (85) and `fbrehearsal-suite` (41) driving the
+real `executeFastBook()` against a **stub** sheet. **No Fast Book press has been performed on a
+real board since the identity check landed.**
+
+As of 2026-08-27 the console rehearsal (`__EXT_DEBUG.fastBookDryRun()`,
+`__EXT_DEBUG.fastBookForceMismatch()`, see TC-FASTBOOK-IDENTITY) covers everything **up to** the
+click: the sheet lookup, the Book-button lookup, the forbidden test, the identity comparison, the
+abort, and the blocked button state. ⚠ **It deliberately stops there.** The two real clicks —
+Amazon's Book button, then the confirm button — **and the whole confirm poll are never exercised
+by the helpers**, because a dry run returns before the first one. **Only a genuine booking on a
+real board covers those**, and that means spending money on a real load.
+
+**Recommended order when Ihor chooses to do it:** run `fastBookDryRun()` first and confirm
+`WOULD CLICK`; then `fastBookForceMismatch()` and confirm the abort is visible; only then a real
+press, on a load he actually wants. **Not scheduled — this is Ihor's decision, not an assumption
+to be made for him.**
+
+### 0al-trace. THE ORIGINAL TRACE, 2026-08-27 — verdict was **NOT GUARANTEED**
+
+⚠ **THE FAST BOOK CLOSED-TOPIC CONSTRAINT WAS LIFTED BY IHOR FOR THIS TRACE ONLY, AND IS BACK
+IN FORCE.** Nothing was changed. No patch was written, none was proposed. This entry is the
+record of what the source says; **what happens next is Ihor's decision, not the executor's.**
+
+**The question asked:** can Fast Book click Book on a load OTHER than the one its button is
+bound to?
+
+#### 🔴 THE FINDING — THERE IS NO IDENTITY CHECK
+
+`executeFastBook(sheetLoadId, fastBookBtn)` (`inlinePanel.js:359`) receives the bound
+load id and **uses it for exactly one thing — a log line**:
+
+```js
+inlinePanel.js:360   logger.log('inlinePanel', 'executeFastBook called', { loadId: sheetLoadId, … });
+```
+
+**That is the ONLY reference to `sheetLoadId` anywhere in the function body** (lines 359-431,
+verified by scan). It is never compared to anything. The function then does:
+
+```js
+inlinePanel.js:367   var sheet   = document.querySelector(SHEET_SELECTOR);   // '#selected-work-sheet'
+inlinePanel.js:375   var bookBtn = sheet.querySelector('#rlb-book-btn');
+inlinePanel.js:395   bookBtn.click();
+```
+
+🔑 **It clicks Book on WHATEVER LOAD IS CURRENTLY OPEN IN AMAZON'S SHEET.** It never reads the
+sheet's own load id, so it cannot notice a mismatch. There is no abort path for one, because
+there is no comparison to fail.
+
+⚠ **The capability to read it already exists and is not used here:** `clickDiagSheetLoadId()`
+(`inlinePanel.js:1492`) reads the first bare-UUID `div[id]` inside the sheet. It is wired
+to CLICKDIAG only.
+
+#### 1. BINDING — a CLOSURE, not an attribute or a lookup
+
+```js
+inlinePanel.js:1340   fastBookBtn.addEventListener('click', function () {
+inlinePanel.js:1342     executeFastBook(sheetLoadId, fastBookBtn);
+```
+
+`sheetLoadId` is captured from `showInlinePanel`'s scope (`:1168`,
+`var sheetLoadId = cardLoadIdFor(cardElement)`). The button carries **no** `data-` id
+attribute and performs **no** lookup at click time.
+
+**A stale button cannot survive a re-render, and that is what limits the exposure:**
+`showInlinePanel` removes any existing panel before building the new one
+(`:1164-1165`, `var old = document.getElementById(PANEL_ID); if (old) old.remove();`),
+and `PANEL_ID` is a single id, so **only one panel and one Fast Book button exist at a time**.
+A button bound to load A is destroyed when the panel for load B is built.
+
+#### 2. THE SHEET SIDE
+
+The sheet is located by a fixed id selector, `SHEET_SELECTOR = '#selected-work-sheet'`
+(`inlinePanel.js:24`), read fresh at `:367`. **`sheetLoadId` is NOT read from the
+sheet — the name is misleading.** It comes from the CARD (`:1168`, and the comment at
+`:1167` says so: *"Reads the CARD, never a sheet"*).
+
+#### 3. THE IDENTITY CHECK — **absent**. See the finding above.
+
+#### 4. TIMING — partly unanswerable from source
+
+The loop IS stopped before the panel opens, on both paths:
+`inlinePanel.js:1835` (manual click) and `content.js:500` / `:531` (auto-open,
+PLAN 7b). So during a normal Fast Book the refresh loop is not running.
+
+⚠ **But that is a CONSEQUENCE of opening a panel, not a GUARD on booking.** Nothing in
+`executeFastBook` checks whether the loop is running, and the dispatcher can press play at
+any moment. On START, `content.js:657` calls `closePanelsForStart()`, which clicks
+Amazon's own detail-sheet close button — **that path can close or change the sheet while a Fast
+Book poll is in flight** (see item 7).
+
+**`enforcePanelAnchor()` can remove OUR panel mid-flight** from four call sites —
+`cityAssign.js:1806` (city filter changed), `:3209` (assignment cycle),
+`:3311` (board re-render), `content.js:670` (loop stopped). ⚠ **Removing the panel does
+NOT stop an in-flight poll** — see item 7.
+
+🔴 **WHAT SOURCE CANNOT ANSWER:** whether Amazon ever swaps the CONTENT of `#selected-work-sheet`
+in place — same element, different load — without our code touching it. That is Amazon's SPA
+behaviour and is not knowable from this repository. **Ihor would have to observe it:** open a
+load, leave the sheet open, let the board refresh, and watch whether the sheet's inner
+bare-UUID `div[id]` changes while the sheet element itself persists.
+
+#### 5. STALE DOM — bounded by the single-panel rule
+
+One panel at a time (item 1), torn down at `:1165` and by `removeInlinePanel()`
+(`:1371-1386`). ⚠ **One inconsistency, not a mis-booking risk:** `:1165` calls
+`old.remove()` **directly** rather than `removeInlinePanel()`, so it skips the
+`chrome.storage.onChanged.removeListener(_fastBookStorageListener)` at `:1385`. The
+single-variable guard at `:1330-1331` limits it, but the paths are not symmetric.
+
+#### 6. RECENTLY-ADDED CARDS — safe, and via the id-shape rule
+
+Fast Book resolves **no card at all** — it works from the sheet. The id it is bound to comes
+from `cardLoadIdFor(cardElement)` (`:1168`), which is the **UUID-shape** rule, not a
+class-based lookup. ✅ **This is not a fourth instance of the class-lookup defect.**
+
+#### 7. HOW MANY CLICKS — **TWO**, and the second one has a RETRY
+
+```js
+inlinePanel.js:395   bookBtn.click();       // one click, no pointer/mousedown sequence
+inlinePanel.js:420   confirmBtn.click();    // a SECOND click, on the confirm dialog
+```
+
+⚠ **There IS a retry, and it is on the booking action.** `:401-429` polls every 100 ms for up
+to 5 000 ms (`MAX_WAIT_MS = 5000`, `POLL_MS = 100`) looking for the confirm button, and
+clicks the first thing it finds.
+
+🔴 **The confirm fallback is DOCUMENT-WIDE, not scoped to the sheet:**
+
+```js
+inlinePanel.js:403   var confirmBtn = document.querySelector('#rlb-book-trip-confirm-booking-btn');
+inlinePanel.js:406   var allBtns = document.querySelectorAll('button');   // WHOLE DOCUMENT
+inlinePanel.js:409     if (t === 'Book' || t === 'Confirm' || t === 'Confirm booking') …
+```
+
+The only exclusion is `confirmBtn !== bookBtn` (`:412`). Any other button anywhere on the
+page whose trimmed text is `Book`, `Confirm` or `Confirm booking` is a candidate for
+five seconds. ⚠ **Nothing cancels this interval when the panel is removed** — `pollInterval` is
+a local variable cleared only at `:413` and `:425`, and neither `removeInlinePanel()`
+nor `enforcePanelAnchor()` can reach it.
+
+#### VERDICT: (b) NOT GUARANTEED
+
+**The precise branch:** `inlinePanel.js:395` — `bookBtn.click()` — is reached with **no
+comparison whatsoever** between the button's bound `sheetLoadId` and the load actually open
+in `#selected-work-sheet`. If the sheet's content differs from the panel's load at that
+instant, **the wrong load is booked, and nothing in the code would notice or report it.**
+
+**Likelihood from source alone — stated as the two separable parts:**
+
+- The **single-panel rule** (`:1165`) and the **loop being stopped** (`:1835`,
+  `content.js:500`) make a divergence *unlikely on the ordinary path*. Both are
+  side-effects of other features, not guards on booking — **neither was designed to protect
+  this, and either could change without anyone connecting it to Fast Book.**
+- The **5-second document-wide confirm poll** (`:401-429`) is the widest exposure, and it
+  is not bounded by either of those side-effects: it survives panel removal and searches the
+  whole page.
+
+⚠ **The frequency cannot be established from source.** It depends on whether Amazon re-uses the
+sheet element for a different load — see item 4 for what Ihor would need to observe.
+
+**No recommendation is made here, and no patch was written. Fast Book is closed again.**
+
 
 ### 0ak. 🔜 1.1 CANDIDATE — a distinct audio cue for a price increase
 

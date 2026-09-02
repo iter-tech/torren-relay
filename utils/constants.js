@@ -84,7 +84,17 @@ const CAPTURE_RESPONSES = false;
 const CITY_ASSIGN_DEBUG = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FEATURE SWITCH — per-city card filtering (2026-08-13). Shipped OFF.
+// PRODUCT FLAG — per-city card filtering (2026-08-13). SHIPPED ON, and it must stay that way.
+//
+// 🔑 THIS IS NOT A DEBUG SWITCH, and it is the one flag in this file that must NOT be flipped
+// when the others are. HANDOFF rule 11: it stays `true`. Turning it off does not quiet a log —
+// it silently removes per-city filtering, which is the feature the city buttons exist for. The
+// buttons stay on screen and stop filtering, so it reads as a broken board, not a disabled flag.
+//
+// ⚠ CORRECTED 2026-08-27. This line said "Shipped OFF" from 2026-08-13 until today, describing
+// the state it was BUILT in rather than the state it SHIPS in. Anyone returning flags to their
+// shipped values by reading these headers would have killed per-city filtering, which is exactly
+// the mistake this comment now exists to prevent.
 //
 // ⚠ THIS IS THE ONLY FLAG IN THIS FILE THAT CAN CHANGE WHAT THE DISPATCHER SEES. Everything
 // else here is logging. With this on, applyCityFilter() may set style.display on Amazon's load
@@ -106,3 +116,163 @@ const CITY_ASSIGN_DEBUG = false;
 // mirror, because the filter lives entirely in the isolated world where the DOM work happens.
 // content/networkObserver.js neither reads nor needs it.
 const CITY_FILTER_ENABLED = true;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRODUCT FLAG — Fast Book. SHIPS `false` IN 1.0. Added 2026-08-27, Ihor's decision.
+//
+// 🔑 WHY IT IS FALSE, AND WHY THAT IS NOT A DEFAULT: the store listing states that this
+// extension "does not book loads". For 1.0 that sentence must be true of the SHIPPED BUILD, not
+// merely true of the default settings — a reviewer reads the source, and a booking path that is
+// only one storage key away from firing does not match that description. With this false there
+// is no reachable path from any UI or console call to Amazon's Book button.
+//
+// ⚠ NOTHING WAS DELETED. Every part of Fast Book is still here and unmodified — the two-step
+// click sequence, the identity gate, the payout gate, the rehearsal helpers and fastbook-suite.
+// Flipping this to `true` restores the 2026-08-27 behaviour exactly. This is a 1.1 re-enable
+// held behind one constant, not a removal.
+//
+// 🔑 THREE INDEPENDENT GATES, AND ANY ONE ALONE IS SUFFICIENT:
+//   1. content/inlinePanel.js buildActionBar()  — the button is never CREATED or inserted.
+//   2. popup/popup.js                            — the Booking section is REMOVED from the DOM,
+//                                                  so the toggle cannot be set at all.
+//   3. content/inlinePanel.js executeFastBook()  — refuses at ENTRY, before any DOM read, so a
+//                                                  direct __EXT_DEBUG call cannot reach a click.
+// They are deliberately redundant. Gate 3 alone holds even if someone re-adds a button by hand.
+//
+// ⚠ WHEN THIS FLIPS TO TRUE, THE MANIFEST DESCRIPTION MUST CHANGE IN THE SAME COMMIT. The
+// description's truth depends on this constant. See BACKLOG 0ao.
+const FAST_BOOK_ENABLED = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔑 ARE WE ON THE LOAD BOARD? THE ONE DEFINITION. Added 2026-08-31.
+//
+// WHY: the extension used to activate on ANY Relay page. On /dashboard the top bar floated
+// mid-screen over Amazon's own UI about half a second after the page opened, because there was
+// no page check anywhere — only a LOGIN check.
+//
+// ⚠ ONE DEFINITION, USED EVERYWHERE. Every gate in the extension composes with this function;
+// no file does its own path test. Three copies of a card lookup have already cost this project a
+// day, and a second copy of THIS would be worse — a page check that disagrees with itself means
+// half the UI renders on the dashboard.
+//
+// ── WHAT IS MEASURED, AND WHAT IS NOT ────────────────────────────────────────
+// MEASURED on relay.amazon.com: the load board path is /loadboard/search. Recorded independently
+// in docs/AMAZON_SELECTORS.md:492, docs/TEST_CASES.md:13, docs/BACKLOG.md:308 and
+// content/inlinePanel.js:1808 — all from the 2026-08-27 sheet measurement, all saying the URL
+// "stays /loadboard/search".
+//
+// 🔴 NOT MEASURED on the other TEN domains. The manifest ships to eleven Relay domains, and
+// every capture on disk is from relay.amazon.com — the other ten appear exactly once each, in
+// the manifest's own host list, never in a capture. ⚠ SO THE PATH IS NOT GUESSED FOR THEM: the
+// rule matches the FIRST PATH SEGMENT ONLY, which is the broadest check the evidence supports,
+// and an unrecognised Relay page SAYS SO OUT LOUD (see warnIfUnrecognisedRelayPage below).
+// Silently never activating on a whole domain would be worse than the bug this fixes.
+// How often the SPA navigation watch compares location.pathname. One string comparison, and it
+// has to keep running while the extension is INACTIVE — that is the state we must notice leaving.
+// 500 ms matches the "about half a second" the bar already took to appear, so arriving at the
+// board feels the same as it does today.
+var NAV_WATCH_POLL_MS = 500;
+
+var LOAD_BOARD_PATH_SEGMENT = 'loadboard';
+
+// True when the current page is Amazon's load board.
+//
+// Matches on the first path segment, so /loadboard, /loadboard/search and any future
+// /loadboard/<whatever> all count, while /dashboard, /trips and the rest do not. Deliberately
+// NOT an exact match on '/loadboard/search': a sibling board route would then be treated as a
+// non-board page and the extension would go dark with no explanation.
+function isLoadBoardPage() {
+  try {
+    var path = (window.location && window.location.pathname) || '';
+    // ⚠ WIDENED 2026-08-31, SAME DAY, AFTER A LIVE FAILURE. The first version required
+    // 'loadboard' to be the FIRST path segment. Ihor reported the extension not activating on
+    // relay.amazon.com/loadboard/search — and the first-segment rule is provably correct for
+    // exactly that string, which means the live pathname was NOT exactly that string. A prefix
+    // (locale, region, app root) is the ordinary reason, and the first-segment rule rejects
+    // every one of them.
+    //
+    // So the rule is now: ANY path segment equal to 'loadboard'. This accepts /loadboard/search,
+    // /us/loadboard/search and any other prefixed form, WITHOUT inventing which prefix it is —
+    // that would be the guess this must not make.
+    //
+    // ⚠ IT IS STILL SEGMENT EQUALITY, NOT A SUBSTRING. '/loadboards/search',
+    // '/loadboard-archive' and '/myloadboard' are still correctly rejected, because a substring
+    // test would have matched all three.
+    var segs = path.toLowerCase().split('/');
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i] === LOAD_BOARD_PATH_SEGMENT) return true;
+    }
+    return false;
+  } catch (e) {
+    // Fails CLOSED, like every other gate here. window.location.pathname cannot realistically
+    // throw, so this is a genuine anomaly and is reported rather than swallowed.
+    if (typeof logger !== 'undefined' && logger.error) {
+      logger.error('constants', 'isLoadBoardPage failed — treating the page as NOT the load ' +
+        'board, so nothing is injected', { error: e });
+    }
+    return false;
+  }
+}
+
+// 🔴 A PAGE WE DO NOT RECOGNISE MUST NOT FAIL SILENTLY — ON ANY DOMAIN.
+//
+// ⚠ COMMENT CORRECTED 2026-08-31. It used to say that relay.amazon.com stayed quiet because its
+// path was measured, and that only the other ten warned. That WAS the behaviour, it was removed
+// the same day, and this header was left describing it — a comment stating the opposite of the
+// code beneath it, which is the same trap the CITY_FILTER_ENABLED header set.
+//
+// 🔑 ALL ELEVEN RELAY DOMAINS ARE TREATED IDENTICALLY HERE. Whenever we decline to activate on a
+// Relay page, we say so out loud and name the path — the same rule as the radius warnings: a
+// failure the dispatcher depends on must be VISIBLE. The .com suppression is what made the
+// 2026-08-31 non-activation undiagnosable, on precisely the domain where the diagnostic was
+// needed.
+//
+// ⚠ THE ONLY PLACE IN THE EXTENSION THAT STILL TREATS .com DIFFERENTLY is radiusUnitCaveat()
+// (content/cityAssign.js). That asymmetry is DELIBERATE and unrelated to domain support: it is
+// about the radius UNIT being unknown on a metric board, and it gates no behaviour — it only
+// appends a caveat to a diagnostic line. Nothing about activation, injection or matching varies
+// by domain.
+//
+// ⚠ console.warn, NOT logger.warn, ON PURPOSE. logger.warn is silenced at the shipped
+// DEBUG_LEVEL of 1, which is exactly how radiusUnitCaveat()'s warning ended up invisible in a
+// shipped build. This one has to survive that.
+//
+// Deduped per path so a dispatcher clicking around does not get a wall of identical lines.
+var _extUnrecognisedPathsWarned = {};
+function warnIfUnrecognisedRelayPage() {
+  try {
+    if (isLoadBoardPage()) return false;
+    var host = (window.location && window.location.hostname) || '';
+    // ⚠ THE .COM SILENCE IS GONE (2026-08-31, same day). It used to return here for
+    // relay.amazon.com on the reasoning that the path was measured there, so declining was
+    // always correct and a warning would be noise.
+    //
+    // 🔑 THAT WAS THE WRONG CALL, AND IT COST A DEBUGGING SESSION. When the extension failed to
+    // activate on relay.amazon.com/loadboard/search, the ONE diagnostic that would have printed
+    // the real pathname was suppressed on precisely the domain where it was needed. A gate that
+    // declines silently is the failure mode this whole warning exists to prevent — the domain it
+    // happens on does not change that.
+    //
+    // The cost is one deduped console line per distinct non-board path. That is a fair price for
+    // never having to guess a pathname again.
+    var path = (window.location && window.location.pathname) || '(unknown)';
+    if (Object.prototype.hasOwnProperty.call(_extUnrecognisedPathsWarned, path)) return false;
+    _extUnrecognisedPathsWarned[path] = true;
+
+    console.warn('[EXT] Torren Relay did NOT activate on this page.' +
+      '\n      host : ' + host +
+      '\n      path : ' + path +
+      '\n      The extension only runs on the load board, which it recognises by ANY path' +
+      '\n      segment equal to "' + LOAD_BOARD_PATH_SEGMENT + '".' +
+      '\n      If this IS the load board, the path does not contain that segment and needs' +
+      '\n      reporting — copy the path above verbatim.' +
+      '\n      If this is the Dashboard or another page, nothing is wrong.');
+    return true;
+  } catch (e) {
+    if (typeof logger !== 'undefined' && logger.error) {
+      logger.error('constants', 'warnIfUnrecognisedRelayPage failed — the page check itself is ' +
+        'unaffected', { error: e });
+    }
+    return false;
+  }
+}

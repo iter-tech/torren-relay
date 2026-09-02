@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Monitors Amazon Relay Load Board for new loads. Does NOT book loads.",
 
-  "permissions": ["storage", "scripting", "activeTab", "clipboardWrite"],
+  "permissions": ["storage", "clipboardWrite"],
   "host_permissions": [
     "https://relay.amazon.ca/*",
     "https://relay.amazon.co.jp/*",

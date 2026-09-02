@@ -113,6 +113,17 @@ document.addEventListener('DOMContentLoaded', function () {
   var surgeToggle        = document.getElementById('popup-surge');
   var surgeThreshold     = document.getElementById('popup-surge-threshold');
   var fastBookToggle     = document.getElementById('popup-fast-book');
+
+  // 🔑 GATE 2 of 3 (2026-08-27) — REMOVE the Booking section outright when Fast Book is disabled
+  // in this build. Removed, not hidden: the toggle cannot be reached, checked, or scripted, and
+  // `fastBookToggle` becomes null so every use of it below is skipped by its own existing guard.
+  // `typeof` guard so a popup that failed to load constants.js fails CLOSED.
+  if (typeof FAST_BOOK_ENABLED === 'undefined' || FAST_BOOK_ENABLED !== true) {
+    var bookingBlock = document.getElementById('popup-booking-block');
+    if (bookingBlock) bookingBlock.remove();
+    fastBookToggle = null;
+    logger.log('popup', 'Fast Book is disabled in this build — Booking section removed');
+  }
   // D1 (2026-08-20): the shared-limit toggle was removed from popup.html and the feature ships
   // OFF. These three lookups now return null and every use below is already null-guarded, so
   // the wiring is inert rather than deleted — restoring the markup restores the feature.
