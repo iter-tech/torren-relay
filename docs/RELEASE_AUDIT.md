@@ -87,10 +87,14 @@ removed can settle it.** Source cannot.
 
 - ✅ **`EXT_NAME` is NOT `'Amazon Relay Helper'` any more** — `utils/constants.js:25` reads
   **`'Torren Relay'`**, matching `manifest.json:3`. That premise is out of date.
-- ⚠ **The description is the ORIGINAL and it is now FACTUALLY WRONG.** `manifest.json:5`:
-  *"Monitors Amazon Relay Load Board for new loads. **Does NOT book loads**."*
-  **Fast Book books loads.** It clicks Amazon's Book button (`content/inlinePanel.js:562`) and its
-  confirm button (`:614`). This must be rewritten before submission — see Part D.
+- ✅ **REWRITTEN 2026-09-02 (Ihor's wording).** `manifest.json:5` now reads *"Monitors the Amazon
+  Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch
+  workflow."* — **126 chars**, within the 132 limit. ⚠ **The mismatch that made this a blocker is
+  gone for two independent reasons:** the description no longer makes any claim about booking,
+  **and** Fast Book is gated off by `FAST_BOOK_ENABLED = false`. 🔑 **Neither the listing nor the
+  privacy policy now depends on a booking claim** — but the internal safety rule in
+  `MVP_SPECIFICATION.md` ("does NOT book loads. Ever.") is untouched and still governs
+  `FORBIDDEN_SELECTORS`, the click intents and the Fast Book gate.
 
 ### A5. Version
 
@@ -108,7 +112,6 @@ Judged **by consequence to a dispatcher**, not by age. Three verdicts only.
 | id | what it is | why it blocks |
 |---|---|---|
 | **PKG-1** | ⚠ **`utils/supabaseConfig.js` is REQUIRED by the manifest but NOT COMMITTED** — `.gitignore:8`; `git ls-files` lists only `supabaseConfig.example.js` | The manifest loads it as content script #5 (`manifest.json:47`). **A zip built from a clean checkout is missing it and the extension breaks on load.** It exists only on this machine. |
-| **DESC** | `manifest.json:5` says *"Does NOT book loads"* while Fast Book books loads (`inlinePanel.js:562`, `:614`) | A false statement in the listing, to both the reviewer and the user. **CWS treats description/behaviour mismatch as a policy violation.** |
 | **0ad / PLAN 21** | The search radius is a **bare number with no unit**; `radiusUnitCaveat()` (`cityAssign.js:2226`) warns on a non-`.com` host | 🔑 **The manifest ships to TEN non-US Relay domains** — eleven in total with `.com` (`.ca .co.jp .co.uk .cz .de .es .fr .it .in .pl`, `manifest.json:9-19`, mirrored in `content_scripts.matches`). On a metric board the number is read as miles and the filter is wrong. ⚠ **AND THE WARNING IS INVISIBLE IN A SHIPPED BUILD** — all three call sites (`:2009`, `:2075`, `:3173`) are `logger.log`, which `DEBUG_LEVEL = 1` silences. **Either narrow the manifest to `.com` or get one non-`.com` capture.** |
 | **PLAN 11** | Full manual smoke pass — **never run for this entire phase** | Nothing built since 2026-08-20 has been seen working end to end. See Part C. |
 | **UNCOMMITTED** | `content/inlinePanel.js` — today's Fast Book fix is in the working tree only | `git status` shows it modified. **Without this commit the build still has Fast Book blocked on every press.** Five docs are likewise uncommitted. |
@@ -228,6 +231,12 @@ and **`тимчасові файли/`** (the latter contains load-text scratch 
 **Include:** `manifest.json`, `background.js`, `content/`, `utils/` (**with the real
 `supabaseConfig.js`**), `popup/`, `vendor/`, and the new `icons/`.
 
+> ✅ **AUTOMATED 2026-09-02 — `scripts/build-zip.mjs`.** The list above is no longer applied by
+> hand: the script derives it from `manifest.json` and from every HTML page the manifest
+> references, refuses to build if any referenced path is missing, and verifies the finished
+> archive by reading it back (manifest at root, forward slashes, every file present, no excluded
+> path inside). **41 files, 416.2 KB, all assertions passed.**
+
 ⚠ **Zip the CONTENTS, not the folder** — `manifest.json` must sit at the archive root.
 
 ⚠ **`vendor/` carries two minified libraries** — `html2canvas.min.js` (194 KB) and
@@ -236,15 +245,23 @@ versions and origins ready.
 
 ### Listing requirements — none of these exist yet
 
-- 🔴 **A privacy policy URL.** Required, and required *because* the extension authenticates users
-  and talks to Supabase. **No privacy policy page exists in this repository** — only passing
-  mentions in `HANDOFF.md` and `PLAN.md`.
-- 🔴 **A data-use disclosure**, consistent with what the code does: it reads load-board responses
-  and sends an account identity to Supabase.
-- 🔴 **A single-purpose statement.** ⚠ This one needs thought: monitoring, filtering, posting a
-  truck, and booking is a broad surface, and a weak single-purpose answer draws rejections.
-- 🔴 **Screenshots** (1280×800 or 640×400) and a store icon.
-- 🔴 **Reviewer test credentials.** 🔑 **This is the one most likely to sink a first submission.**
+- 🟠 **A privacy policy URL.** ✅ **TEXT DRAFTED 2026-09-02** — `docs/PRIVACY_POLICY.md`, every
+  claim verified against source (two undisclosed items found and added: the Google Maps route
+  button and the `supabase.co` host permission). ⚠ **STILL OPEN: it must be HOSTED.** A file in
+  the repo is not a URL, and the store requires a publicly reachable address.
+- ✅ **A data-use disclosure** — **WRITTEN 2026-09-02**, `docs/STORE_LISTING.md` §5: the data-type
+  table, all three certifications, and the two mismatches flagged (the policy URL 404'd at the time
+  — **since resolved, see below**; the
+  Google Maps route button has no obvious form slot and needs a free-text line).
+- ✅ **A single-purpose statement** — **WRITTEN 2026-09-02**, `docs/STORE_LISTING.md` §1, with a
+  table mapping every shipped feature to the stated purpose. ⚠ Booking is no longer part of the
+  surface (Fast Book is gated off), which narrows it usefully. **Post-a-Truck remains the weakest
+  fit and the answer to a challenge is written out.**
+- 🟠 **Screenshots** (1280×800) — **SHOT LIST WRITTEN 2026-09-02**, `docs/STORE_LISTING.md` §6:
+  four required shots plus one optional, each with what must and must NOT be on screen (no carrier
+  name, no account email, no Fast Book button, no bookmarks bar). ⚠ **Still to be captured.**
+- 🟠 **Reviewer test credentials** — **NOTES BLOCK WRITTEN 2026-09-02**, `docs/STORE_LISTING.md`
+  §7, with a marked placeholder for the account Ihor creates. ⚠ **Still to be created.** 🔑 **This is the one most likely to sink a first submission.**
   The extension only activates behind a login (`isAuthGateActiveSync`, `utils/authGate.js:107`)
   **and** only on `relay.amazon.*` — a reviewer has neither an Amazon Relay carrier account nor a
   Torren login. **Without a working test account and step-by-step instructions in the reviewer
@@ -255,3 +272,180 @@ versions and origins ready.
 
 *Audit only. Nothing here was fixed, and no other document was edited. What gets done, and in
 what order, is Ihor's decision.*
+
+
+---
+
+# FINAL PRE-SUBMISSION VERIFICATION — 2026-09-02
+
+**Read-only. No production code was changed.** Everything below was checked against
+`dist/torren-relay-1.0.0.zip` and the repository — **not against any MD file's claims**, including
+this document's own earlier sections.
+
+**Mechanically verified here:** items 1, 2, 3 and 4 in full. **Depends on Ihor:** every item in §5
+marked *live*, and the single smoke test in §6 — the archive is complete *by assertion*, and has
+never been loaded in a browser.
+
+---
+
+## 1. The archive — ✅ ALL CHECKS PASS
+
+| check | result |
+|---|---|
+| `manifest.json` at the archive ROOT | ✅ present, no wrapper folder |
+| valid JSON, `version` | ✅ parses; **1.0.0** |
+| entry-name separators | ✅ forward slashes throughout |
+| `icons` block, all four sizes | ✅ present, every path inside the archive |
+| `action.default_icon`, all four sizes | ✅ present, same four paths |
+| every icon a real PNG (file signature) | ✅ `89504e470d0a1a0a` on all four |
+| every manifest-referenced file inside | ✅ **39/39** |
+| excluded paths leaked in | ✅ **none** — no `samples/`, `docs/`, `node_modules/`, `.git/`, `*-suite.mjs`, `scripts/`, `dist/`, root `*.md`, `.gitignore`, and neither stray temp folder |
+
+**Size: 41 files · 416.2 KB zipped (426,188 bytes) · 1343.1 KB uncompressed (1,375,313 bytes).**
+
+✅ **The icons are now correctly sized** — 16×16, 32×32, 48×48, 128×128, four distinct files
+(md5s `ef5a3739` / `9ea5a45c` / `380ee703` / `eb0f2df8`). The earlier finding that all four were
+byte-identical copies of the 128px image **is resolved.**
+
+---
+
+## 2. Shipping values — ✅ NO MISMATCH ANYWHERE
+
+Checked in **three** places, because the archive was built from the working tree rather than from
+`HEAD`: the committed value (`git show HEAD:`), the working tree, and **the file as it exists
+inside the zip**.
+
+| constant | HEAD | worktree | in archive | expected | file:line |
+|---|---|---|---|---|---|
+| `DEBUG_LEVEL` | 1 | 1 | 1 | 1 | `utils/constants.js:42` |
+| `CITY_ASSIGN_DEBUG` | false | false | false | false | `utils/constants.js:84` |
+| `CITY_ASSIGN_DEBUG` *(MAIN mirror)* | false | false | false | false | `content/networkObserver.js:51` |
+| `CAPTURE_RESPONSES` | false | false | false | false | `utils/constants.js:62` |
+| `CAPTURE_RESPONSES` *(MAIN mirror)* | false | false | false | false | `content/networkObserver.js:39` |
+| `CITY_FILTER_ENABLED` | true | true | true | true | `utils/constants.js:118` |
+| `CITY_FILTER_ENABLED` *(MAIN mirror)* | true | true | true | true | `content/networkObserver.js:64` |
+| `FAST_BOOK_ENABLED` | false | false | false | false | `utils/constants.js:144` |
+
+🔑 **All three mirrors agree with their constants. Zero mismatches.** All eight values are
+committed — the archive does not ship anything uncommitted in these files.
+
+---
+
+## 3. What the dispatcher sees at stock level — ✅ QUIET
+
+At `DEBUG_LEVEL = 1` the logger emits **`logger.error` only**; `log`, `warn` and `debug` are
+suppressed (`utils/logger.js:36-40`). So stock-level output is: ungated `console.*` calls, plus
+`logger.error`.
+
+### Prints automatically — and each is deliberate
+
+| file:line | fires when | kept because |
+|---|---|---|
+| `utils/constants.js:262` | the extension declines to activate on a Relay page | the page gate must not fail silently. **Deduped per path; never fires on the load board.** |
+| `content/cityAssign.js:2205` | a city's search radius could not be read | the dispatcher must know his radius was not used |
+| `content/cityAssign.js:3573` | the `/search` request body could not be read at all | same reason |
+| `background.js:308` | a request fails with a **non**-rate-limit status | ⚠ **the only unintended one.** A plain `console.log` in the **service-worker** console, not the page. Fires only on a genuine failure that is not 429/502/503/504, so **not a stream** — a reviewer sees it only if Amazon errors, and only if they open the service worker. **Left as-is; noted.** |
+
+### Confirmed NOT to print in normal operation
+
+- **All 8 `executeFastBook` error sites** (`inlinePanel.js:419`–`:634`) — unreachable: gate 3
+  returns at function entry while `FAST_BOOK_ENABLED` is false.
+- **All 3 `sheetOpenLoadId` error sites** (`:1847`, `:1872`, `:1881`) — its only callers are
+  `executeFastBook` (unreachable), `fastBookDryRun` (manual, returns early when disabled), and
+  `clickDiagSheetLoadId`, whose callers sit inside the `CITY_ASSIGN_DEBUG` diagnostics.
+- **Both `detailOpener` "BLOCKED: forbidden element" errors** (`:207`, `:328`) — `FORBIDDEN_SELECTORS`
+  is an empty array (`utils/constants.js:1-2`), so `isForbiddenElement()` always returns false and
+  neither branch is reachable. *(Recorded separately as a safety finding — see §5.)*
+- **Every `__EXT_DEBUG` printout** — reachable only by typing the helper name in the console.
+- `cityAssign.js:3544` — gated on `cityVerboseDiagnostics()` → `CITY_ASSIGN_DEBUG`, false.
+
+🔑 **On a clean load of the board, the console shows nothing from this extension.**
+
+---
+
+## 4. `__EXT_DEBUG` surface — 39 helpers
+
+⚠ **All 39 are registered unconditionally** — they are not behind `CITY_ASSIGN_DEBUG`. They are
+inert unless typed into the console, but they are enumerable by anyone who opens DevTools.
+
+### 🔑 Can any of them book, post, or click Amazon's Book button?
+
+| helper | verdict |
+|---|---|
+| `fastBookDryRun` | ✅ **CANNOT.** Returns `{disabled:true}` at entry (`inlinePanel.js:2307`) while the flag is false. Even if it proceeded, it passes `dryRun=true` and returns before both click sites. |
+| `fastBookForceMismatch` | ✅ **CANNOT.** Returns `false` at entry (`inlinePanel.js:2398`); arms nothing. |
+| `openPostModal` | ⚠ **Opens the PAT form; does NOT submit.** `submitOrder()` is reached only from the Confirm button inside the modal (`patModal.js:1657`). A reviewer would have to fill the form and press Confirm deliberately. |
+
+**Helpers that do click Amazon elements — both are the extension's ordinary, advertised actions:**
+`openTopNew` (opens a load card, same as a user click) and `refreshNow` (presses Amazon's own
+refresh button). Neither books.
+
+**The remaining 34** act only on our own UI, our own state, or are read-only: `memReport`,
+`pageGate`, `cityAssignments`, `getLoads`, `getSearchRequest`, `getSearchRequestIssue`,
+`dumpSearchRequest`, `dumpTrailerLabels`, `dumpAutoOpenDiag`, `getEquipmentEnumMap`,
+`getSeenEquipmentTypes`, `rateDiag`/`rateDiagOn`/`rateDiagOff`/`rateDiagClear`,
+`simulateRateLimit`, `simulateRecovery`, `simulateSurge`, `surgeCandidates`, `filterCity`,
+`showPanel`, `removePanel`, `removePatModal`, `highlightNew`, `clearHighlights`,
+`recomputeTagHiding`, `toggleNight`, `toggleHideSimilar`, `playAlert`, `flashTabAlert`,
+`stopTabAlert`, `detectNewLoads`, `resetKnownLoads`, `findRefreshButton`, `refreshDryRun`,
+`initManualToggle`.
+
+---
+
+## 5. Residual risk list — **could a reviewer hit it in a few minutes?**
+
+| risk | reviewer-visible in minutes? |
+|---|---|
+| Radius unit on non-`.com` domains | ❌ **No.** Needs a non-`.com` Relay carrier account. |
+| P/R detection is a DOM dependency; **the R branch has never executed** | ❌ **No.** Needs PAT opened on an R-badge load. |
+| `FORTY_FOOT_CONTAINER` and `FIFTY_THREE_FOOT_REEFER_TRUCK` unmapped | ❌ **No** — and it fails safe: routed to the unsupported-equipment modal, never posted wrong. |
+| `_cityNoCoordIds` / `_cityCoordCache` unbounded within a session | ❌ **No.** Growth over hours; invisible in minutes. |
+| `ext-sidebar-styles` accumulates one `<style>` per logout→login | ❌ **No.** ~11 KB, invisible; needs a login cycle to occur at all. |
+| PAT drag listeners removed lazily (next mouseup after close) | ❌ **No.** Invisible, self-healing. |
+| `gateStillOpen()` orphaned (`content.js:323`) | ❌ **No.** Dead code, zero runtime effect. |
+| `readMainCardElements()` has no dedupe | ⚠ **Marginally.** A card with two UUID-shaped `div[id]`s would be counted twice, and per-city counts are **on screen**. Never hides a load. The only item here with a visible surface. |
+| `normalizeState()` truncation in the PAT path (`patApi.js:134`) | ❌ **No.** Needs PAT on a load whose state arrives as a full name outside the lookup. |
+| Night-mode zebra striping in the panel | ⚠ **Yes, if they toggle night mode.** Purely cosmetic — alternating row fill that light mode no longer has. |
+| ⚠ **`FORBIDDEN_SELECTORS` is an empty array** (`utils/constants.js:1-2`) | ❌ Not visible — but recorded because it means the "never books a load" guard is **disarmed**. **Inert in this build:** Fast Book is gated off three ways, and no other code path clicks a booking control. **It must be repopulated before `FAST_BOOK_ENABLED` is ever flipped true.** |
+
+**Only two have any chance of being noticed, and both are cosmetic.**
+
+---
+
+## 6. VERDICT
+
+**The package itself is submittable. The submission is not, and the gap is entirely outside the
+code.** Every mechanical check passes: the archive is well-formed with `manifest.json` at its
+root, all 39 manifest-referenced files present and no excluded path leaked in, all four icons
+correctly sized and real PNGs, all eight shipping constants correct and in agreement across
+`HEAD`, the working tree and the archive itself, a console that is silent in normal operation, and
+a debug surface on which **nothing can book or post without a deliberate human click**. What
+stands in the way is not the build:
+
+1. ✅ **CLOSED — the privacy policy is published AND its content verified.** Live at
+   `https://iter-tech.github.io/torren-relay/`. **Ihor opened the page on 2026-09-03 and
+   confirmed it renders the policy text, not a README.** The earlier "reachability verified,
+   content not" caveat is withdrawn.
+2. ✅ **CLOSED — the reviewer test account exists and works.** `torrenrelayreview@proton.me`;
+   sign-in verified live on 2026-09-03 — the one-time code arrives, sign-in completes, and the
+   panel works on the load board. The address is now in `docs/STORE_LISTING.md` §7.
+   ⚠ **The mailbox password deliberately does NOT appear in this repository, in any file or in
+   any form.** Ihor types it into the store form himself.
+3. 🔴 **OPEN — screenshots must be captured.** The shot list is written (`docs/STORE_LISTING.md`
+   §6); the images are not taken.
+4. 🟠 **OPEN — the build must be loaded once in a clean Chrome profile** and the login flow
+   completed. ⚠ **This is the only proof that `utils/supabaseConfig.js` is genuinely inside the
+   package and working** — it is the one file whose absence has broken this project before, and
+   no assertion here can substitute for one successful sign-in.
+5. ✅ **CLOSED — a reviewer walkthrough video exists.** `https://youtu.be/m1KnIF77u1g` (Unlisted),
+   showing sign-in and the extension working on a real load board. 🔑 **This is the strongest
+   available answer to the likeliest rejection** — that a reviewer cannot obtain an Amazon Relay
+   carrier account and so cannot see the load board at all. **Link it in the store form's reviewer
+   notes up front, and in any rejection reply.**
+
+⚠ **NOT SUBMITTED.** Beyond items 3 and 4, the store form itself remains: the developer fee, the
+listing fields, uploading the zip, and pressing Submit. Nothing has been sent to Google.
+
+⚠ **Two things this audit could NOT verify and that no amount of static checking will:** that the
+extension actually runs when loaded, and that sign-in succeeds from the packaged build. Items 1–3
+are a morning's work; item 4 is ten minutes.
