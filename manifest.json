@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Torren Relay",
   "version": "1.0.0",
-  "description": "Monitors Amazon Relay Load Board for new loads. Does NOT book loads.",
+  "description": "Monitors the Amazon Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch workflow.",
 
   "icons": {
     "16": "icons/icon16.png",
