@@ -2,6 +2,340 @@
 
 ## [Unreleased]
 
+### 2026-09-03 — 🔴 CORRECTION: the docs claimed 1.0.0 was submitted. It was not.
+
+**Documentation only.** No file under `content/`, `utils/`, `popup/`, `background.js` or
+`manifest.json` was touched, and `dist/torren-relay-1.0.0.zip` is unchanged.
+
+#### What was wrong
+
+Three documents — `STATE.md`, `docs/PLAN.md` and `docs/BACKLOG.md` — asserted that version
+1.0.0 was **submitted to the Chrome Web Store on 2026-09-02** and that the project was in
+"review-wait". **Nothing has ever been submitted.**
+
+⚠ **THE SOURCE OF THE ERROR WAS DOCUMENTATION ASSERTING AN EVENT THAT NEVER HAPPENED.** The
+2026-09-02 "post-submission readiness" task opened with *"The 1.0 package is submitted"*, and that
+premise was written into the status docs without being checked against the repository. It was
+checkable, and it was contradicted **in this very file's own project**: `docs/RELEASE_AUDIT.md`'s
+FINAL PRE-SUBMISSION VERIFICATION section, written the same day, concluded *"The package itself is
+submittable. **The submission is not**"* and listed four open items — and
+`docs/STORE_LISTING.md`'s pre-submission checklist was entirely unticked.
+
+🔑 **The cost of this class of error is specific: a future session reading `STATE.md` cold would
+have waited for a review outcome that could never arrive.** A status document that is wrong about
+what has happened is worse than one that is merely incomplete.
+
+#### What was corrected
+
+| file | change |
+|---|---|
+| `STATE.md` | Headline replaced: the package is **BUILT and mechanically verified, NOT submitted**. The "what to do when review comes back" table replaced with the three remaining pre-submission items in order. |
+| `docs/PLAN.md` | The "✅ 1.0.0 WAS SUBMITTED" banner rewritten — B1–B3 and the archive verification stay, the submission and review-wait claims are gone. Item 13 reopened with what is now done and what is not. |
+| `docs/BACKLOG.md` | 1.1 list header: "after 1.0 was submitted" → "while 1.0 was being prepared for submission". The list itself was correct and is untouched. |
+| `docs/RELEASE_AUDIT.md` | Verdict items 1 and 2 marked CLOSED; a fifth CLOSED line added for the walkthrough video; items 3 and 4 unchanged and still open. |
+| `docs/STORE_LISTING.md` | §7 placeholders replaced with the real test address and the video link; three checklist lines ticked. |
+| `docs/REVIEW_RESPONSE.md` | §4 answer block now contains the account and the video link, so a reply carries a link rather than an offer. |
+
+⚠ **Every verified technical fact was preserved.** The archive checks, the eight shipping
+constants agreeing across `HEAD`/worktree/archive, and the icon checks are all true and all
+remain. **Only the submission claim was false.**
+
+#### Newly closed, on Ihor's confirmation (2026-09-03)
+
+- **Privacy policy published and its content checked by eye** at
+  `https://iter-tech.github.io/torren-relay/`. The earlier "reachability verified, content not"
+  caveat is withdrawn.
+- **Reviewer walkthrough video** recorded and uploaded, Unlisted:
+  `https://youtu.be/m1KnIF77u1g`.
+- **Reviewer test account** `torrenrelayreview@proton.me`, sign-in verified live.
+  ⚠ **The mailbox password is deliberately absent from this repository — no file, no placeholder,
+  no example.** Ihor types it into the store form himself.
+
+#### Still open, unchanged
+
+The zip has **never been loaded in a clean Chrome profile**; **screenshots are not captured**; and
+the **store form** — fee, fields, upload, Submit — is not done.
+
+⚠ **These four facts came from Ihor, not from any verification of mine.** No page, video or
+account was checked by me — I have no browser.
+
+### 2026-09-02 (fifth) — Privacy policy URL updated to the `iter-tech` organisation
+
+**Docs only. No code, no behaviour change, and `dist/torren-relay-1.0.0.zip` is untouched** — the
+policy URL appears in no shipped file.
+
+The GitHub organisation moved to **`iter-tech`**. The policy is now served at
+`https://iter-tech.github.io/torren-relay/`.
+
+✅ **VERIFIED LIVE, not taken on trust:** the page returns **200**, and so does the repository
+behind it (`github.com/iter-tech/torren-relay`). The old `igorpol114-ship-it` URL returned 404 on
+both, which was recorded as **the single most likely cause of rejection**. **That blocker is now
+closed.**
+
+⚠ **Reachability was verified; the page CONTENT was not** — a request to fetch and inspect the
+rendered page was not permitted from here. **A 200 serving a README instead of the policy is still
+a rejection**, so the docs now say to eyeball it once rather than implying it is fully confirmed.
+
+**Updated:** `docs/STORE_LISTING.md` (the URL field, the §5-A mismatch — now marked resolved, and
+the pre-submission checklist), `docs/RELEASE_AUDIT.md` (verdict item 1, previously the first
+blocker), and `docs/REVIEW_RESPONSE.md` §5.
+
+⚠ **Two references were deliberately LEFT ALONE:** `docs/CHANGELOG.md:194` and `:201` record the
+2026-09-02 diagnosis of *why* GitHub Pages 404'd, under the old organisation name. **That entry is
+an accurate historical record of what was measured at the time** — rewriting it would erase the
+finding rather than update it. The current URL lives in the docs that state current status.
+
+### 2026-09-02 (fourth) — Post-submission readiness: playbook, release checklist, 1.1 ground
+
+**Docs only. ⚠ NOTHING HERE ALTERS SHIPPED BEHAVIOUR** — no file inside the extension package was
+touched, and `dist/torren-relay-1.0.0.zip` is unchanged and still valid.
+
+**New:**
+- `docs/REVIEW_RESPONSE.md` — the rejection playbook. Five likely reasons, each with what a
+  reviewer would say, a paste-ready factual answer, and **whether it needs a code change or only a
+  form edit**. Every answer carries a verified `file:line`; the "automates a third-party site"
+  entry cites all four Fast Book gates (`utils/constants.js:144`, `content/inlinePanel.js:857`,
+  `popup/popup.js:121`, `content/inlinePanel.js:392`).
+- `docs/VERSION_BUMP.md` — the release checklist, including the rule that **the CHANGELOG is
+  written before the zip, not after**, and that only `manifest.json` carries an authoritative
+  version.
+- `docs/CAPTURES_NEEDED.md` — every measurement still owed, written in the Network + Offline form
+  already in use, each naming the feature it unblocks and what happens if it never arrives.
+- **BACKLOG** gains an ordered **1.1 list at the top**, so the next session starts without
+  re-deriving anything.
+
+#### ⚠ A DOC ERROR FOUND AND CORRECTED RATHER THAN PROPAGATED
+
+While writing the 1.1 list, BACKLOG **0ai** was checked instead of copied. It claims
+`deadhead.value` "already crosses the postMessage boundary in `projectRecord()`", making
+deadhead-adjusted RPM "only a rendering decision".
+
+🔑 **It does not.** `projectRecord()` (`content/networkObserver.js:297`) emits `id`,
+`transitOperatorType`, `stopCount`, `totalDistance`, `distanceUnit`, `payout`, `payoutUnit`,
+`loads` — **the word `deadhead` appears nowhere in that file.** The panel reads deadhead from the
+**card DOM**: `content/loadParser.js:91-92` (`span[title="Deadhead"]`), arriving at
+`content/inlinePanel.js:1513`. **That makes the 1.1 item a DOM-coupling decision, not a rendering
+one** — the same class of dependency that killed task 7d. The correction sits beside the item so
+the next session does not begin from a false premise.
+
+**Two honest notes carried into the playbook rather than smoothed over:** Post-a-Truck is the
+weakest fit for a single-purpose claim, and the fallback (dropping it from 1.0) is recorded as
+Ihor's decision rather than a default; and "the reviewer could not access the functionality" is
+the rejection we can least fix, because a reviewer needs an **Amazon Relay carrier account** we
+cannot provision — so the playbook says to have the screen recording **made before replying**,
+not offered in the reply.
+
+### 2026-09-02 (third) — Store submission copy written
+
+**File:** `docs/STORE_LISTING.md` (new). Docs only.
+
+Every field for the Web Store form, each derived from the codebase rather than composed: single
+purpose statement, short description (matching `manifest.json` **byte-for-byte** — checked
+programmatically), detailed description, the four permission justifications, the privacy-practices
+answers, a screenshot shot list, and the notes-to-reviewer block.
+
+**Every permission justification carries a verified `file:line`:** `storage`
+(`popup/popup.js:507`, `utils/authGate.js:54`), `clipboardWrite` (`content/inlinePanel.js:1469`
+and `:752`), the eleven Relay domains (`utils/constants.js:184` + `utils/authGate.js:92`), and
+`*.supabase.co` (`utils/authGate.js:16`). ⚠ One citation was wrong on first write —
+`authGate.js:90` landed on a comment — and was corrected to `:92` by re-reading the line.
+
+#### Four things flagged rather than smoothed over
+
+1. 🔴 **The privacy policy URL was NOT REACHABLE when last measured** — both the page and the
+   repository behind it returned 404. **A 404 policy URL is an automatic rejection.** Marked
+   TO CONFIRM; the page content is ready, the hosting is not.
+2. ⚠ **Post-a-Truck is the weakest fit for a single-purpose claim.** It *posts* availability
+   rather than surfacing a load. Defensible — it prefills Amazon's own form and submits to a
+   **relative** Amazon path (`content/patApi.js:6`), adding no new destination — but a reviewer
+   could read it as a second purpose. The answer to give is written out.
+3. ⚠ **Google Maps appears in the privacy policy but has no obvious slot on the form.** The route
+   button opens Maps with the load's stop addresses in the URL
+   (`content/inlinePanel.js:790-801`). It is user-initiated navigation, not a transfer by the
+   extension, so the certifications still hold — but suggested free-text wording is provided so
+   the two documents cannot appear to disagree.
+4. ⚠ **The hardest part of the review is that a reviewer needs an Amazon Relay CARRIER account**
+   to see the load board at all. That is Amazon's and cannot be provisioned. The reviewer-notes
+   block pre-empts it and offers a recorded walkthrough.
+
+⚠ **Fast Book is deliberately absent from every field**, since `FAST_BOOK_ENABLED = false`
+(`utils/constants.js:144`) and the button is never built (`content/inlinePanel.js:858`). A note
+records that flipping that flag requires the listing to change in the same release.
+
+### 2026-09-02 (later) — Description reworded; `dist/` gitignored; archive rebuilt
+
+**Ihor's wording.** `manifest.json`, `.gitignore`, `STATE.md`, `docs/RELEASE_AUDIT.md`.
+
+```
+Monitors the Amazon Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch workflow.
+```
+
+**126 characters** (Ihor's brief said 127 — it is 126; either way well under the 132 limit).
+⚠ **Every mention of load booking is gone from the description**, as instructed — it no longer
+states, denies or implies anything about booking.
+
+#### ⚠ WHAT WAS DELIBERATELY NOT CHANGED, and why
+
+The phrase also appears in two places that are **not** the store description:
+
+- `MVP_SPECIFICATION.md:630` — *"This extension does NOT book loads. Ever. The only clicks it
+  performs:"* — and `:893`.
+- `README.md:6` — the developer-facing summary.
+
+🔑 **Those are the SAFETY CONTRACT, not listing copy.** That rule is what governs
+`FORBIDDEN_SELECTORS`, the named click intents, and the `FAST_BOOK_ENABLED` gate. Deleting it
+would remove a safety invariant while changing no behaviour — the opposite of the intent. **Left
+intact; flagged to Ihor.**
+
+#### The blocker is closed twice over
+
+RELEASE_AUDIT's **DESC** blocker existed because the old text claimed *"Does NOT book loads"* while
+Fast Book could book. That mismatch is now impossible **for two independent reasons**: the
+description makes no booking claim at all, **and** `FAST_BOOK_ENABLED` is `false`. Removed from
+the blocker list.
+
+#### Also
+
+- **`dist/` added to `.gitignore`** — verified with `git check-ignore`; the 416 KB archive and
+  `dist/stage/` no longer show as untracked, so they cannot be swept into a commit.
+- **Archive rebuilt** — `node scripts/build-zip.mjs`: 41 files, 416.2 KB, **all assertions
+  passed**. Confirmed by inflating `manifest.json` **out of the finished zip**: version `1.0.0`,
+  the new 126-char description, no mention of booking.
+
+⚠ **Not verified in a browser.**
+
+### 2026-09-02 — Store description finalised; submission archive built
+
+**Files:** `manifest.json`, `scripts/build-zip.mjs` (new), `dist/torren-relay-1.0.0.zip`.
+
+#### Description
+
+```
+Monitors the Amazon Relay load board, alerts you to new loads, and filters them by origin city. It does not book loads.
+```
+
+**119 characters** (limit 132). Names the three features that actually ship, and keeps the
+non-booking statement the privacy policy and the review both depend on. ⚠ It stays true only
+while `FAST_BOOK_ENABLED` is `false` — BACKLOG 0ao already requires flipping both together.
+
+#### The build script
+
+`node scripts/build-zip.mjs` → `dist/torren-relay-1.0.0.zip`.
+
+🔑 **THE FILE LIST IS DERIVED, NEVER HAND-MAINTAINED.** It parses `manifest.json` for
+`content_scripts.js/.css`, `background.service_worker`, `action.default_popup`, `icons` and
+`action.default_icon` — **then follows every HTML page it finds** for its own `src`/`href`
+references. That second step is what catches `popup/popup.js`, `popup/popup.css` and
+**`utils/supabaseConfig.js`**, which the manifest names but whose absence has broken this project
+before. **41 files**: 39 from the manifest, 2 more from `popup.html`.
+
+It refuses to write an archive unless every referenced path exists on disk, and then **verifies
+the finished zip by reading it back** — manifest at the root, forward-slash entry names, every
+referenced file present, no excluded path inside.
+
+#### ⚠ The read-back check earned its keep immediately
+
+The first version shelled out to .NET's `[ZipFile]::CreateFromDirectory`. On Windows PowerShell
+5.1 / .NET Framework that writes entry names with **BACKSLASHES** — `utilsconstants.js` — which
+**Chrome cannot read**. The verification caught it (28 "missing from the zip" failures on files
+that were plainly there), and the archive was never shipped. `Compress-Archive` has the same
+class of defect on some builds.
+
+**Replaced with a zip writer built on `zlib`** — no external tool, entry names joined with `/` by
+construction, byte-identical output on any platform, and a fixed timestamp so the same inputs
+produce the same archive.
+
+**Integrity confirmed independently:** all 41 entries inflate, byte-compare equal to their
+sources, and their CRC32s match **Node's own `zlib.crc32`** — a different implementation from the
+hand-rolled table that wrote them, so the writer is not vouching for itself.
+
+#### Result
+
+**41 files · 416.2 KB compressed · 1343.1 KB uncompressed · every assertion passed.**
+
+#### No remote code — what was checked
+
+| check | result |
+|---|---|
+| `src`/`href` to a CDN in packaged HTML | **none** — every reference is a local relative path |
+| `eval(` / `new Function(` in our code | **none** |
+| `eval(` / `new Function(` in the two vendor bundles | **zero in both** |
+| `importScripts` / dynamic `import()` | **none** |
+| runtime `createElement('script')` | **none** |
+| absolute URLs in our packaged code | only `supabase.co` (declared) and `google.com/maps/dir/` (the route button, disclosed in the privacy policy) |
+
+⚠ **Not verified in a browser.** The archive is complete by assertion, not by having been loaded.
+
+### 2026-09-02 — GitHub Pages 404 diagnosed; policy page added as static HTML
+
+**Files:** `docs/index.html` (new), `docs/.nojekyll` (new). ⚠ **The policy TEXT was not
+changed** — verified mechanically: 628 words in `PRIVACY_POLICY.md`, 628 in the HTML body, in an
+identical sequence. Only the format differs.
+
+#### 🔴 The primary cause was not in this repository
+
+`https://github.com/igorpol114-ship-it/torren-relay` returns **404 — that repository does not
+exist.** A GitHub Pages *project* site is served at `https://<user>.github.io/<repo>/`, so
+`/torren-relay/` can only resolve if a repo named `torren-relay` exists. **No Jekyll, index-file
+or Settings change could have fixed that URL.**
+
+This repository's remote is `6-New-Amazon_Relay-Project-Claude-Code` (confirmed reachable), so
+its Pages URL would be
+`https://igorpol114-ship-it.github.io/6-New-Amazon_Relay-Project-Claude-Code/`.
+
+#### The other findings, in order
+
+| # | checked | result |
+|---|---|---|
+| 1 | `docs/index.md` committed and pushed? | ❌ **It never existed** — no `docs/index.*` file of any kind. Even on the correct repo the root would 404. |
+| 2 | `docs/PRIVACY_POLICY.md` tracked? | ❌ **Untracked** — `git ls-files` empty, no commit touches it. **Third occurrence** of this pattern after `utils/supabaseConfig.js` and `icons/`. |
+| 3 | `docs/_config.yml` present? | **No** — Jekyll configuration was never the problem. |
+| 4 | Would `.nojekyll` help? | **Yes — added.** It removes the Jekyll build from the path entirely, so a build failure cannot 404 the page. |
+
+⚠ **A premise worth correcting for next time:** Pages with source `/docs` does **not** require
+`index.md`. It serves `index.html` equally well — and with `.nojekyll` beside it, with no build
+step at all, which is strictly more reliable.
+
+#### Why `index.html` and NOT `index.md`
+
+**Deliberately only one of them.** With Jekyll active, `index.md` *generates* `index.html`;
+shipping both invites a build conflict where the two compete for the same output path. `.nojekyll`
++ `index.html` means **no build runs at all** — what is committed is exactly what is served.
+
+**Still open — a decision, not a defect:** which repository hosts the page. Nothing here can be
+reached until the files are committed, pushed, and Pages is switched on somewhere.
+
+### 2026-09-02 — Privacy policy drafted and verified against source
+
+**File:** `docs/PRIVACY_POLICY.md` (new). No code changed.
+
+Ihor supplied a draft; every claim in it was checked against the codebase rather than accepted.
+**Nine claims verified true**, seven corrected. The two a Web Store reviewer would most likely
+catch:
+
+1. 🔴 **Google Maps was undisclosed.** `openRouteInMaps()` (`content/inlinePanel.js:790-801`)
+   builds a `google.com/maps/dir/` URL containing the load's **stop names and addresses** and
+   opens it. User-initiated, but Google receives that data, and the draft named no third party
+   while stating "we do not collect the contents of the loads you view".
+2. 🔴 **The `https://*.supabase.co/*` host permission was undisclosed.** The permissions section
+   listed three; the manifest requests four.
+
+Also corrected: session tokens described as "not transmitted to us" when `setSession` /
+`refreshSession` send them to Supabase by definition; `clipboardWrite` described as copying "load
+details" when the camera button copies a **PNG image**; "we do not collect the contents of the
+loads" reworded to what is actually true — the extension reads load data to display it and keeps
+it in the browser, but never sends it to our servers; the sign-in email held locally under
+`authPendingEmail` added to the local-storage list; and the date.
+
+**Verified TRUE and left standing:** email is the only personal data collected; Supabase traffic
+is **auth-only** (`signInWithOtp`, `verifyOtp`, `setSession`, `refreshSession`, `signOut` — no
+load data, settings or telemetry); **no analytics, advertising or tracking library exists
+anywhere**; the extension never sees Amazon credentials; and it runs only on Amazon Relay — now
+only on the load board.
+
+⚠ **A FILE IS NOT A URL.** The Web Store requires a publicly reachable privacy-policy address.
+This is the text, version-controlled beside the code it describes; **hosting it is still open.**
+
 ### 2026-09-02 — Icons wired into the manifest; version 0.1.0 → 1.0.0
 
 **File:** `manifest.json`. Closes release blocker **B2** (no icons) and the version item.

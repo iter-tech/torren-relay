@@ -112,6 +112,30 @@ reinstate the exact defect.
 
 ## 🔴 LAUNCH BLOCKERS — audited 2026-08-24. Not features; the package does not pass without them.
 
+> ## 📦 THE CODE BLOCKERS BELOW ARE CLOSED — the package is BUILT, and **NOT SUBMITTED**
+>
+> ⚠ **CORRECTED 2026-09-03.** This banner previously read "1.0.0 WAS SUBMITTED" and said the
+> project was in review-wait. **Neither was ever true — nothing has been sent to the Chrome Web
+> Store.** The blocker table below is genuinely closed; only the submission claim was wrong.
+>
+> **What IS verified** (see the FINAL PRE-SUBMISSION VERIFICATION section of
+> `docs/RELEASE_AUDIT.md`): the archive is well-formed with `manifest.json` at its root, all 39
+> manifest-referenced files present and no excluded path leaked in, all four icons correctly sized
+> real PNGs, and **all eight shipping constants correct and in agreement across `HEAD`, the
+> working tree and the archive itself**. B1–B3 are closed. That all stands.
+>
+> **🔴 THREE NON-CODE ITEMS REMAIN, none of them started:**
+> 1. The zip has never been loaded in a **clean Chrome profile** — the only real proof it runs.
+> 2. **Screenshots** (1280×800) have not been captured — shot list in `docs/STORE_LISTING.md` §6.
+> 3. **The store form** — developer fee, listing fields, upload, Submit.
+>
+> ✅ **Already done, confirmed by Ihor 2026-09-03:** the privacy policy is published and its
+> content checked by eye; a reviewer walkthrough video exists at `https://youtu.be/m1KnIF77u1g`;
+> and the reviewer test account `torrenrelayreview@proton.me` works — sign-in verified live.
+>
+> `docs/REVIEW_RESPONSE.md` is ready **for after submission**, if a rejection arrives.
+
+
 | # | blocker | closes when |
 |---|---|---|
 | **B1** | ⚠ **PARTLY RESOLVED 2026-08-26.** Both flags now read `1` / `false` and the suite is green (2433/0) — **but the change is UNCOMMITTED**, so the history at b1b4c96 still builds a debug extension | commit `utils/constants.js`. ✅ `capture-suite` already went green **by the flag being FIXED, not silenced** |
@@ -145,7 +169,7 @@ reinstate the exact defect.
 10. ✅ **CLOSED 2026-08-20 BY PRODUCT DECISION — the four-tab test is NO LONGER REQUIRED.** Ihor removed the "Shared refresh limit" toggle and the feature now ships OFF: silently slowing refreshes while the bar says "Refresh every 2.5s" reads as broken, not as protection. **With the shared limit off there is no aggregate-rate behaviour left to test across tabs**, so the four-tab aggregate requirement is retired. The machinery is intact and unreachable (BACKLOG 0s), one constant re-enables it, and ⚠ backoff is untouched and still pauses every tab. What replaced the test: **D2** the loop now STOPS by itself on **three CONSECUTIVE** 429/502/503/504 responses (2026-08-20 follow-up — an isolated 502 must not stop the board), in every tab, and never auto-restarts. Backoff still engages on the FIRST response: backoff and stop are deliberately decoupled. The counter is the existing `backoffStepIndex`, not a new field; **D3** a calm message appears in the TOP BAR and clears when the dispatcher restarts. Covered by TC-RATE-PAUSE in one tab. — PRIOR: **[INSTRUMENTED 2026-08-20 — ready for Ihor's four-tab run.]** The mechanism was read from source first and it is sound: one global `lastGrantedAt` floor in `chrome.storage.local`, FIFO through `permitQueueTail`, re-read after every wait, with backoff checked BEFORE the shared-limit toggle so a rate-limit status pauses every tab either way. **The aggregate rate CAN hold as built — no defect.** There is no token/lease/turn: it is a permit with a global floor, first-come-first-served. Diagnostics added (flag-gated, no behaviour change) so the aggregate is visible from ANY ONE console: `__EXT_DEBUG.rateDiagOn()` / `rateDiag()` / `rateDiagOff()`. The 503 pause is triggered ONLY by an HTTP status in `RATE_LIMIT_STATUSES = [429,502,503,504]` inside `reportResult()` — ⚠ **DevTools request blocking does NOT trigger it** (no status, different branch, and aborts are not reported at all), so `__EXT_DEBUG.simulateRateLimit()` was added: it calls the REAL `reportResult()`, proving pause/backoff/propagation/resume but NOT the networkObserver→content relay. `WATCH_PATH` confirmed still search-only. See CHANGELOG 2026-08-20 and TEST_CASES TC-RATE-4TAB. — ORIGINAL: **Cross-tab rate limiting — live multi-tab test (🚫 pre-launch blocker).** next. *Verify: 4 tabs open, aggregate request rate equals the global interval, not 4×; a forced 503 pauses and resumes all tabs together.*
 11. **Full manual smoke pass + outstanding TEST_CASES.** blocked (on Ihor running it). **Never run for this entire phase** — every change since 2026-08-13 reports the six items as NOT RUN. This is the single highest-value thing Ihor can do next. *Verify: all six smoke items pass — popup opens clean, logged-out popup shows only login, full login flow, sidebar activates, PAT modal Confirm enables, no page-console errors.*
 12. **All five debug flags back OFF, final build check.** blocked (on 11). ⚠ **`DEBUG_LEVEL` is currently `3` and must return to `1`.** The other four flags are already off; `CITY_FILTER_ENABLED` is a PRODUCT flag and stays `true`. *Verify: at stock level the console shows no CITY / capture lines at all.*
-13. **Store submission package** — manifest description copy, icons 16/32/48/128, privacy policy page, listing materials, data disclosure, version bump, zip. next (non-code). *Verify: I load the zipped build unpacked and it behaves exactly like the working tree.*
+13. **Store submission package** — **STILL OPEN (2026-09-03). NOT SUBMITTED.** ✅ Done: manifest description (126 chars), icons 16/32/48/128 wired and correctly sized, version bumped to 1.0.0, the zip built and self-verifying via `scripts/build-zip.mjs`, listing copy written (`docs/STORE_LISTING.md`), data disclosure drafted, **privacy policy published and its content checked** at `https://iter-tech.github.io/torren-relay/`, **reviewer walkthrough video recorded** (`https://youtu.be/m1KnIF77u1g`), and a **reviewer test account** (`torrenrelayreview@proton.me`) whose sign-in was verified live. 🔴 Not done: **(a)** the zip has never been loaded in a clean Chrome profile, **(b)** screenshots 1280×800 not captured, **(c)** the store form itself — developer fee, listing fields, upload, Submit. *Verify: I load the zipped build unpacked and it behaves exactly like the working tree.*
 
 ---
 

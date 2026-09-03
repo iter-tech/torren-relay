@@ -1,11 +1,74 @@
 # STATE.md — where the project stands
 
-**Last full sync: 2026-08-24.** Written to be read cold. If you are new here, read this file,
+**Last full sync: 2026-09-02.** Written to be read cold. If you are new here, read this file,
 then `docs/HANDOFF.md`, then `docs/PLAN.md` — in that order, and nothing else is required.
 
 ---
 
-## 🔴 THE ONE-LINE ANSWER: NOT SHIPPABLE TODAY
+## 📦 THE ONE-LINE ANSWER: THE PACKAGE IS BUILT AND VERIFIED. IT IS **NOT SUBMITTED**.
+
+⚠ **CORRECTED 2026-09-03.** This file previously said 1.0.0 was submitted on 2026-09-02 and that
+the project was in "review-wait". **That was never true — nothing has been sent to the Chrome Web
+Store.** `docs/RELEASE_AUDIT.md`'s own final section, written the same day, said the opposite,
+and the `docs/STORE_LISTING.md` checklist was unticked. **Do not wait for a reviewer. There is no
+submission.**
+
+`dist/torren-relay-1.0.0.zip` — 41 files, 416.2 KB, built by `scripts/build-zip.mjs`, every
+assertion passing. The build script parses `manifest.json` and **fails the build if any file the
+manifest names is missing from the archive.**
+
+**Verified mechanically** (full detail in `docs/RELEASE_AUDIT.md`, final section):
+`manifest.json` at the archive root, all 39 manifest-referenced files inside, no excluded path
+leaked in, four correctly-sized real PNG icons, and all eight shipping constants correct **and
+agreeing across `HEAD`, the working tree and the archive**. The console is silent in normal
+operation, and nothing on the `__EXT_DEBUG` surface can book or post without a deliberate human
+click. **All of that remains true — only the submission claim was wrong.**
+
+### Ready — confirmed by Ihor 2026-09-03
+
+- **Privacy policy published, and its content checked by eye** at
+  `https://iter-tech.github.io/torren-relay/` — it renders the policy, not a README.
+- **Reviewer walkthrough video recorded and uploaded** (Unlisted):
+  `https://youtu.be/m1KnIF77u1g` — shows sign-in and the extension working on a real load board.
+- **Reviewer test account exists** — `torrenrelayreview@proton.me`. Sign-in verified live: the
+  one-time code arrives, sign-in completes, the panel works on the load board.
+  ⚠ **The mailbox password is deliberately not written anywhere in this repository.**
+- **The zip builds and self-verifies.**
+
+### 🔴 WHAT REMAINS BEFORE SUBMISSION — in this order
+
+1. **Load the zip in a CLEAN Chrome profile.** Never done. ⚠ It is the only real proof the
+   package runs — every check so far says it is *complete*, not that it *works*.
+2. **Capture the screenshots**, 1280×800. Never done. The shot list is in
+   `docs/STORE_LISTING.md` §6, including what must NOT be on screen.
+3. **The store form itself** — pay the developer fee, fill the listing fields from
+   `docs/STORE_LISTING.md`, upload the zip, press Submit.
+
+**Other references:** `docs/REVIEW_RESPONSE.md` — **read it IF a rejection arrives, after
+submission.** It is valid and complete; it is simply not active yet. `docs/VERSION_BUMP.md` for
+any future version. `docs/CAPTURES_NEEDED.md` for measurements still owed — start with §1, the
+only live risk in the shipped code. The ordered 1.1 list is at the top of `docs/BACKLOG.md`.
+
+### ⚠ Known and accepted in this build
+
+- **The load-board path is measured on `.com` only**; the other ten Relay domains are assumed.
+  Mitigated by a visible `console.warn` on any unrecognised Relay page.
+- **The radius UNIT is unmeasured on non-`.com` boards.** If such a board is metric, ranges are
+  ~38% short. **The largest silent risk in the shipped product.**
+- **Fast Book is off** (`FAST_BOOK_ENABLED = false`) and unreachable by four independent gates.
+  ⚠ `FORBIDDEN_SELECTORS` is an empty array, so the "never books a load" guard is disarmed —
+  **inert today, and it must be repopulated before that flag is ever flipped.**
+- **The happy path has never been exercised live.** The package is complete by assertion; one
+  clean-profile load with a successful sign-in is still the only real proof.
+
+---
+
+## 🗄 SUPERSEDED — the older blocker list, kept for history
+
+⚠ **Everything below describes the state before the 1.0.0 package was built, and is retained only
+as a record.** The code blockers it names are closed. Do not act on it.
+
+### 🔴 THE ONE-LINE ANSWER: NOT SHIPPABLE TODAY *(superseded 2026-09-02)*
 
 **Two hard blockers, neither of them polish:**
 
@@ -206,7 +269,7 @@ would disable per-city filtering. **Not corrected here — this was an audit.**
 | `manifest_version` | 3 | ✅ |
 | `name` | "Torren Relay" | ✅ matches `EXT_NAME` |
 | `version` | `0.1.0` | ✅ valid; pre-1.0 is fine |
-| `description` | "Monitors Amazon Relay Load Board for new loads. Does NOT book loads." | ✅ accurate and within 132 chars |
+| `description` | "Monitors the Amazon Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch workflow." | ✅ 126 chars, within the 132 limit (updated 2026-09-02) |
 | `icons` | 🔴 **ABSENT** | **BLOCKER.** No `icons` key, no `action.default_icon`, and **no PNG anywhere in the repo**. CWS requires 128×128; Chrome shows a grey placeholder. |
 | `permissions` | `storage`, `scripting`, `activeTab`, `clipboardWrite` | ⚠ see below |
 | `host_permissions` | 11 Relay domains + `*.supabase.co` | ✅ justified — Supabase is the login backend |

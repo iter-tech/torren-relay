@@ -1,5 +1,44 @@
 # Feature Backlog
 
+## 🚀 1.1 — THE ORDERED LIST (written 2026-09-02, while 1.0 was being prepared for submission)
+
+**Start here next session.** Everything below was already derived; none of it needs re-deriving.
+Ordered by *what unblocks what*, not by size. **"Blocked on" means it cannot start, not that it
+is hard.**
+
+| # | item | blocked on | notes |
+|---|---|---|---|
+| **1** | **Re-enable Fast Book** | Ihor's decision + a live happy-path test | 🔑 **Flip `FAST_BOOK_ENABLED` AND the manifest description in the SAME commit** — the description's truth depends on the flag. ⚠ Also repopulate `FORBIDDEN_SELECTORS` (`utils/constants.js:1-2`, currently empty) and fix the `showInlinePanel()` teardown asymmetry (0al). **The two real clicks and the confirm poll have never executed.** |
+| **2** | **Non-`.com` radius unit** | 🔴 one capture — CAPTURES_NEEDED §1 | The only **live, silent, shipped** risk in this list. The same session also closes the load-board path on ten domains (0au). |
+| **3** | **R-type detection from the record** | 🔴 two captures — CAPTURES_NEEDED §2 | Removes the interim card-DOM dependency. Today's badge-letter read works but is fragile. |
+| **4** | **`["LIVE","DROP"]`** | 🟠 one word from Ihor — CAPTURES_NEEDED §4 | No capture needed. A load labelled "LTL/Live/Drop" now posts where it used to refuse. |
+| **5** | **The two equipment enums** | 🟠 two captures — CAPTURES_NEEDED §3 | Fails safe today (routes to the unsupported modal), so this is coverage, not a defect. |
+| **6** | **Deadhead-adjusted RPM in the panel** | nothing — **but read the correction below** | ⚠ **BACKLOG 0ai is WRONG about where the data comes from.** |
+| **7** | **PLAN 29f — panel fields not yet rendered** | nothing | Cost breakdown, `specialServices`, layover, per-stop instructions, arrival windows. Each needs a projection field **and** a render slot. Pure addition. |
+| **8** | **Distinct alert sound for a price increase** | nothing | Surge and new-load both call the same `playAlert()` (`content/priceSurge.js:146`); a dispatcher cannot tell them apart by ear. |
+| **9** | **Per-load chat button** | 🔴 one capture — CAPTURES_NEEDED §6 | ⚠ **May be impossible.** If no load id is passed, the feature cannot exist as described. **Establish that before any design.** |
+| **10** | **Quick-phrase inserts for chat** | depends entirely on #9 | Nothing to insert into until #9 is proven possible. |
+| **11** | **Memory flush + session auto-recovery** | 🔴 four readings — CAPTURES_NEEDED §5 | ⚠ **May deserve to be dropped.** If `heapUsedMB` is flat, there is no problem to solve. |
+
+### ⚠ CORRECTION to 0ai, found 2026-09-02 — read before starting #6
+
+0ai states that `payout.value`, `deadhead.value` and `totalDistance.value` "already cross the
+postMessage boundary in `projectRecord()`", making the work "only a rendering decision".
+
+**That is not true, and it was checked rather than copied.** `projectRecord()`
+(`content/networkObserver.js:297`) emits: `id`, `transitOperatorType`, `stopCount`,
+`totalDistance`, `distanceUnit`, `payout`, `payoutUnit`, `loads`. **The word `deadhead` does not
+appear anywhere in `networkObserver.js`.**
+
+The panel's deadhead is read from **the card DOM** — `parseOneCard()` takes
+`span[title="Deadhead"]` at `content/loadParser.js:91-92`, reaching the panel via
+`content/inlinePanel.js:1513` as `parsed.deadhead`.
+
+🔑 **So #6 is a DOM-coupling decision, not a rendering one** — the same class of dependency that
+killed task 7d. Either accept the selector, or add `deadhead` to `projectRecord()` first.
+**Decide which before writing any UI.**
+
+
 Status key: **UI-BUILT** = HTML/CSS exists in popup, logic not wired | **PLANNED** = not yet started | **PARTIAL** = some code exists
 
 ---
@@ -43,6 +82,25 @@ Built, tests green, **none of it verified on a real board** (see `docs/HANDOFF.m
 ---
 
 ## 🆕 EMERGED FROM THIS PHASE — not scheduled, not started
+
+### 0ay. ✅ CLOSED 2026-09-02 — PACKAGING: build script, archive, and store description
+
+**The description** is now store-ready — 119 chars, plain, still states the extension does not
+book loads. **The archive** is built by `scripts/build-zip.mjs`, which derives its file list from
+`manifest.json` plus every HTML page that manifest points at, so **the list cannot drift from
+what the extension actually loads**. 41 files, 416 KB, manifest at the archive root.
+
+🔑 **This closes the failure that bit this project twice** — `utils/supabaseConfig.js` and
+`icons/` were named by the manifest and absent from the tree. The script now refuses to build if
+any referenced path is missing, and re-opens the finished zip to confirm it is really inside.
+
+⚠ **The read-back check paid for itself on its first run:** .NET's `CreateFromDirectory` wrote
+backslash entry names, which Chrome cannot read. Replaced with a `zlib` writer; integrity
+cross-checked against Node's own `zlib.crc32`.
+
+**Still open and unchanged:** whether `dist/` should be gitignored (it currently is not listed
+either way), and the live smoke test — the archive is complete by assertion, not by having been
+loaded in Chrome.
 
 ### 0aw. ✅ CLOSED 2026-09-02 — ICONS WIRED, VERSION BUMPED TO 1.0.0
 
