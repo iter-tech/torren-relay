@@ -3,9 +3,13 @@
 // Added 2026-09-08. See tenlane-network/docs/DECISIONS.md D4 and D7.
 //
 // ── WHAT THIS IS ───────────────────────────────────────────────────────────────────────────
-// networkObserver.js (MAIN world) emits __extRelayRawLoads with the RAW work opportunities.
-// This file buffers them, deduplicates by work-opportunity id, and flushes on a timer through
+// networkObserver.js (MAIN world) emits CURATED records — projectRecord()'s explicit allow-list,
+// never the raw body — on the existing __extRelayCityCoords message. This file buffers them,
+// narrows them further still, deduplicates by work-opportunity id, and flushes on a timer through
 // the dispatcher's EXISTING Supabase session by calling the ingest_loads RPC.
+//
+// 🔑 TWO LISTS. What the local panel sees and what the network receives are NOT the same set —
+// see transmittedStop() below and DECISIONS.md D10. The panel is not a disclosure; the network is.
 //
 // 🔑 BATCHED, NEVER ONE REQUEST PER LOAD. A board response carries dozens of records; a request
 // each would be slow, would burn the session's rate limit, and would turn one bad network moment
@@ -53,37 +57,94 @@ var loadSender = (function () {
     });
   }
 
-  // ── Turn one raw work opportunity into an ingest_loads element ───────────────────────────
+  // ── TWO LISTS, NOT ONE — the transmitted subset ──────────────────────────────────────────
   //
-  // 🔑 `payload` IS THE WHOLE RAW RECORD, UNSTRIPPED. That is the decision in D7: the website's
-  // src/lib/loads.ts and SCHEMA.md both read the raw shape (payout.value,
-  // stops[].location.{city,state,stopCode,postalCode}), and the curated projection has none of
-  // it. Removing fields here would silently reintroduce the exact mismatch D7 exists to close.
+  // 🔑 THE LOCAL PANEL IS NOT A DISCLOSURE; THE NETWORK IS. projectRecord() keeps the panel's
+  // full field set, because those values never leave the machine. What goes to `public.loads` is
+  // narrower, because that table is readable by EVERY authenticated user — one carrier's data is
+  // visible to all of them.
   //
-  // The typed columns are lifted from the SAME nested location object SCHEMA.md documents —
-  // loads[0].stops[0].location — and are null when absent, which is normal: coordinates were
-  // present on 14 of 18 stops in the reference capture, because a city-level stop has none.
-  function toRow(item, endpoint) {
+  // NOT TRANSMITTED, by decision (DECISIONS.md D10): line1, label, zip, loadingType,
+  // unloadingType. Facility street addresses and postal codes are not read in the load table and
+  // are not used by the PAT form.
+  //
+  // ⚠ AND NOTHING FROM THE RAW RECORD CAN LEAK HERE EVEN BY MISTAKE. The input is already the
+  // curated projection — contacts, instructions, purchase orders, shipper references, carrier
+  // accounts and cost items were never in it and never crossed the world boundary.
+  function transmittedStop(st) {
+    if (!st) return null;
+    return {
+      seq:      (typeof st.seq === 'number') ? st.seq : null,
+      stopType: st.stopType || null,
+      city:     st.city || null,
+      // Normalised to a two-letter code with the PAT form's own mapper — never a second table.
+      // Measured across 524 stops, Amazon returns three formats ("KY", "Kentucky", "KENTUCKY"),
+      // so an un-normalised value reaches the site as whatever Amazon felt like sending.
+      // patStateCode returns null for anything unrecognised; the RAW value is kept in that case
+      // so a new spelling shows up as itself rather than silently vanishing.
+      state:    (typeof patStateCode === 'function')
+                  ? (patStateCode(st.state) || st.state || null)
+                  : (st.state || null),
+      stopCode: st.stopCode || null,
+      lat:      (typeof st.lat === 'number') ? st.lat : null,
+      lng:      (typeof st.lng === 'number') ? st.lng : null,
+      tz:       st.tz || null,
+      checkIn:  st.checkIn || null,
+      checkOut: st.checkOut || null
+    };
+  }
+
+  // ── Turn one CURATED record into an ingest_loads element ─────────────────────────────────
+  function toRow(rec, endpoint) {
     logger.log('loadSender', 'toRow called');
     try {
-      if (!item || !item.id) return null;
+      if (!rec || !rec.id) return null;
 
-      var stop = null;
-      try {
-        stop = item.loads && item.loads[0] && item.loads[0].stops && item.loads[0].stops[0];
-      } catch (e) { stop = null; }
-      var loc = (stop && stop.location) || null;
+      var loads = [];
+      var srcLoads = rec.loads || [];
+      for (var i = 0; i < srcLoads.length; i++) {
+        var l = srcLoads[i] || {};
+        var stops = [];
+        var srcStops = l.stops || [];
+        for (var j = 0; j < srcStops.length; j++) {
+          var s = transmittedStop(srcStops[j]);
+          if (s) stops.push(s);
+        }
+        loads.push({
+          distance:      (typeof l.distance === 'number') ? l.distance : null,
+          distanceUnit:  l.distanceUnit || null,
+          loadType:      l.loadType || null,
+          equipmentType: l.equipmentType || null,
+          stops:         stops
+        });
+      }
 
-      var lat = (loc && typeof loc.latitude === 'number') ? loc.latitude : null;
-      var lng = (loc && typeof loc.longitude === 'number') ? loc.longitude : null;
+      var payload = {
+        id:                  String(rec.id),
+        transitOperatorType: rec.transitOperatorType || null,
+        stopCount:           (typeof rec.stopCount === 'number') ? rec.stopCount : null,
+        totalDistance:       (typeof rec.totalDistance === 'number') ? rec.totalDistance : null,
+        distanceUnit:        rec.distanceUnit || null,
+        payout:              (typeof rec.payout === 'number') ? rec.payout : null,
+        payoutUnit:          rec.payoutUnit || null,
+        deadhead:            (typeof rec.deadhead === 'number') ? rec.deadhead : null,
+        deadheadUnit:        rec.deadheadUnit || null,
+        loads:               loads
+      };
+
+      // The typed columns come from the FIRST stop of the FIRST load — the pickup.
+      var first = (loads[0] && loads[0].stops && loads[0].stops[0]) || null;
 
       return {
-        amazon_wo_id: String(item.id),
-        payload: item,
-        pickup_lat: lat,
-        pickup_lng: lng,
-        pickup_stop_code: (loc && typeof loc.stopCode === 'string' && loc.stopCode) ? loc.stopCode : null,
-        pickup_postal_code: (loc && typeof loc.postalCode === 'string' && loc.postalCode) ? loc.postalCode : null,
+        amazon_wo_id: String(rec.id),
+        payload: payload,
+        pickup_lat: first ? first.lat : null,
+        pickup_lng: first ? first.lng : null,
+        pickup_stop_code: first ? first.stopCode : null,
+        // ⚠ ALWAYS NULL NOW. `zip` is excluded from transmission (D10), and this column has no
+        // other source. The column is therefore dead until either the exclusion is revisited or
+        // a migration drops it — recorded rather than quietly left looking populated.
+        pickup_postal_code: null,
         // The RPC's CHECK constraint accepts exactly these three. endpointLabel() in
         // networkObserver.js already emits them, but an unexpected value would abort the whole
         // batch on a constraint violation, so it is pinned here rather than trusted.
@@ -238,11 +299,15 @@ var loadSender = (function () {
   }
 
   // ── Wiring ───────────────────────────────────────────────────────────────────────────────
+  // 🔑 READS THE EXISTING MESSAGE. The sender has no message of its own — it takes `records` off
+  // the __extRelayCityCoords message the city filter already receives. So adding the load network
+  // costs the MAIN world NOTHING in new data crossing the boundary, which is exactly what the
+  // restored raw-body contract requires.
   function onMessage(ev) {
     try {
       if (ev.source !== window) return;
       var d = ev.data;
-      if (!d || d.__extRelayRawLoads !== true) return;
+      if (!d || d.__extRelayCityCoords !== true) return;
       accept(d.records, d.endpoint);
     } catch (e) {
       logger.error('loadSender', 'onMessage failed', { error: e });

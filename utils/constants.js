@@ -290,13 +290,13 @@ function warnIfUnrecognisedRelayPage() {
 //      for any build with this on. DO NOT SUBMIT TO THE CHROME WEB STORE until the listing,
 //      the privacy policy and the data-collection declaration are all rewritten together —
 //      DECISIONS.md D4. This build is for UNPACKED INSTALLATION ONLY.
-//   2. ⚠ THE FULL RAW RECORD IS SENT, not the curated projection. That was decided
-//      deliberately (D7) because the website and SCHEMA.md both read the raw shape, and the
-//      curated record has no coordinates at all. It also means contacts, instructions and
-//      shipper references leave the machine. Recorded, not accidental.
+//   2. ✅ ONLY A NARROWED CURATED RECORD IS SENT — never the raw body. D7 was reversed on
+//      2026-09-08: projectRecord()'s allow-list was widened instead (stopCode, lat, lng,
+//      stopType, deadhead), and the sender narrows it further before transmitting. No contacts,
+//      instructions, purchase orders, shipper references, carrier accounts or cost items.
 //
-// ⚠ MIRRORED in content/networkObserver.js — the MAIN world cannot see this file. Both copies
-// must move together, exactly like CAPTURE_RESPONSES.
+// ⚠ NO MAIN-WORLD MIRROR IS NEEDED any more. The sender reads the records off the message
+// networkObserver.js already sends, so nothing in that file is gated on this constant.
 const LOAD_SENDER_ENABLED = true;
 
 // How often the buffer is flushed. NOT per load: a busy board produces dozens of records per
