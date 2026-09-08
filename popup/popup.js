@@ -28,6 +28,7 @@ var KEY_SURGE_ENABLED      = STORAGE_KEYS.SURGE_ENABLED;      // boolean, defaul
 var KEY_SURGE_THRESHOLD    = STORAGE_KEYS.SURGE_THRESHOLD;    // number, default 50
 var KEY_FAST_BOOK_ENABLED  = STORAGE_KEYS.FAST_BOOK_ENABLED;  // boolean, default false
 var KEY_SHARED_LIMIT       = STORAGE_KEYS.SHARED_LIMIT_ENABLED; // true-default
+var KEY_LOAD_SENDER        = STORAGE_KEYS.LOAD_SENDER_ENABLED;  // true-default (2026-09-08)
 
 // ── Supabase auth (email OTP) ──────────────────────────────────────────────────
 // vendor/supabase.min.js (global `supabase`) + utils/supabaseConfig.js
@@ -113,6 +114,7 @@ document.addEventListener('DOMContentLoaded', function () {
   var surgeToggle        = document.getElementById('popup-surge');
   var surgeThreshold     = document.getElementById('popup-surge-threshold');
   var fastBookToggle     = document.getElementById('popup-fast-book');
+  var loadSenderToggle   = document.getElementById('popup-load-sender');
 
   // 🔑 GATE 2 of 3 (2026-08-27) — REMOVE the Booking section outright when Fast Book is disabled
   // in this build. Removed, not hidden: the toggle cannot be reached, checked, or scripted, and
@@ -475,7 +477,8 @@ document.addEventListener('DOMContentLoaded', function () {
       KEY_NIGHT_MODE, KEY_TAB_ALERT, KEY_AUTO_OPEN, KEY_HIDE_SIMILAR,
       KEY_VOLUME, KEY_SOUND_ID,
       KEY_HIDE_PROMOTED, KEY_HIDE_STARTING_SOON, KEY_HIDE_TRAILER_READY, KEY_HIDE_PAST_BOOK,
-      KEY_SURGE_ENABLED, KEY_SURGE_THRESHOLD, KEY_FAST_BOOK_ENABLED, KEY_SHARED_LIMIT
+      KEY_SURGE_ENABLED, KEY_SURGE_THRESHOLD, KEY_FAST_BOOK_ENABLED, KEY_SHARED_LIMIT,
+      KEY_LOAD_SENDER
     ],
     function (data) {
       if (nightToggle)        nightToggle.checked        = data[KEY_NIGHT_MODE] === true;
@@ -497,6 +500,8 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       if (fastBookToggle)     fastBookToggle.checked     = data[KEY_FAST_BOOK_ENABLED]  === true;
       if (sharedLimitToggle)  sharedLimitToggle.checked  = data[KEY_SHARED_LIMIT] !== false; // true-default
+      // TRUE-DEFAULT. Unset means ON, so a fresh install shares by default -- DECISIONS.md D4.
+      if (loadSenderToggle)   loadSenderToggle.checked   = data[KEY_LOAD_SENDER] !== false;
     }
   );
 
@@ -511,6 +516,16 @@ document.addEventListener('DOMContentLoaded', function () {
   if (tabToggle) {
     tabToggle.addEventListener('change', function () {
       chrome.storage.local.set({ [KEY_TAB_ALERT]: tabToggle.checked });
+    });
+  }
+
+  // The only control here that decides whether anything leaves the machine. Written
+  // explicitly as a boolean so "off" is a stored false, not an absent key -- an absent key
+  // means ON.
+  if (loadSenderToggle) {
+    loadSenderToggle.addEventListener('change', function () {
+      logger.log('popup', 'popup-load-sender changed', { on: loadSenderToggle.checked });
+      chrome.storage.local.set({ [KEY_LOAD_SENDER]: loadSenderToggle.checked === true });
     });
   }
 
@@ -644,6 +659,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (surgeToggle)        surgeToggle.checked        = false;
         if (surgeThreshold)     surgeThreshold.value       = 50;
         if (fastBookToggle)     fastBookToggle.checked     = false;
+        if (loadSenderToggle)   loadSenderToggle.checked   = true; // true-default
         if (sharedLimitToggle)  sharedLimitToggle.checked  = true; // true-default
       });
     });
@@ -666,6 +682,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (changes[KEY_HIDE_STARTING_SOON] !== undefined && startingSoonToggle) startingSoonToggle.checked = changes[KEY_HIDE_STARTING_SOON].newValue === true;
     if (changes[KEY_HIDE_TRAILER_READY] !== undefined && trailerReadyToggle) trailerReadyToggle.checked = changes[KEY_HIDE_TRAILER_READY].newValue === true;
     if (changes[KEY_HIDE_PAST_BOOK]     !== undefined && pastBookToggle)     pastBookToggle.checked     = changes[KEY_HIDE_PAST_BOOK].newValue     === true;
+    if (changes[KEY_LOAD_SENDER]        !== undefined && loadSenderToggle)   loadSenderToggle.checked   = changes[KEY_LOAD_SENDER].newValue        !== false;
     if (changes[KEY_SURGE_ENABLED]      !== undefined && surgeToggle)        surgeToggle.checked        = changes[KEY_SURGE_ENABLED].newValue      === true;
     if (changes[KEY_SURGE_THRESHOLD] !== undefined && surgeThreshold) surgeThreshold.value = (changes[KEY_SURGE_THRESHOLD].newValue !== undefined) ? changes[KEY_SURGE_THRESHOLD].newValue : 50;
     if (changes[KEY_FAST_BOOK_ENABLED]  !== undefined && fastBookToggle)    fastBookToggle.checked     = changes[KEY_FAST_BOOK_ENABLED].newValue   === true;

@@ -276,3 +276,38 @@ function warnIfUnrecognisedRelayPage() {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRODUCT FLAG — the LOAD SENDER. Added 2026-09-08. SHIPS `true`.
+//
+// Sends every work opportunity the board shows to the Tenlane load network, batched, through
+// the dispatcher's existing Supabase session. See tenlane-network/docs/DECISIONS.md D4 and D7.
+//
+// 🔑 THIS IS THE FIRST FEATURE THAT SENDS ANYTHING OFF THE MACHINE. Everything before it was
+// local. Two consequences that are NOT optional:
+//
+//   1. ⚠ THE PUBLISHED STORE LISTING SAYS NO DATA LEAVES THE BROWSER. That sentence is FALSE
+//      for any build with this on. DO NOT SUBMIT TO THE CHROME WEB STORE until the listing,
+//      the privacy policy and the data-collection declaration are all rewritten together —
+//      DECISIONS.md D4. This build is for UNPACKED INSTALLATION ONLY.
+//   2. ⚠ THE FULL RAW RECORD IS SENT, not the curated projection. That was decided
+//      deliberately (D7) because the website and SCHEMA.md both read the raw shape, and the
+//      curated record has no coordinates at all. It also means contacts, instructions and
+//      shipper references leave the machine. Recorded, not accidental.
+//
+// ⚠ MIRRORED in content/networkObserver.js — the MAIN world cannot see this file. Both copies
+// must move together, exactly like CAPTURE_RESPONSES.
+const LOAD_SENDER_ENABLED = true;
+
+// How often the buffer is flushed. NOT per load: a busy board produces dozens of records per
+// response, and one request each would be both slow and a good way to get rate-limited.
+const LOAD_SENDER_FLUSH_MS = 15000;
+
+// Upper bound per RPC call. The RPC deduplicates within a batch, so a large batch is safe —
+// this caps request SIZE, since raw records run ~12 KB each.
+const LOAD_SENDER_MAX_BATCH = 50;
+
+// Buffer ceiling. If flushing is failing (offline, signed out) the buffer must not grow without
+// limit for a dispatcher who leaves the board open all shift. Oldest are dropped first: the
+// newest sighting of a load is the one worth keeping.
+const LOAD_SENDER_MAX_BUFFER = 500;

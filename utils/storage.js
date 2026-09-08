@@ -28,7 +28,18 @@ const STORAGE_KEYS = {
   // refresh on its own schedule with no cross-tab pacing coordination — 503 backoff still
   // applies either way (background.js checks backoff before pacing, unconditionally; only
   // the pacing check itself is gated on this setting).
-  SHARED_LIMIT_ENABLED: 'sharedRefreshLimitEnabled'
+  SHARED_LIMIT_ENABLED: 'sharedRefreshLimitEnabled',
+
+  // ── LOAD SENDER (2026-09-08) ──────────────────────────────────────────────
+  // Sends board records to the Tenlane load network. TRUE-DEFAULT: unset means ON.
+  //
+  // ⚠ A NEW KEY, deliberately not reused from any existing setting. Reusing one would have made
+  // an unrelated preference silently control whether data leaves the machine.
+  //
+  // 🔑 IT IS IN STORAGE_KEYS ON PURPOSE, so "Reset to Defaults" clears it — which returns the
+  // sender to its default of ON. That is the intended behaviour; the constant, not the absence
+  // of a key, is what decides the default.
+  LOAD_SENDER_ENABLED: 'loadSenderEnabled'
 };
 
 // Supabase session — intentionally NOT in STORAGE_KEYS. "Reset to Defaults" clears

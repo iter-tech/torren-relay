@@ -2,6 +2,87 @@
 
 ## [Unreleased]
 
+### 2026-09-08 — Load sender: the board's records now go to the Tenlane load network
+
+🔴 **THIS IS THE FIRST FEATURE THAT SENDS ANYTHING OFF THE MACHINE.** Everything before it was
+local to the browser.
+
+⚠ **THE PUBLISHED STORE LISTING SAYS NO DATA LEAVES THE BROWSER. That sentence is now FALSE for
+this build. DO NOT SUBMIT TO THE CHROME WEB STORE.** This build is for **unpacked installation
+only**. The listing, the privacy policy and the data-collection declaration must be rewritten
+together first — `tenlane-network/docs/DECISIONS.md` D4. The manifest version is **deliberately
+NOT bumped** (still 1.0.0) so this build cannot be mistaken for a shippable one.
+
+#### What was added
+
+| file | what |
+|---|---|
+| `content/loadSender.js` | **new.** Buffers, deduplicates, flushes on a timer via `ingest_loads` |
+| `content/networkObserver.js` | emits the RAW work opportunities on a separate message |
+| `utils/constants.js` | `LOAD_SENDER_ENABLED` + flush interval, batch and buffer caps |
+| `utils/storage.js` | `LOAD_SENDER_ENABLED: 'loadSenderEnabled'` — a **new** key |
+| `popup/` | "Load Network → Share loads I see", its own section |
+| `manifest.json` | one line: `content/loadSender.js`. **Version untouched.** |
+
+#### 🔴 The raw body now crosses the world boundary — a deliberate reversal
+
+`networkObserver.js` carried an explicit contract: *"THE RAW BODY STILL NEVER CROSSES … no
+contacts, no instructions, no shipper references, no purchase orders, no carrier accounts, no
+cost items."*
+
+Measuring first showed why it had to change. The curated `projectRecord()` projection **does not
+contain what the website and `SCHEMA.md` read** — running the real function over a real capture:
+
+```
+payload.payout.value                  curated=undefined   raw=698.0564238210867
+loads[0].stops[0].location            curated=undefined   raw={…}
+location.latitude / .longitude        curated=undefined   raw=39.057625 / -84.640797
+"latitude" anywhere in curated JSON   : false
+```
+
+So the sender transmits the **full raw record**, per `DECISIONS.md` D7. Raw is **12,107 bytes**
+against the curated **1,960** on the same record. ⚠ `loads` is readable by every authenticated
+user, so those extra fields are visible network-wide. **Recorded as a decision, not an accident.**
+
+`LOAD_SENDER_ENABLED = false` in *both* mirrors restores the original contract completely —
+nothing else in `networkObserver.js` reads the raw item.
+
+#### Design notes
+
+- **Batched, never per load.** Flush every 15 s, ≤50 rows per call, buffer capped at 500 with
+  oldest-first eviction so an all-shift tab cannot grow without limit.
+- **Deduplicated by work-opportunity id before sending**, newest sighting wins — re-inserting into
+  the Map deletes first, or eviction would drop the freshest data.
+- **Every failure is silent and logged.** A failed batch is *retained* for retry; an exception in
+  the sender is swallowed at the outermost catch. A bug here must not be a broken load board.
+- **The OTP login flow is untouched.** The sender only *reads* the session `popup.js` wrote, like
+  `authGate.js`. A failed refresh never clears anything — clearing stays `popup.js`'s job so N
+  tabs cannot race each other into logging the dispatcher out.
+- **Switching the toggle off discards the buffer.** "Off" must mean nothing leaves, including what
+  was already collected.
+- `content/nightMode.js` was not touched.
+
+#### ✅ Verified with real data — and what was NOT
+
+The data path was proven end to end using **real captured Amazon records** and the **real
+`toRow()`** extracted from `loadSender.js`, against the **live database**:
+
+```
+POST /rest/v1/rpc/ingest_loads -> 200   {"updated":0,"inserted":4}
+row count 0 -> 4
+re-sent the same batch          ->      {"updated":4,"inserted":0}   count still 4
+```
+
+A real row, straight from Postgres: `pickup_stop_code "LEX1"`, `pickup_lat 38.07671`,
+`pickup_postal_code "40511-1013"`, `payout {"value":603.8993652114775,"unit":"USD"}`,
+`pickup_city "LEXINGTON"`. The website then rendered all four with real cities and payouts.
+
+🔴 **NOT VERIFIED: the extension actually running on a live Amazon Relay board.** Chrome refuses
+`--load-extension` under automation on this version, and there are no Amazon credentials here.
+**The content-script leg — MAIN-world emit → isolated-world buffer → flush — has never executed
+in a browser.** It needs a manual run: load unpacked, sign in, open a board, then
+`__EXT_DEBUG.loadSenderReport()`.
+
 ### 2026-09-07 — Product renamed: Torren Relay → Tenlane Relay
 
 **Branch `rename/tenlane`.** Full detail in `docs/RENAME.md`.
