@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+### 2026-09-08 (later) — ✅ Raw-body contract RESTORED; allow-list widened instead
+
+**The raw response body no longer crosses the world boundary.** Yesterday's `__extRelayRawLoads`
+message is gone entirely, along with the MAIN-world `LOAD_SENDER_ENABLED` mirror.
+
+🔑 **The sender now has no message of its own** — it reads `records` off the existing
+`__extRelayCityCoords` message. So the load network costs `networkObserver.js` **nothing** in new
+data crossing the boundary.
+
+#### `projectRecord()` widened — four additions and one bug fix
+
+| added | coverage | why |
+|---|---|---|
+| `stops[].stopCode` | 465/524 | the warehouse code; **was never in the record at all** |
+| `stops[].lat` / `.lng` | 465/524 | `pickup_lat` / `pickup_lng`; null on city-level stops |
+| `stops[].stopType` | 524/524 | `PICKUP` / dropoff, instead of inferring from array position |
+| `deadhead` / `deadheadUnit` | **167/167** | leftmost column of the target layout |
+
+#### 🐛 BUG FOUND AND FIXED — `label` was swallowing `stopCode`
+
+`label: lo.label || lo.stopCode` looked like a sensible fallback. Measured across **524 stops**:
+
+```
+label === stopCode           465
+label !== stopCode             0
+label present, NO stopCode    59   -> label is "ELSMERE, KY", a CITY string
+stopCode present, NO label     0   -> the fallback could NEVER fire
+```
+
+**The fallback was dead code**, and its real effect was that **`stopCode` never entered the
+record**. `label` is a *display label* of mixed type — a warehouse code on facility stops, a
+`"CITY, ST"` string on the 59 city-level ones.
+
+⚠ **Anything wanting the warehouse code must read `stopCode`.** Reading `label` would print
+`ELSMERE, KY` where a code belongs, on 11% of stops. The inline panel is unaffected: it uses
+`st.label || st.city` as a display name, and `label` is still present 524/524.
+
+#### 🔑 `deadhead` replaces a card-DOM dependency
+
+The panel read deadhead with `span[title="Deadhead"]` in `loadParser.js` — the same coupling class
+that **killed task 7d**, which shipped a card-DOM origin reader and left every card unassigned on
+the live board. BACKLOG said: *"Either accept the selector, or add `deadhead` to
+`projectRecord()` first."* It is added.
+
+#### The sender transmits a NARROWER set than the panel sees
+
+`line1`, `label`, `zip`, `loadingType`, `unloadingType` stay local. **The local panel is not a
+disclosure; the network is** — `loads` is readable by every authenticated user.
+
+`state` is normalised to a two-letter code with **`patStateCode()`**, the PAT form's own mapper —
+**no second mapping**. 524/524 normalise; Amazon returns `KY`, `Kentucky` and `KENTUCKY` in one
+response.
+
+Sizes on one real record: raw **12,107** → curated **2,390** → transmitted **1,806** bytes.
+
+#### ✅ Verified end to end with the extension's real functions
+
+Real capture → real `projectRecord()` → real `toRow()` → real `ingest_loads` → the site rendered
+`LEX1 LEXINGTON, KY | SWA_US_EXPONET1 CINCINNATI, OH | $603.90`. Excluded field names: **0 rows
+contain any of them**, asserted against stored data. Test rows and users deleted afterwards.
+
+🔴 **Still unverified: the extension running on a live Amazon board.** No credentials here and
+Chrome refuses `--load-extension` under automation. See DECISIONS.md D8.
+
 ### 2026-09-08 — Load sender: the board's records now go to the Tenlane load network
 
 🔴 **THIS IS THE FIRST FEATURE THAT SENDS ANYTHING OFF THE MACHINE.** Everything before it was

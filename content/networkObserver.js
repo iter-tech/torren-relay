@@ -63,26 +63,26 @@
   // opportunity id and its PICKUP latitude/longitude — see emitCityAssignCoords().
   var CITY_FILTER_ENABLED = true;
 
-  // ⚠ MIRROR of LOAD_SENDER_ENABLED in utils/constants.js (2026-09-08). Same duplication, same
-  // reason as CAPTURE_RESPONSES above — this world cannot see isolated-world globals.
+  // ✅ THE RAW-BODY CONTRACT IS INTACT AGAIN (2026-09-08, DECISIONS.md D7 REVERSED).
   //
-  // 🔴 THIS FLAG IS WHAT LETS THE RAW RESPONSE BODY CROSS THE postMessage BOUNDARY.
+  // For one day this file emitted the work opportunity VERBATIM on a `__extRelayRawLoads`
+  // message, so the load network could read the raw shape. That is gone. The raw body does not
+  // cross the boundary; the only record that leaves this world is projectRecord()'s explicit
+  // allow-list, exactly as before.
   //
-  // Every other path out of this file is an explicit allow-list — see projectRecord() below and
-  // the contract note beside it. This one is NOT: it emits the work opportunity verbatim, so the
-  // load network receives what SCHEMA.md and the website actually read (payout.value,
-  // stops[].location.{city,state,stopCode,postalCode,latitude,longitude}), none of which the
-  // curated record carries.
+  // 🔑 WHY IT WAS REVERSED: raw records carried contacts, pickup/delivery instructions, purchase
+  // orders, shipper references and carrier accounts — and `public.loads` is readable by every
+  // authenticated user, so one carrier's data was visible to all of them. The projection was
+  // widened instead (stopCode, lat, lng, stopType, deadhead), which is everything the load table
+  // and the PAT form actually need.
   //
-  // That reversal was a deliberate decision, not an oversight — tenlane-network/docs/DECISIONS.md
-  // D7 — and it means contacts, pickup/delivery instructions, purchase orders, carrier accounts
-  // and cost items also leave this world. Turning this off restores the original contract
-  // completely: nothing else in this file reads the raw item.
-  var LOAD_SENDER_ENABLED = true;
+  // ⚠ THE SENDER NEEDS NO MESSAGE OF ITS OWN. It reads `records` off the existing
+  // __extRelayCityCoords message below — so adding the load network cost this file NOTHING in
+  // new data crossing the boundary.
 
-  // True when a body must be read at all — for the shipped features, or for the debug capture.
+  // True when a body must be read at all — for the shipped feature, or for the debug capture.
   function bodyCaptureNeeded() {
-    return CITY_FILTER_ENABLED || CAPTURE_RESPONSES || LOAD_SENDER_ENABLED;
+    return CITY_FILTER_ENABLED || CAPTURE_RESPONSES;
   }
 
   // Capture scope is DELIBERATELY SEPARATE from WATCH_PATH and must stay that way.
@@ -330,11 +330,35 @@
           }
           stops.push({
             seq:      st.stopSequenceNumber,
-            label:    lo.label || lo.stopCode || null,
+            // PICKUP / delivery, straight from the stop. 524/524 in captures. Added 2026-09-08 so
+            // consumers stop inferring the role from array position.
+            stopType: st.stopType || null,
+
+            // ⚠ label AND stopCode ARE DIFFERENT FIELDS. Measured across 524 stops:
+            //   465  facility stop  -> label === stopCode exactly ("IGQ1")
+            //    59  city-level stop -> stopCode is null and label is "ELSMERE, KY"
+            //     0  stopCode present without label
+            //
+            // 🔑 So `label` is a DISPLAY LABEL of mixed type — a warehouse code most of the time
+            // and a "CITY, ST" string 11% of the time. Anything that wants the warehouse code
+            // must read stopCode and accept null; reading label would print "ELSMERE, KY" where
+            // a code belongs, on 11% of stops.
+            //
+            // ⚠ THIS LINE USED TO READ `lo.label || lo.stopCode`. That fallback was DEAD CODE —
+            // label is present on 524/524, so it could never fire — and its real effect was that
+            // stopCode never entered the record at all.
+            label:    lo.label || null,
+            stopCode: lo.stopCode || null,
+
             line1:    lo.line1 || null,
             city:     lo.city || null,
             state:    lo.state || null,
             zip:      lo.postalCode || null,
+
+            // Added 2026-09-08. 465/524 — null on city-level stops, which is correct, not missing.
+            lat:      (typeof lo.latitude  === 'number') ? lo.latitude  : null,
+            lng:      (typeof lo.longitude === 'number') ? lo.longitude : null,
+
             tz:       lo.timeZone || null,
             loadingType:   st.loadingType || null,
             unloadingType: st.unloadingType || null,
@@ -365,6 +389,16 @@
         distanceUnit: (item.totalDistance && item.totalDistance.unit) || null,
         payout: (item.payout && typeof item.payout.value === 'number') ? item.payout.value : null,
         payoutUnit: (item.payout && item.payout.unit) || null,
+
+        // Added 2026-09-08. 167/167 in captures, shape { value, unit }.
+        //
+        // 🔑 THIS REPLACES A DOM DEPENDENCY. The panel's deadhead was read from the card with
+        // `span[title="Deadhead"]` in loadParser.js — the same class of coupling that killed task
+        // 7d, and BACKLOG explicitly said to add it here before building UI on it. It is the
+        // leftmost column of the target layout, so it comes from the API record now.
+        deadhead: (item.deadhead && typeof item.deadhead.value === 'number') ? item.deadhead.value : null,
+        deadheadUnit: (item.deadhead && item.deadhead.unit) || null,
+
         loads: loads
       };
     } catch (e) {
@@ -419,9 +453,6 @@
       // which projectRecord() already carries for every stop — no new class of data.
       var cityStops = [];
       var records = [];
-      // 🔴 Raw work opportunities for the load network. Empty and unused when
-      // LOAD_SENDER_ENABLED is false. See DECISIONS.md D7.
-      var rawRecords = [];
       for (var i = 0; i < wo.length; i++) {
         var item = wo[i];
         if (!item || !item.id) continue;
@@ -438,12 +469,6 @@
         // no shipper references, no purchase orders, no carrier accounts, no cost items.
         records.push(projectRecord(item, id));
 
-        // 🔴 THE LOAD NETWORK'S COPY — the RAW item, not the projection. See LOAD_SENDER_ENABLED
-        // above and DECISIONS.md D7. Pushed to a SEPARATE array and sent on a SEPARATE message
-        // so the panel's contract-bound payload is untouched and this is one `if` from being
-        // reverted.
-        if (LOAD_SENDER_ENABLED) rawRecords.push(item);
-
         if (!loc || typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') {
           // Sent explicitly rather than just omitted. Without this the receiver could not tell
           // "this response had the load but no usable coordinates" from "this response never
@@ -459,24 +484,6 @@
           continue;
         }
         pairs.push({ id: id, lat: loc.latitude, lng: loc.longitude });
-      }
-
-      // 🔴 SEPARATE MESSAGE FOR THE LOAD NETWORK — deliberately not merged into the city-coords
-      // message below. Keeping them apart means the panel's contract-bound message is byte-for-
-      // byte what it always was, and this one can be removed without touching it.
-      if (LOAD_SENDER_ENABLED && rawRecords.length) {
-        try {
-          window.postMessage({
-            __extRelayRawLoads: true,
-            endpoint: endpointLabel(url),
-            records:  rawRecords
-          }, '*');
-        } catch (e) {
-          // A structured-clone failure here must not cost the city filter its message below.
-          reportDrop('raw-loads-post-threw', url, seq, {
-            detail: (e && e.message) ? e.message : 'unknown'
-          });
-        }
       }
 
       window.postMessage({
