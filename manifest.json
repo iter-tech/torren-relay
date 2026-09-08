@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Torren Relay",
+  "name": "Tenlane Relay",
   "version": "1.0.0",
   "description": "Monitors the Amazon Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch workflow.",
 
@@ -102,7 +102,7 @@
   ],
 
   "action": {
-    "default_title": "Torren Relay",
+    "default_title": "Tenlane Relay",
     "default_popup": "popup/popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

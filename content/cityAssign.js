@@ -1270,7 +1270,7 @@ var DEADHEAD_TESTID         = 'ext-city-deadhead';
 // every city. See docs/HANDOFF.md, rule 9.
 var UNASSIGNED_TESTID       = 'ext-city-unassigned';
 var UNASSIGNED_TEXT         = 'Origin not determined';
-var UNASSIGNED_TITLE        = 'Torren Relay could not determine this load\'s origin city, so it ' +
+var UNASSIGNED_TITLE        = 'Tenlane Relay could not determine this load\'s origin city, so it ' +
                               'is shown only under All. Check the load before booking.';
 var _unassignedMarked       = [];   // [{ cardEl, ourEl }] — exactly what we inserted
 
@@ -1388,7 +1388,7 @@ function applyCityDeadheads(cards, activeCity) {
       desired.push({
         id: id, valueEl: valueEl,
         text:  formatMiles(miles),
-        title: 'Deadhead to ' + activeCity.name + ' (Torren Relay)',
+        title: 'Deadhead to ' + activeCity.name + ' (Tenlane Relay)',
         done:  false
       });
     }
@@ -2202,7 +2202,7 @@ function attachRadii(resolved) {
       logger.warn('cityAssign', 'CITY RADIUS  no radius for ' + missing.length + ' active city(ies)',
         { cities: missing, haveRequest: !!_citySearchRequest });
       try {
-        console.warn('[Torren Relay] Could not read your search radius for: ' + missing.join(', ') +
+        console.warn('[Tenlane Relay] Could not read your search radius for: ' + missing.join(', ') +
           '. Those cities fall back to the built-in ' + CITY_ASSIGN_MAX_MILES + ' mi limit, which ' +
           'is NOT your setting — loads may be placed in the wrong city, or shown as ' +
           '"Origin not determined". Reload the board; if it persists, report it.');
@@ -3570,7 +3570,7 @@ function onCitySearchRequestIssue(ev) {
       reason: data.reason, detail: data.detail, path: data.path
     });
     try {
-      console.warn('[Torren Relay] Could not read your search radius from Amazon (' + data.reason +
+      console.warn('[Tenlane Relay] Could not read your search radius from Amazon (' + data.reason +
         '). ' + (data.detail || '') + ' City filtering will keep using the built-in limit until ' +
         'this is fixed — check whether loads are being placed in the right cities.');
     } catch (e1) {

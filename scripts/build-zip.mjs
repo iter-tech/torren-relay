@@ -142,7 +142,7 @@ if (!failures.length) ok('no excluded path present');
 // ═══════════════════════════════════════════ 6. write the zip ═════════════════════════════
 head('6. Writing the archive');
 const version = manifest.version;
-const zipPath = path.join(DIST, 'torren-relay-' + version + '.zip');
+const zipPath = path.join(DIST, 'tenlane-relay-' + version + '.zip');
 if (failures.length) {
   console.log('\nREFUSING TO BUILD — ' + failures.length + ' failure(s) above.');
   process.exit(1);

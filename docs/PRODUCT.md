@@ -1,4 +1,4 @@
-# Product — Torren Relay
+# Product — Tenlane Relay
 
 Product-level record: what the extension is for, and what differentiates it. Implementation
 detail lives in SPEC.md; engineering plans live in BACKLOG.md.

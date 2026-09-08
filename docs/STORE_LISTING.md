@@ -10,7 +10,7 @@ does not match the code is a rejection.
 
 ## 1. Single purpose statement
 
-> Torren Relay monitors the Amazon Relay load board for a signed-in dispatcher and surfaces newly
+> Tenlane Relay monitors the Amazon Relay load board for a signed-in dispatcher and surfaces newly
 > posted loads — alerting, filtering and detailing them — so the dispatcher can act on them in
 > Amazon's own interface.
 
@@ -49,7 +49,7 @@ Monitors the Amazon Relay load board, alerts you to new loads, filters by origin
 ## 3. Detailed description
 
 ```
-Torren Relay is a tool for freight dispatchers working the Amazon Relay load board.
+Tenlane Relay is a tool for freight dispatchers working the Amazon Relay load board.
 
 It watches the board while you work and tells you when something new appears, so you do not
 have to keep refreshing and re-reading the list yourself.
@@ -75,7 +75,7 @@ What it does not do
   Amazon shows you beyond the panel and highlighting described above.
 - It does not run anywhere except the Amazon Relay load board.
 
-You need an Amazon Relay account to use the board, and a Torren Relay account to use the
+You need an Amazon Relay account to use the board, and a Tenlane Relay account to use the
 extension. The extension never sees your Amazon credentials.
 ```
 
@@ -274,5 +274,5 @@ recorded walkthrough up front, as the block above does, is the strongest availab
       verified live 2026-09-03. ⚠ The password is not in this repository, by design.
 - [x] **Reviewer walkthrough video recorded** — ✅ `https://youtu.be/m1KnIF77u1g`, linked in §7.
 - [ ] Screenshots taken with every "must not show" item checked.
-- [ ] `dist/torren-relay-1.0.0.zip` uploaded — 41 files, built by `scripts/build-zip.mjs`.
+- [ ] `dist/tenlane-relay-1.0.0.zip` uploaded — 41 files, built by `scripts/build-zip.mjs`.
 - [ ] The zip loaded once in a clean Chrome profile and the login flow completed.

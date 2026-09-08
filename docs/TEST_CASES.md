@@ -169,7 +169,7 @@ nothing — this is the same file that once broke the board by cloning a respons
 2. Console: `__EXT_DEBUG.dumpSearchRequest()`.
    **PASS:** it prints `radiusFilters`, `originCities` and `startCityRadius`.
    **FAIL:** `nothing captured yet` after several refreshes — the body is not a plain string;
-   look for the `[Torren Relay] Could not read your search radius` warning, which names the shape.
+   look for the `[Tenlane Relay] Could not read your search radius` warning, which names the shape.
 3. 🔑 **Read the key names on the first radius filter entry.** That is what Part 2 is waiting
    for. With `CITY_ASSIGN_DEBUG = true` the receiver prints them outright.
 4. **PASS:** the printed object contains **no** `savedSearchId`, **no** `minPayout`, **no**
@@ -1204,7 +1204,7 @@ Two relay.amazon.com tabs open simultaneously. All cases verified with both tabs
 2. Load (or reload) `relay.amazon.com`. Open the browser console.
 3. **Expected console:** `[EXT][...][content] auth gate closed — extension inactive on this page load`. No sidebar (`ext-sidebar`), no inline panel, no Night Mode, no tag-filter hiding, no "Hide Similar Matches" — none of our `data-testid` elements exist anywhere in the DOM (`document.querySelector('[data-testid^="ext-"]')` → `null`, `document.querySelector('[data-testid^="popup-"]')` is popup-only so N/A here).
 4. **Expected page behavior:** the Load Board itself works completely normally — cards render, Amazon's own filters/search/refresh/booking all function exactly as they would with the extension uninstalled. No visual difference from the unmodified page (Night Mode was never applied, `html.ext-night` is absent).
-5. Open the popup. **Expected:** email step shown (or code step, per TC-AUTH-1) with `popup-auth-gate-note` visible: "Free access — sign in with your email to activate Torren Relay". See TC-AUTH-4 for the full login-only-view check.
+5. Open the popup. **Expected:** email step shown (or code step, per TC-AUTH-1) with `popup-auth-gate-note` visible: "Free access — sign in with your email to activate Tenlane Relay". See TC-AUTH-4 for the full login-only-view check.
 6. Complete login (send code, verify). **Expected (updated 2026-07-20 — see TC-AUTH-6 for the detailed version):** the already-loaded Relay tab activates **immediately, no reload** — sidebar appears, `[EXT][...][content] activateExtensionUI called` logged. This used to require a reload; live reactivation was added 2026-07-20 (`utils/authGate.js` `onAuthGateChange`).
 7. **Regression — logout while a tab is active:** with the loop running in a Relay tab, log out via the popup. **Expected (updated 2026-07-20):** the loop stops and the sidebar/inline panel/highlights are removed immediately, no reload — see TC-AUTH-6.
 
@@ -1232,7 +1232,7 @@ Two relay.amazon.com tabs open simultaneously. All cases verified with both tabs
 
 ### TC-POPUP-GATE-1 — Logged-out popup shows only the login block
 1. Ensure logged out. Open the popup.
-2. **Expected:** visible — `popup-section-title` "Account", `popup-auth-gate-note` reading "Free access — sign in with your email to activate Torren Relay" (styled as a headline, not a small note), and the email-step form (`popup-auth-step-email`: `popup-auth-email` input + `popup-auth-send-code` button).
+2. **Expected:** visible — `popup-section-title` "Account", `popup-auth-gate-note` reading "Free access — sign in with your email to activate Tenlane Relay" (styled as a headline, not a small note), and the email-step form (`popup-auth-step-email`: `popup-auth-email` input + `popup-auth-send-code` button).
 3. **Expected hidden (`popup-features` container, `hidden` attribute set):** "Display & Alerts" section title and everything under it — `popup-night-mode`, `popup-tab-alert`, `popup-auto-open`, the entire Sound block (`popup-volume`, `popup-sound-select`, `popup-sound-replay`), `popup-surge` + `popup-surge-threshold`, "Load Board Filters" section (all four tag toggles + `popup-hide-similar`), "Booking" section (`popup-fast-book`), and the `popup-reset` footer link. None of these should be visible or reachable by scrolling.
 4. Click "Send code", then reopen the popup mid-flow. **Expected:** still only the login block (now on the code step) — `popup-features` remains hidden throughout the email and code steps, not just the initial email step.
 5. Complete login (verify a valid code). **Expected:** `popup-auth-gate-note` disappears, `popup-auth-step-loggedin` shows (email + Log out) at the top, and immediately below it every control listed in step 3 reappears and is fully interactive (toggle Night Mode, adjust volume, etc. — confirm at least 2–3 controls actually respond).
