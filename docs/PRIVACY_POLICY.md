@@ -1,8 +1,8 @@
-# Privacy Policy — Torren Relay
+# Privacy Policy — Tenlane Relay
 
 **Last updated: 2 September 2026**
 
-Torren Relay is a Chrome extension for freight dispatchers working the
+Tenlane Relay is a Chrome extension for freight dispatchers working the
 Amazon Relay load board. This policy explains what the extension collects,
 why, and where it is stored.
 

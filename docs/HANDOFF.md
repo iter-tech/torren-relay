@@ -8,7 +8,7 @@ is the rulebook and outranks this file if they ever disagree.
 
 ---
 
-## 1. What Torren Relay is
+## 1. What Tenlane Relay is
 
 A Chrome MV3 extension for **freight dispatchers** working Amazon Relay's load board. One
 dispatcher watches loads for several drivers at once. The extension:

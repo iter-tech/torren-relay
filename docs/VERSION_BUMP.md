@@ -11,7 +11,7 @@ named was not where the package expected it.
 | file | field | authoritative? |
 |---|---|---|
 | `manifest.json` | `"version"` | ✅ **YES — the single source of truth.** |
-| `dist/torren-relay-<version>.zip` | the filename | derived — `scripts/build-zip.mjs` reads `manifest.version` |
+| `dist/tenlane-relay-<version>.zip` | the filename | derived — `scripts/build-zip.mjs` reads `manifest.version` |
 | `docs/CHANGELOG.md` | the entry heading | written by hand |
 | `docs/STORE_LISTING.md` | the header line | written by hand |
 

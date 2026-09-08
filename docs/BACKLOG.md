@@ -191,7 +191,7 @@ informed, and the next path change would be another blind debugging session.
 
 ### 0at. ✅ FIXED 2026-08-31 — THE TOP BAR APPEARED ON EVERY RELAY PAGE
 
-**Reported live by Ihor with a screenshot 2026-08-31:** the Torren Relay top bar appeared on ANY
+**Reported live by Ihor with a screenshot 2026-08-31:** the Tenlane Relay top bar appeared on ANY
 Relay page — Dashboard, Trips, anything — about half a second after the page opened, floating
 mid-screen over Amazon's own UI on `/dashboard`.
 
@@ -2819,7 +2819,7 @@ are TC-AUTH-8. Three things it deliberately did **not** do:
 
 ---
 
-## Rebrand to "Torren Relay" — finish EXT_NAME (PLANNED)
+## Rebrand to "Tenlane Relay" — finish EXT_NAME (PLANNED)
 
 2026-07-17's rebrand only covered `manifest.json` (`name`, `default_title`) and the popup
 header (`<title>`, `.popup-title`) — explicitly scoped that way by the PM. Still outstanding:
@@ -2827,7 +2827,7 @@ header (`<title>`, `.popup-title`) — explicitly scoped that way by the PM. Sti
 - `utils/constants.js`'s `EXT_NAME` constant is still `'Amazon Relay Helper'`. It feeds
   `content/sidebar.js`'s `ext-sidebar-title` (the floating bar injected on the Relay page
   itself), so the on-page sidebar still shows the old name — a visible mismatch against the
-  popup, which now says "Torren Relay".
+  popup, which now says "Tenlane Relay".
 - `manifest.json`'s `description` was also explicitly left as-is, pending a full copy rewrite
   before Web Store submission.
 

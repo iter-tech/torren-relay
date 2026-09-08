@@ -441,7 +441,7 @@ function buildSidebar() {
       var gate = await recheckAuthGate();
       if (!gate.active) {
         logger.warn('sidebar', 'toggleRunning: blocked — no active session');
-        playpause.setAttribute('title', 'Sign in via the popup to activate Torren Relay — free.');
+        playpause.setAttribute('title', 'Sign in via the popup to activate Tenlane Relay — free.');
         setTimeout(function () {
           reflectRunning(tabState.get('running'));
         }, 3000);

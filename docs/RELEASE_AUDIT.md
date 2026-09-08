@@ -86,7 +86,7 @@ removed can settle it.** Source cannot.
 ### A4. Name and description
 
 - ✅ **`EXT_NAME` is NOT `'Amazon Relay Helper'` any more** — `utils/constants.js:25` reads
-  **`'Torren Relay'`**, matching `manifest.json:3`. That premise is out of date.
+  **`'Tenlane Relay'`**, matching `manifest.json:3`. That premise is out of date.
 - ✅ **REWRITTEN 2026-09-02 (Ihor's wording).** `manifest.json:5` now reads *"Monitors the Amazon
   Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch
   workflow."* — **126 chars**, within the 132 limit. ⚠ **The mismatch that made this a blocker is
@@ -264,7 +264,7 @@ versions and origins ready.
   §7, with a marked placeholder for the account Ihor creates. ⚠ **Still to be created.** 🔑 **This is the one most likely to sink a first submission.**
   The extension only activates behind a login (`isAuthGateActiveSync`, `utils/authGate.js:107`)
   **and** only on `relay.amazon.*` — a reviewer has neither an Amazon Relay carrier account nor a
-  Torren login. **Without a working test account and step-by-step instructions in the reviewer
+  Tenlane login. **Without a working test account and step-by-step instructions in the reviewer
   notes, they will see a page that does nothing and reject it.** Plan for a demo account, and
   expect to explain the Amazon dependency explicitly.
 
@@ -279,7 +279,7 @@ what order, is Ihor's decision.*
 # FINAL PRE-SUBMISSION VERIFICATION — 2026-09-02
 
 **Read-only. No production code was changed.** Everything below was checked against
-`dist/torren-relay-1.0.0.zip` and the repository — **not against any MD file's claims**, including
+`dist/tenlane-relay-1.0.0.zip` and the repository — **not against any MD file's claims**, including
 this document's own earlier sections.
 
 **Mechanically verified here:** items 1, 2, 3 and 4 in full. **Depends on Ihor:** every item in §5

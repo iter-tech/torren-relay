@@ -2,10 +2,67 @@
 
 ## [Unreleased]
 
+### 2026-09-07 — Product renamed: Torren Relay → Tenlane Relay
+
+**Branch `rename/tenlane`.** Full detail in `docs/RENAME.md`.
+
+**76 occurrences found across 20 files — 54 renamed, 22 deliberately left.**
+
+**Renamed:** `manifest.json` (`name`, `action.default_title`); `utils/constants.js`
+(`EXT_NAME` and the page-gate warning prefix); `content/cityAssign.js` (the unassigned tooltip,
+the deadhead title, both radius warning prefixes); `content/sidebar.js`; `popup/popup.html`
+(title, header, auth-gate note); `docs/index.html` and `docs/PRIVACY_POLICY.md`; the archive
+filename in `scripts/build-zip.mjs` (`tenlane-relay-<v>.zip`); and all `*.md` prose.
+
+⚠ **`package.json` does not exist in this repository**, so that part of the brief did not apply.
+
+#### 🔑 The name was in no machine-readable identifier
+
+Storage keys, `postMessage`/runtime message types, `data-testid` values, CSS class and id names,
+and Supabase table/column/RPC names were each searched explicitly for `torren` — **all five
+returned zero matches.** Nothing persisted, wire-format or test-addressable carried the brand, so
+**no migration, no compatibility shim, and no risk of orphaning a stored setting.**
+
+#### Deferred, and why — 22 occurrences
+
+- **The published privacy-policy URL** (9) — `https://iter-tech.github.io/torren-relay/`. 🔴 Live,
+  and cited in the store listing. Its `torren-relay` is the **GitHub repo name** that GitHub Pages
+  derives the path from, so it cannot change without renaming the repo and breaking the URL.
+- **GitHub repository names** (4) — two name the repo hosting the policy; two are a dated
+  historical record of the 2026-09-02 Pages 404 diagnosis. **Renaming a probed URL would falsify
+  the record rather than update it.**
+- **The reviewer test mailbox** (9) — `torrenrelayreview@proton.me`. 🔴 **The account exists at
+  that address** and its sign-in was verified live; it is handed to the Web Store reviewer.
+  ⚠ **This was NOT on the brief's Category B list** — it was found during the inventory and
+  deferred on judgement, because renaming it would point a reviewer at an account that cannot
+  receive their code.
+- **The Web Store item id** — appears **nowhere** in the repository; nothing to protect, and it is
+  unaffected by a name change in any case.
+
+#### Verified
+
+Post-rename search: **22 remaining, all Category B.** New `Tenlane` occurrences: **54** — matching
+the Category A count exactly. `manifest.json` parses; all four changed JS files parse. **Test
+suites: 2724 pass, 0 fail, 0 crashed.** Build produces `dist/tenlane-relay-1.0.0.zip`, 41 files,
+**all assertions passed**, and the manifest inside it carries the new name with no `torren`
+anywhere.
+
+⚠ **One assertion was updated rather than worked around:** `pagegate-suite` checked
+`action.default_title === 'Torren Relay'`. It exists to prove the `action` key was added to rather
+than replaced when icons were wired, and it still proves that — against the new name.
+
+#### ⚠ Two things to act on
+
+1. **NOT VERIFIED IN A BROWSER.** The name now appears in the popup title, popup header,
+   auth-gate note, sidebar tooltip and four `console.warn` prefixes — **all unexercised.**
+2. 🔴 **The listing copy now says "Tenlane Relay" while the LIVE privacy policy still says
+   "Torren Relay"** until the updated `docs/index.html` is deployed to the Pages repo. **A
+   reviewer comparing them would see a mismatch. Deploy the policy page before submitting.**
+
 ### 2026-09-03 — 🔴 CORRECTION: the docs claimed 1.0.0 was submitted. It was not.
 
 **Documentation only.** No file under `content/`, `utils/`, `popup/`, `background.js` or
-`manifest.json` was touched, and `dist/torren-relay-1.0.0.zip` is unchanged.
+`manifest.json` was touched, and `dist/tenlane-relay-1.0.0.zip` is unchanged.
 
 #### What was wrong
 
@@ -61,7 +118,7 @@ account was checked by me — I have no browser.
 
 ### 2026-09-02 (fifth) — Privacy policy URL updated to the `iter-tech` organisation
 
-**Docs only. No code, no behaviour change, and `dist/torren-relay-1.0.0.zip` is untouched** — the
+**Docs only. No code, no behaviour change, and `dist/tenlane-relay-1.0.0.zip` is untouched** — the
 policy URL appears in no shipped file.
 
 The GitHub organisation moved to **`iter-tech`**. The policy is now served at
@@ -88,7 +145,7 @@ finding rather than update it. The current URL lives in the docs that state curr
 ### 2026-09-02 (fourth) — Post-submission readiness: playbook, release checklist, 1.1 ground
 
 **Docs only. ⚠ NOTHING HERE ALTERS SHIPPED BEHAVIOUR** — no file inside the extension package was
-touched, and `dist/torren-relay-1.0.0.zip` is unchanged and still valid.
+touched, and `dist/tenlane-relay-1.0.0.zip` is unchanged and still valid.
 
 **New:**
 - `docs/REVIEW_RESPONSE.md` — the rejection playbook. Five likely reasons, each with what a
@@ -206,7 +263,7 @@ the blocker list.
 
 ### 2026-09-02 — Store description finalised; submission archive built
 
-**Files:** `manifest.json`, `scripts/build-zip.mjs` (new), `dist/torren-relay-1.0.0.zip`.
+**Files:** `manifest.json`, `scripts/build-zip.mjs` (new), `dist/tenlane-relay-1.0.0.zip`.
 
 #### Description
 
@@ -220,7 +277,7 @@ while `FAST_BOOK_ENABLED` is `false` — BACKLOG 0ao already requires flipping b
 
 #### The build script
 
-`node scripts/build-zip.mjs` → `dist/torren-relay-1.0.0.zip`.
+`node scripts/build-zip.mjs` → `dist/tenlane-relay-1.0.0.zip`.
 
 🔑 **THE FILE LIST IS DERIVED, NEVER HAND-MAINTAINED.** It parses `manifest.json` for
 `content_scripts.js/.css`, `background.service_worker`, `action.default_popup`, `icons` and
@@ -1433,7 +1490,7 @@ and the isolated world surfaces it with `console.warn` (visible at the shipped `
 **What the dispatcher sees** if the radius cannot be read:
 
 ```
-[Torren Relay] Could not read your search radius from Amazon (request-body-not-a-string).
+[Tenlane Relay] Could not read your search radius from Amazon (request-body-not-a-string).
 ... City filtering will keep using the built-in limit until this is fixed — check whether
 loads are being placed in the right cities.
 ```
@@ -5375,7 +5432,7 @@ means a human exercised it on the live board.
 |---|---|---|---|
 | PAT: unparseable distance/stop count gate Confirm with warnings | in tree | ✅ **yes** | — |
 | Logger level-gating (ships at `DEBUG_LEVEL = 1`) + PII sweep (email, addresses) | in tree | ✅ **yes** | — |
-| `EXT_NAME` → `Torren Relay` | in tree | ✅ **yes** | — |
+| `EXT_NAME` → `Tenlane Relay` | in tree | ✅ **yes** | — |
 | Activation lockout (`_extActivated` set only after all init succeeds) | in tree | ✅ **yes** | — |
 | Popup renders from local session; network failure no longer signs out | in tree | ✅ **yes** | — |
 | Rate limiting: only 429/502/503/504 back off; aborts never reported | in tree | ❌ **no** | **TC-RATELIMIT-7** |
@@ -6351,7 +6408,7 @@ a boolean), whether the detail source parsed at all, and both lengths. The agree
 pure inline helper that exists only to build this payload: it deliberately does **not** call
 `parseBoardStop`, which would add work and trigger that function's own log.
 
-**PART 2 — `EXT_NAME` is now `'Torren Relay'`** (`utils/constants.js`), was
+**PART 2 — `EXT_NAME` is now `'Tenlane Relay'`** (`utils/constants.js`), was
 `'Amazon Relay Helper'`. **Sole reader across the entire codebase** is
 `content/sidebar.js:225` → `ext-sidebar-title`; verified by grep across `content/`, `utils/`,
 `popup/`, `background.js`, and the HTML/CSS. `manifest.json`'s description is deliberately
@@ -7806,8 +7863,8 @@ defaults" footer is now wrapped in one `popup-features` container. `showAuthStep
 the single place that toggles which of the three auth steps is visible — now also toggles
 `popup-features.hidden` in the same call, so login state and feature visibility can never
 drift apart. `popup-auth-gate-note`'s text changed to the requested headline: "Free access —
-sign in with your email to activate Torren Relay" (was "Sign in with your email to activate
-Torren Relay — free."), and its styling promoted from a small muted note to an actual
+sign in with your email to activate Tenlane Relay" (was "Sign in with your email to activate
+Tenlane Relay — free."), and its styling promoted from a small muted note to an actual
 headline (14px/700 weight) since it's now the only thing a logged-out dispatcher sees besides
 the form. Logged-in state is unchanged: email + Log out at top (`popup-auth-step-loggedin`),
 features below.
@@ -7907,7 +7964,7 @@ Two checkpoints wired in:
 `supabase-js` client/config as `popup.js` rather than hand-rolling a second REST client.
 
 `popup/popup.html`/`popup.css`/`popup.js`: new `popup-auth-gate-note` line — "Sign in with
-your email to activate Torren Relay — free." — shown above the login form whenever not
+your email to activate Tenlane Relay — free." — shown above the login form whenever not
 logged in, hidden once logged in.
 
 **Known limitation (documented, not fixed here):** no live cross-context reactivation —
@@ -7931,13 +7988,13 @@ documented file to copy from. No behavior change — `popup.html` still loads
 `utils/supabaseConfig.js` (not the `.example.js`), so login keeps working locally as long as
 that file exists on disk.
 
-### 2026-07-17 — Supabase login wired live + rebrand to "Torren Relay"
+### 2026-07-17 — Supabase login wired live + rebrand to "Tenlane Relay"
 
 Files changed: `manifest.json`, `popup/popup.html`, `popup/popup.js`. New file: `utils/supabaseConfig.js`.
 
 **Login wired live:** `utils/supabaseConfig.js` created with the real project's `SUPABASE_URL` / `SUPABASE_ANON_KEY` (publishable key — safe to ship; RLS is the actual access boundary), provided by the PM. This was the only missing piece from the login feature added earlier today (see the "Popup login via Supabase email OTP" entry below) — `supabaseClient` now initializes and the three-step OTP flow is functional. Verified reachable without sending any email: `GET /auth/v1/settings` on the project returned HTTP 200 with `email: true`, `mailer_autoconfirm: false` (confirmation emails are real, not auto-confirmed — matches the OTP flow as designed). `vendor/supabase.min.js` (v2.110.7 UMD, vendored the same session the feature was built) was already in place and re-verified unchanged.
 
-**Rebrand (partial, scoped):** extension name changed from "Amazon Relay Helper" to "Torren Relay" in `manifest.json` (`name`, `action.default_title`) and in the popup (`<title>`, `.popup-title`). `description` in `manifest.json` intentionally left as-is — full copy rewrite comes before Web Store submission. **Not changed:** `utils/constants.js`'s `EXT_NAME` constant (still "Amazon Relay Helper"), which feeds the on-page sidebar title (`content/sidebar.js` → `ext-sidebar-title`) — out of the requested scope, so the in-page sidebar still shows the old name for now. Flagging this seam since it's a visible inconsistency between the popup and the injected page UI until `EXT_NAME` is included in a later rebrand pass.
+**Rebrand (partial, scoped):** extension name changed from "Amazon Relay Helper" to "Tenlane Relay" in `manifest.json` (`name`, `action.default_title`) and in the popup (`<title>`, `.popup-title`). `description` in `manifest.json` intentionally left as-is — full copy rewrite comes before Web Store submission. **Not changed:** `utils/constants.js`'s `EXT_NAME` constant (still "Amazon Relay Helper"), which feeds the on-page sidebar title (`content/sidebar.js` → `ext-sidebar-title`) — out of the requested scope, so the in-page sidebar still shows the old name for now. Flagging this seam since it's a visible inconsistency between the popup and the injected page UI until `EXT_NAME` is included in a later rebrand pass.
 
 ### 2026-07-17 — FEATURE: Popup login via Supabase email OTP
 

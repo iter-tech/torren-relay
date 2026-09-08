@@ -13,7 +13,7 @@ Store.** `docs/RELEASE_AUDIT.md`'s own final section, written the same day, said
 and the `docs/STORE_LISTING.md` checklist was unticked. **Do not wait for a reviewer. There is no
 submission.**
 
-`dist/torren-relay-1.0.0.zip` — 41 files, 416.2 KB, built by `scripts/build-zip.mjs`, every
+`dist/tenlane-relay-1.0.0.zip` — 41 files, 416.2 KB, built by `scripts/build-zip.mjs`, every
 assertion passing. The build script parses `manifest.json` and **fails the build if any file the
 manifest names is missing from the archive.**
 
@@ -87,7 +87,7 @@ Everything else below is either done, deferred by decision, or waiting on Ihor's
 
 ## What this extension is, in four sentences
 
-A Chrome MV3 extension ("Torren Relay") for Amazon Relay dispatchers. It watches the load board,
+A Chrome MV3 extension ("Tenlane Relay") for Amazon Relay dispatchers. It watches the load board,
 detects new loads, highlights them, plays a sound, marks the browser tab, opens the top load, and
 shows an inline panel of the load's stops built from Amazon's own captured API response. It also
 groups loads by origin city so a dispatcher running five cities can look at one at a time, and it
@@ -267,7 +267,7 @@ would disable per-city filtering. **Not corrected here — this was an audit.**
 | item | value | verdict |
 |---|---|---|
 | `manifest_version` | 3 | ✅ |
-| `name` | "Torren Relay" | ✅ matches `EXT_NAME` |
+| `name` | "Tenlane Relay" | ✅ matches `EXT_NAME` |
 | `version` | `0.1.0` | ✅ valid; pre-1.0 is fine |
 | `description` | "Monitors the Amazon Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch workflow." | ✅ 126 chars, within the 132 limit (updated 2026-09-02) |
 | `icons` | 🔴 **ABSENT** | **BLOCKER.** No `icons` key, no `action.default_icon`, and **no PNG anywhere in the repo**. CWS requires 128×128; Chrome shows a grey placeholder. |

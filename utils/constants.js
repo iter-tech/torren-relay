@@ -20,9 +20,9 @@ const ALLOWED_CLICK_INTENTS = {
 
 // Project-wide config
 // 2026-07-30: was 'Amazon Relay Helper' — the pre-rebrand name, which the sidebar was still
-// showing while the extension ships as "Torren Relay" (manifest.json `name`). Sole reader is
+// showing while the extension ships as "Tenlane Relay" (manifest.json `name`). Sole reader is
 // content/sidebar.js's ext-sidebar-title.
-const EXT_NAME    = 'Torren Relay';
+const EXT_NAME    = 'Tenlane Relay';
 const EXT_VERSION = '0.1.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +259,7 @@ function warnIfUnrecognisedRelayPage() {
     if (Object.prototype.hasOwnProperty.call(_extUnrecognisedPathsWarned, path)) return false;
     _extUnrecognisedPathsWarned[path] = true;
 
-    console.warn('[EXT] Torren Relay did NOT activate on this page.' +
+    console.warn('[EXT] Tenlane Relay did NOT activate on this page.' +
       '\n      host : ' + host +
       '\n      path : ' + path +
       '\n      The extension only runs on the load board, which it recognises by ANY path' +
