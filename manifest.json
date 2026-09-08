@@ -75,6 +75,7 @@
         "content/sidebar.js",
         "content/originCities.js",
         "content/cityAssign.js",
+        "content/loadSender.js",
         "content/panelCloser.js",
         "content/loadObserver.js",
         "content/content.js"

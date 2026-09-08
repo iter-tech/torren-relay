@@ -219,6 +219,21 @@
 
     <div class="popup-divider"></div>
 
+    <!-- LOAD NETWORK (2026-09-08). The only setting in this popup that controls whether anything
+         leaves the machine, so it gets its own section rather than sitting among display
+         preferences. ON by default; see tenlane-network/docs/DECISIONS.md D4. -->
+    <div class="popup-section-title">Load Network</div>
+
+    <div class="popup-row">
+      <label class="popup-label" for="popup-load-sender">Share loads I see</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="popup-load-sender" data-testid="popup-load-sender">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+
+    <div class="popup-divider"></div>
+
     <div class="popup-footer">
       <button type="button" id="popup-reset" data-testid="popup-reset" class="popup-reset">Reset to defaults</button>
     </div>
