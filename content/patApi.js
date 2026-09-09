@@ -392,6 +392,13 @@ function buildPatPayload(formState) {
   var o = formState.originCity;
   var d = formState.destCity;
   return {
+    // ⚠ HARDCODED, AND THAT IS A FEATURE GAP RATHER THAN A FORMAT DEFECT (measured 2026-09-09).
+    // Amazon's captures show ONE_WAY twice and ROUND_TRIP once. The condition is NOT origin ==
+    // destination: captures #2 and #3 have the SAME origin and destination (MEMPHIS → MEMPHIS,
+    // identical coordinates) and differ in runType, so it is a user control on Amazon's form
+    // that this modal does not have. ONE_WAY is the correct value for the one-way post this
+    // modal creates. Supporting round trips needs a UI control and a decision about the
+    // destination — not a default invented here. See DECISIONS.md D15.
     runType:                     'ONE_WAY',
     distanceOrDuration:          'DISTANCE',
     payoutType:                  'FLAT_RATE',
@@ -404,6 +411,13 @@ function buildPatPayload(formState) {
     startTime:                   formState.startTime.toISOString(),
     endTime:                     formState.endTime.toISOString(),
     startTimeWindow:             null,
+    // ⚠ UNRESOLVED, DELIBERATELY LEFT ALONE (measured 2026-09-09). Amazon's captures show
+    // `null, 2, null` — so it varies — but NOTHING in the captures shows WHAT it varies with.
+    // The obvious reading is "null when the form field is left blank", and that is a guess, not
+    // an observation. This modal has no blank state for it: the stop count is the record's own
+    // (D3) and is a static value unless the board's count was unreadable. Inventing a
+    // "leave blank" affordance to reach a value whose condition is unknown would be exactly the
+    // creative choice the parity work forbids. See DECISIONS.md D15.
     maxNumberOfStops:            formState.stopCount,
     minPickUpBufferInMinutes:    formState.stemMin,
     minDurationInMinutes:        null,
@@ -463,7 +477,11 @@ function buildPatPayload(formState) {
     exclusionCityList:           [],
     destinationCityInfo:         null,
     destinationCityInfoForFilter: null,
-    auditMetaData:               { suggestedCostPerDistance: null, matchOutlookScore: 'LOW' },
+    // ⚠ BOTH null. Amazon's own form sends `{suggestedCostPerDistance: null, matchOutlookScore:
+    // null}` in ALL THREE captured requests — it is a constant of the API, not a field that
+    // varies with the post. We sent 'LOW', a value Amazon has never been observed to send.
+    // Corrected 2026-09-09; see DECISIONS.md D15.
+    auditMetaData:               { suggestedCostPerDistance: null, matchOutlookScore: null },
     patOrderContext:              null,
     cancellationDetails:          null,
     repostingDetails:             null,

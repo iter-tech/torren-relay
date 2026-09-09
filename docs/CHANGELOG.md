@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+### 2026-09-09 — PAT: trailer ownership from the API, and the parity defect fixed
+
+#### `patTrailerLetter()` now prefers the API record
+
+It used to read **only** the card DOM (`.trailer-type-circle`). It now prefers
+`getLoadRecord(id).trailerProvided` — the value D14 established — and keeps the DOM badge **only**
+as a fallback when no record exists for that card.
+
+🔑 **This moves AWAY from DOM dependence.** CLAUDE.md's closed rule bans reading city, address, ZIP
+and warehouse code from the card DOM after task 7d failed live. Trailer ownership was the last PAT
+field sourced from the card.
+
+⚠ **The fallback is kept on purpose.** A record can be genuinely absent — a card from a response
+this tab never saw, or one evicted from the bounded store. Returning null would disable Confirm on
+a load the dispatcher can see.
+
+**A disagreement between the two sources logs at `logger.error`** — deliberately, because
+`DEBUG_LEVEL` ships at 1 where `warn` and `log` are silenced. The API value is used, the DOM value
+reported. Fallback rate is measured with `__EXT_DEBUG.patTrailerSourceReport()`.
+
+Verified against the real function with stubbed sources, **7/7**: API wins when present; DOM used
+only when the record is absent or `trailerProvided` is null; null when neither answers; mismatch
+logs `error` and returns the API value.
+
+#### 🐛 One parity defect fixed — three were not defects
+
+| field | Amazon | ours | verdict |
+|---|---|---|---|
+| `auditMetaData.matchOutlookScore` | `null` **3/3** | was `'LOW'` | 🐛 **FIXED** — we sent a value Amazon never sends |
+| `loadingTypeList` | `DROP`/`LIVE` | `['LIVE']` | ✅ not a defect — `["LIVE"]` **is** Amazon's wider option |
+| `runType` | has `ROUND_TRIP` | `ONE_WAY` | ⚠ feature gap — no round-trip control exists |
+| `maxNumberOfStops` | `null`/`2` | passes through | ⚠ condition unresolved — left alone |
+
+`samples/pat-upsert-loading-type-control.json` settles `loadingTypeList`: the form option
+"Live or Drop & Hook" sends `["LIVE"]` and "Drop & Hook" sends `["DROP"]`. Ours is the wider
+option. ⚠ `["LIVE","DROP"]` was never observed and must not be sent.
+
+`runType`'s condition is **not** origin == destination — captures #2 and #3 share both and still
+differ, so it is a user control we do not have.
+
+#### ✅ Parity re-measured
+
+```
+CAPTURE #1   42/42 keys, missing NONE, extra NONE, different 0, truncated 3
+CAPTURE #2   42/42 keys, missing NONE, extra NONE, different 0, truncated 2
+CAPTURE #3   42/42 keys, missing NONE, extra NONE, different 1, truncated 2   (runType)
+```
+
+The 7 truncated fields are `originCityInfo`, `endLocationList` and the 53' `equipmentTypes` array —
+DevTools cut them with `…`. They were **not** guessed.
+
+🔴 **The six-item smoke checklist could NOT be run** — Chrome refuses `--load-extension` under
+automation here (manager loads, zero extensions, even with
+`--disable-features=DisableLoadExtensionCommandLineSwitch`). See `docs/TEST_CASES.md` for the
+manual list.
+
 ### 2026-09-09 — Trailer ownership (P/R) derived from the record, and transmitted as one bit
 
 `projectRecord()` gains `trailerProvided`, derived from the **first PICKUP stop's**

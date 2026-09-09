@@ -508,6 +508,13 @@ var PAT_EQUIPMENT_LABEL_BY_ENUM = {
 //     form "Drop & Hook"          ->  loadingTypeList: ["DROP"]
 // In THIS API ["LIVE"] IS the wider option. See samples/pat-upsert-loading-type-control.json.
 // Ihor's product rule is unchanged: always the wider option, for every load, never derived.
+// ✅ NOT A PARITY DEFECT — confirmed against a dedicated capture (2026-09-09).
+// samples/pat-upsert-loading-type-control.json isolated Amazon's own Load control:
+//     form option "Live or Drop & Hook"  ->  loadingTypeList: ["LIVE"]
+//     form option "Drop & Hook"          ->  loadingTypeList: ["DROP"]
+// So ["LIVE"] IS the WIDER option, and it is exactly what Amazon sends for it. The captures
+// showing ["DROP"] are posts where the dispatcher narrowed the option, not a different format.
+// ⚠ That capture's own conclusion: ["LIVE","DROP"] was NEVER observed and must not be sent.
 var PAT_LOADING_TYPE_LIST  = ['LIVE'];
 var PAT_LOADING_TYPE_LABEL = 'Live or Drop & Hook';
 
@@ -542,20 +549,79 @@ var PAT_TRAILER_BY_LETTER = {
 };
 var PAT_TRAILER_LABEL_BY_LETTER = { P: 'Provided', R: 'Required' };
 
-// The badge letter for a load. Prefers cityAssign's label map, which shares the record's id,
-// eviction and teardown; falls back to loadStore for the case where cityAssign has not loaded.
-// Both hold the SAME value from the SAME parse — loadParser writes to each.
+// ── TRAILER OWNERSHIP: THE API RECORD IS NOW THE PRIMARY SOURCE (2026-09-09) ───────────────
+//
+// The badge letter used to come only from the card DOM — loadParser.js reads
+// `.trailer-type-circle` and files the letter under the work-opportunity id. D14 established
+// that the SAME fact is in the API record: the first PICKUP stop's trailerDetails[].assetOwner,
+// non-null meaning Amazon PROVIDED the trailer. projectRecord() now carries it as
+// `trailerProvided`.
+//
+// 🔑 THIS MOVES AWAY FROM DOM DEPENDENCE, NOT TOWARD IT. CLAUDE.md's closed rule — no city,
+// address, ZIP or warehouse code from the card DOM, after task 7d shipped a DOM origin reader
+// and left every card unassigned — is about exactly this class of coupling. The API value is
+// preferred; the DOM badge survives only as a fallback for a card whose record has not arrived.
+//
+// ⚠ THE FALLBACK IS DELIBERATELY KEPT, not deleted. The record can be genuinely absent: a card
+// rendered from a response this tab never saw, or after an eviction. Returning null there would
+// disable Confirm on a load the dispatcher can see, which is worse than one DOM read.
+//
+// Every call records which source answered, so the fallback rate is measurable rather than
+// assumed — see __EXT_DEBUG.patTrailerSourceReport().
+var _patTrailerSourceStats = { api: 0, domFallback: 0, none: 0, mismatch: 0, mismatches: [] };
+
 function patTrailerLetter(loadId) {
   logger.log('patModal', 'patTrailerLetter called', { loadId: !!loadId });
   try {
+    // ── PRIMARY: the API record ──────────────────────────────────────────────────────────
+    var apiLetter = null;
+    var rec = (typeof getLoadRecord === 'function') ? getLoadRecord(loadId) : null;
+    if (rec && typeof rec.trailerProvided === 'boolean') {
+      apiLetter = rec.trailerProvided ? 'P' : 'R';
+    }
+    // ⚠ `null` on the record means UNKNOWN, not "Required" — trailerProvidedOf() returns null
+    // when it cannot answer. Only a real boolean produces a letter here.
+
+    // ── FALLBACK: the card DOM, exactly as before ────────────────────────────────────────
+    var domLetter = null;
     if (typeof getTrailerLabel === 'function') {
       var viaLabel = getTrailerLabel(loadId);
-      if (viaLabel) return String(viaLabel);
+      if (viaLabel) domLetter = String(viaLabel);
     }
-    if (typeof loadStore !== 'undefined' && loadStore.getLoadUnit) {
+    if (!domLetter && typeof loadStore !== 'undefined' && loadStore.getLoadUnit) {
       var unit = loadStore.getLoadUnit(loadId);
-      if (unit && unit.trailerLetter) return String(unit.trailerLetter);
+      if (unit && unit.trailerLetter) domLetter = String(unit.trailerLetter);
     }
+
+    // ── DISAGREEMENT: loud, and at the SHIPPED verbosity ─────────────────────────────────
+    // ⚠ logger.error, not warn or log. DEBUG_LEVEL ships at 1, where only error() emits — a
+    // warn here would be invisible on every real board and the mismatch would never be seen.
+    // A disagreement means D14's rule is wrong for this load, which is worth a red line.
+    if (apiLetter && domLetter && apiLetter !== domLetter) {
+      _patTrailerSourceStats.mismatch++;
+      if (_patTrailerSourceStats.mismatches.length < 20) {
+        _patTrailerSourceStats.mismatches.push({ loadId: loadId, api: apiLetter, dom: domLetter });
+      }
+      logger.error('patModal',
+        'PATDIAG TRAILER MISMATCH — the API record and the card badge disagree. The API value ' +
+        'is being used. This is the case D14 said would falsify the rule: please report it with ' +
+        'the load id.', { loadId: loadId, api: apiLetter, dom: domLetter });
+    }
+
+    if (apiLetter) {
+      _patTrailerSourceStats.api++;
+      logger.warn('patModal', 'trailer letter from API record', { loadId: loadId, letter: apiLetter });
+      return apiLetter;
+    }
+    if (domLetter) {
+      _patTrailerSourceStats.domFallback++;
+      logger.warn('patModal', 'trailer letter from CARD DOM (fallback — no record for this card)',
+        { loadId: loadId, letter: domLetter });
+      return domLetter;
+    }
+    _patTrailerSourceStats.none++;
+    logger.warn('patModal', 'trailer letter UNRESOLVED — neither the record nor the card had one',
+      { loadId: loadId });
     return null;
   } catch (e) {
     logger.error('patModal', 'patTrailerLetter failed — treating the trailer type as unresolved',
@@ -563,6 +629,17 @@ function patTrailerLetter(loadId) {
     return null;
   }
 }
+
+// How often the DOM fallback actually fires, and whether the two sources ever disagreed.
+// ⚠ Read this rather than the per-call lines: those go through logger.warn, which is silent at
+// the shipped DEBUG_LEVEL of 1. Counters need no setting change; mismatches are logged as errors
+// and are visible at level 1 regardless.
+try {
+  window.__EXT_DEBUG = window.__EXT_DEBUG || {};
+  window.__EXT_DEBUG.patTrailerSourceReport = function () {
+    return JSON.parse(JSON.stringify(_patTrailerSourceStats));
+  };
+} catch (e) { /* diagnostics are optional; never let them break load */ }
 
 // ── DRIVER TYPE, DERIVED FROM THE LOAD (2026-08-19) ───────────────────────────────────────
 //

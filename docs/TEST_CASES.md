@@ -1,5 +1,70 @@
 # Test Cases
 
+## TC-PAT-TRAILER-SOURCE — trailer ownership comes from the API, DOM is only a fallback (2026-09-09)
+
+`patTrailerLetter()` prefers `getLoadRecord(id).trailerProvided` and falls back to the card badge
+(`.trailer-type-circle`) only when no record exists for that card.
+
+### 🔴 MUST BE TESTED MANUALLY — none of this could be exercised here
+
+Chrome refuses `--load-extension` under automation on this machine (the extensions manager loads
+with **zero** extensions, even with `--disable-features=DisableLoadExtensionCommandLineSwitch`),
+and there are no Amazon Relay credentials. **The six-item smoke checklist in CLAUDE.md was not
+run.** What was verified is the *logic*, against the real function with stubbed sources — 7/7.
+
+### The six smoke items, to run after loading unpacked
+
+| # | item | how to tell it passed |
+|---|---|---|
+| a | popup opens without console errors | open the popup, check its console |
+| b | logged-out popup shows only the login block | sign out first |
+| c | full login flow (email → code → features) | ⚠ **uses the OTP flow — untouched by this change** |
+| d | sidebar/panel activates on the load board | open `/loadboard/search` |
+| e | **PAT modal opens and Confirm enables with valid data** | the item this change can break |
+| f | no errors in the page console | watch while opening several loads |
+
+### TC-PAT-TRAILER-1 — the API value is used, and the badge agrees
+
+1. Open a load board, let cards render, open a load's **Post a Truck**.
+2. Set `DEBUG_LEVEL = 2` in `utils/constants.js` **only if you want the per-call line** — at the
+   shipped level 1 it is silent by design.
+3. Run `__EXT_DEBUG.patTrailerSourceReport()`.
+
+**PASS:** `api` climbs as loads are opened, `mismatch` stays **0**, and the modal's trailer row
+matches the card's P/R badge.
+
+### TC-PAT-TRAILER-2 — the fallback fires when a record is missing
+
+Open a card whose record this tab never captured — e.g. scroll to cards loaded before the
+extension started, or reload and open a card immediately.
+
+**PASS:** `domFallback` increments and the modal still resolves a letter. **FAIL:** Confirm is
+blocked on a card that plainly shows a badge.
+
+### 🔴 TC-PAT-TRAILER-3 — a DISAGREEMENT is the falsifying case
+
+If the API and the badge ever disagree, the console shows, **at the shipped `DEBUG_LEVEL` of 1**:
+
+```
+[EXT][…][patModal] PATDIAG TRAILER MISMATCH — the API record and the card badge disagree.
+The API value is being used. … please report it with the load id.
+```
+
+⚠ **Report it with the load id. Do not explain it away.** D14 named this as the case that would
+falsify "assetOwner non-null = Provided". `__EXT_DEBUG.patTrailerSourceReport().mismatches` keeps
+the first 20 with their ids.
+
+### TC-PAT-PARITY — the request still matches Amazon's
+
+`auditMetaData.matchOutlookScore` is now `null` (it was `'LOW'`; Amazon sends `null` in 3/3
+captures). After any PAT change, re-run the diff against `samples/PAT Data}.txt`.
+
+**PASS:** 42/42 keys, 0 missing, 0 extra, and the only difference is `runType` on capture #3 —
+the known round-trip feature gap. ⚠ `loadingTypeList: ["LIVE"]` is **correct** — it is Amazon's
+wider "Live or Drop & Hook" option. Do not "fix" it to `["DROP"]`, and never send
+`["LIVE","DROP"]`, which has never been observed.
+
+
 ## TC-FASTBOOK-IDENTITY — Fast Book must abort if the sheet shows another load (2026-08-27)
 
 > ⚠ **UPDATED LATER THE SAME DAY.** The identity check below was correct but read the load id
