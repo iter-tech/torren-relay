@@ -129,6 +129,15 @@ var loadSender = (function () {
         payoutUnit:          rec.payoutUnit || null,
         deadhead:            (typeof rec.deadhead === 'number') ? rec.deadhead : null,
         deadheadUnit:        rec.deadheadUnit || null,
+
+        // 🔑 A DERIVED BOOLEAN, NOT THE RAW trailerDetails OBJECT. true = Amazon PROVIDED the
+        // trailer, false = the carrier is REQUIRED to bring one, null = unknown.
+        //
+        // ⚠ assetId, assetSource, assetType, trailerLoadingStatus, dropTrailerETA and the owner
+        // CODE itself are all withheld. The owner code names a specific carrier; a dispatcher
+        // needs only whether a trailer comes with the load. DECISIONS.md D10-AMENDED.
+        trailerProvided:     (typeof rec.trailerProvided === 'boolean') ? rec.trailerProvided : null,
+
         loads:               loads
       };
 
@@ -141,10 +150,10 @@ var loadSender = (function () {
         pickup_lat: first ? first.lat : null,
         pickup_lng: first ? first.lng : null,
         pickup_stop_code: first ? first.stopCode : null,
-        // ⚠ ALWAYS NULL NOW. `zip` is excluded from transmission (D10), and this column has no
-        // other source. The column is therefore dead until either the exclusion is revisited or
-        // a migration drops it — recorded rather than quietly left looking populated.
-        pickup_postal_code: null,
+        // Provided / Required as a typed column, so the site can sort and filter on it without
+        // reaching into jsonb. `pickup_postal_code` used to sit here and was dropped by
+        // 0003_trailer_provided.sql — it had been permanently null since `zip` was excluded.
+        trailer_provided: payload.trailerProvided,
         // The RPC's CHECK constraint accepts exactly these three. endpointLabel() in
         // networkObserver.js already emits them, but an unexpected value would abort the whole
         // batch on a constraint violation, so it is pinned here rather than trusted.
