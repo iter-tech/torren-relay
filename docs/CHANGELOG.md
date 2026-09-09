@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### 2026-09-09 — Trailer ownership (P/R) derived from the record, and transmitted as one bit
+
+`projectRecord()` gains `trailerProvided`, derived from the **first PICKUP stop's**
+`trailerDetails[].assetOwner` — **non-null = Amazon PROVIDED, null = carrier REQUIRED**.
+
+Settled by measurement on equipment-matched captures (`tenlane-network/docs/DECISIONS.md` D14):
+**37/37** records in `capture-P-53.json` return `true`, **22/22** in `capture-R-53.json` return
+`false`, with 26-foot box trucks excluded so equipment could not explain the split.
+
+#### Three rules in `trailerProvidedOf()`, each with a reason
+
+**The FIRST pickup stop, not any pickup stop.** 9 of 28 multi-leg PROVIDED records carry an Amazon
+trailer on leg 1 and a live load later, so their later pickups have a null owner. Scanning "any
+pickup" would classify those 9 as REQUIRED. The badge describes the tour; the tour starts at leg 1.
+
+**Null vs non-null, never a known-code list.** Four codes have been seen — `AZNG`, `NCSL`, `HUBG`,
+`AZNU` — and an unrecognised fifth still means an owner *exists*. Matching against a list would
+turn every new code into a silent "Required".
+
+**Returns `null`, not `false`, when it cannot answer** (no pickup stop, or no `trailerDetails` on
+it). Unknown is not "the carrier must supply one", and a dispatcher reading "Required" off a
+missing field would bring a trailer they did not need.
+
+#### ⛔ The raw object does NOT leave the machine
+
+Only the derived boolean is transmitted. **Not** `trailerDetails` itself, `assetId`,
+`assetSource`, `assetType`, `trailerLoadingStatus`, `dropTrailerETA`, **nor the owner code** — the
+code names a specific carrier, and the network table is readable by every authenticated user. The
+other five are null in every capture measured and are read by nothing.
+
+Asserted against stored rows: **0 rows contain any of those seven names.**
+
+#### Verified end to end
+
+Real records from both labelled captures → the real `projectRecord()` → the real `toRow()` → the
+real `ingest_loads`: `{"updated":0,"inserted":6}`, and the site rendered
+`DLN4 CHICAGO, IL | … | Provided` beside `GOC1 CHICAGO, IL | … | Required`.
+
+⚠ **Still not validated against the DOM badge on an unfiltered board** — see DECISIONS.md D14's
+residual risk. `patModal.js` continues to read the badge from the card; this change does not touch
+that path.
+
 ### 2026-09-08 (later) — ✅ Raw-body contract RESTORED; allow-list widened instead
 
 **The raw response body no longer crosses the world boundary.** Yesterday's `__extRelayRawLoads`

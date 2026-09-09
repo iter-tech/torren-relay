@@ -298,6 +298,57 @@
     }
   }
 
+  // ── TRAILER OWNERSHIP: Provided vs Required (2026-09-09, DECISIONS.md D14) ──────────────
+  //
+  // Amazon's board shows a P/R badge. The API equivalent is whether the FIRST PICKUP stop names
+  // an asset owner:
+  //
+  //     trailerDetails[].assetOwner non-null  ->  PROVIDED (Amazon supplies the trailer)
+  //     trailerDetails[].assetOwner null      ->  REQUIRED (the carrier supplies it)
+  //
+  // Measured on equipment-matched captures: 37/37 PROVIDED records non-null, 22/22 REQUIRED
+  // records null, with 26-foot box trucks excluded so equipment could not explain the split.
+  //
+  // 🔑 THE **FIRST** PICKUP STOP, NOT ANY PICKUP STOP. 9 of 28 multi-leg PROVIDED records carry
+  // an Amazon trailer on leg 1 and a live load later, so their later pickups have a null owner.
+  // Scanning "any pickup" would classify those 9 as REQUIRED. The badge describes the tour, and
+  // the tour starts at leg 1.
+  //
+  // 🔑 NULL vs NON-NULL, NEVER A KNOWN-CODE LIST. Four codes have been seen — AZNG, NCSL, HUBG,
+  // AZNU — and an unrecognised fifth still means an owner EXISTS. Matching against a list would
+  // turn every new code into a silent "Required".
+  //
+  // Returns null, not false, when the question cannot be answered (no pickup stop, or no
+  // trailerDetails on it). Unknown is not the same as "the carrier must supply one", and a
+  // dispatcher reading "Required" off a missing field would bring a trailer they did not need.
+  function trailerProvidedOf(item) {
+    try {
+      var srcLoads = (item && item.loads) || [];
+      for (var li = 0; li < srcLoads.length; li++) {
+        var stops = (srcLoads[li] && srcLoads[li].stops) || [];
+        for (var si = 0; si < stops.length; si++) {
+          var st = stops[si];
+          if (!st || st.stopType !== 'PICKUP') continue;
+
+          // FIRST pickup found — this stop decides it, and no later stop may override.
+          var td = st.trailerDetails;
+          if (!Array.isArray(td)) td = (td && typeof td === 'object') ? [td] : [];
+          if (!td.length) return null;                       // unknown, not "Required"
+          for (var ti = 0; ti < td.length; ti++) {
+            if (td[ti] && td[ti].assetOwner != null) return true;
+          }
+          return false;
+        }
+      }
+      return null;                                            // no pickup stop at all
+    } catch (e) {
+      reportDrop('trailer-provided-threw', 'trailerProvidedOf', 0, {
+        detail: (e && e.message) ? e.message : 'unknown'
+      });
+      return null;
+    }
+  }
+
   // ── THE PANEL'S PROJECTION (STAGE B, 2026-08-14) ────────────────────────────────────────
   //
   // Turns one work opportunity into the SMALLEST record the inline panel needs. An explicit
@@ -399,6 +450,14 @@
         deadhead: (item.deadhead && typeof item.deadhead.value === 'number') ? item.deadhead.value : null,
         deadheadUnit: (item.deadhead && item.deadhead.unit) || null,
 
+        // Provided / Required, derived from the FIRST pickup stop. See trailerProvidedOf().
+        //
+        // ⚠ A DERIVED BOOLEAN, NOT THE RAW OBJECT. `trailerDetails` itself is deliberately NOT
+        // carried: assetId, assetSource, assetType, trailerLoadingStatus and dropTrailerETA are
+        // no use to a dispatcher, and the owner CODE names a specific carrier. The answer to
+        // "does a trailer come with this load" is one bit. See DECISIONS.md D10-AMENDED.
+        trailerProvided: trailerProvidedOf(item),
+
         loads: loads
       };
     } catch (e) {
@@ -406,8 +465,11 @@
       reportDrop('project-record-threw', 'projectRecord', 0, {
         detail: (e && e.message) ? e.message : 'unknown'
       });
+      // Every field null, including trailerProvided — on this path nothing is known, and a
+      // missing key would read downstream as "Required" rather than "unknown".
       return { id: id, transitOperatorType: null, stopCount: null, totalDistance: null,
-               distanceUnit: null, payout: null, payoutUnit: null, loads: [] };
+               distanceUnit: null, payout: null, payoutUnit: null,
+               deadhead: null, deadheadUnit: null, trailerProvided: null, loads: [] };
     }
   }
 
