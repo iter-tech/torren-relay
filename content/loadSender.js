@@ -64,9 +64,12 @@ var loadSender = (function () {
   // narrower, because that table is readable by EVERY authenticated user — one carrier's data is
   // visible to all of them.
   //
-  // NOT TRANSMITTED, by decision (DECISIONS.md D10): line1, label, zip, loadingType,
-  // unloadingType. Facility street addresses and postal codes are not read in the load table and
-  // are not used by the PAT form.
+  // NOT TRANSMITTED, by decision (DECISIONS.md D10): line1, label, zip. Facility street addresses
+  // and postal codes are not read in the load table and are not used by the PAT form.
+  //
+  // ✅ loadingType / unloadingType ARE now transmitted (D10-AMENDED-2, 2026-09-12). They were
+  // excluded when nothing consumed them; the board's Load Type column consumes them now. They
+  // describe the LOAD, not the carrier — no facility identity, no third party.
   //
   // ⚠ AND NOTHING FROM THE RAW RECORD CAN LEAK HERE EVEN BY MISTAKE. The input is already the
   // curated projection — contacts, instructions, purchase orders, shipper references, carrier
@@ -90,7 +93,17 @@ var loadSender = (function () {
       lng:      (typeof st.lng === 'number') ? st.lng : null,
       tz:       st.tz || null,
       checkIn:  st.checkIn || null,
-      checkOut: st.checkOut || null
+      checkOut: st.checkOut || null,
+
+      // 🔑 BOTH, because the board's Load Type is read from whichever applies to the stop. A stop
+      // is either loaded or unloaded, never both in any capture — `formatEquipment()` in
+      // inlinePanel.js takes `loadingType || unloadingType` for exactly that reason, and this
+      // reuses that rule rather than writing a second one.
+      //
+      // Measured values across all captures: loadingType ∈ {null, PRELOADED, LIVE},
+      // unloadingType ∈ {null, DROP, LIVE}. Nothing else has ever been seen.
+      loadingType:   st.loadingType || null,
+      unloadingType: st.unloadingType || null
     };
   }
 
@@ -150,6 +163,10 @@ var loadSender = (function () {
         pickup_lat: first ? first.lat : null,
         pickup_lng: first ? first.lng : null,
         pickup_stop_code: first ? first.stopCode : null,
+        // The board's Load Type, taken from the FIRST PICKUP stop — the same stop trailer
+        // ownership is read from, for the same reason: a multi-leg tour can differ per leg, and
+        // the row describes the tour, which starts at leg 1.
+        load_type: first ? (first.loadingType || first.unloadingType || null) : null,
         // Provided / Required as a typed column, so the site can sort and filter on it without
         // reaching into jsonb. `pickup_postal_code` used to sit here and was dropped by
         // 0003_trailer_provided.sql — it had been permanently null since `zip` was excluded.
