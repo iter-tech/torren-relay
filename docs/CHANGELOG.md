@@ -2,6 +2,83 @@
 
 ## [Unreleased]
 
+### 2026-09-12 — 🐛 The load sender never started. Fixed, and verified live.
+
+**The pipeline was always fine. The startup path was broken.**
+
+#### The measurement that found it
+
+```
+__EXT_DEBUG.loadSenderReport()
+  {enabledConstant: true, buffered: 0,
+   stats: {seen: 0, sent: 0, inserted: 0, updated: 0, failures: 0, lastError: null}}
+```
+
+`seen: 0` with `failures: 0` and `lastError: null` — so neither the network nor the toggle. A probe
+attached its own listener to the same message on the same page:
+
+```
+phaseA:  13 messages, 200 records carrying ids, sender seen = 0
+phaseB:  after calling loadSender.start() BY HAND — same page, no reload:
+         seen 300 · sent 100 · inserted 55 · updated 45 · buffered 54 · failures 0
+VERDICT: the listener was never registered — start() returned early at file load
+```
+
+#### The cause
+
+`loadSender.start()` ran **once, at file load (`document_idle`)**, behind an `isLoadBoardPage()`
+guard. On a live board the SPA has often **not routed yet** at that instant, so the guard was
+false, `start()` returned early — and **nothing ever called it again**. Navigating to the board
+afterwards could not repair it.
+
+🔑 **The guard was never wrong. It was evaluated once, at the wrong moment.**
+
+#### The fix — wired like `initCityAssign()`
+
+`start()` is now called from `content.js`'s `activateExtensionUI()`, the same place
+`initCityAssign()` is called: a path that runs only once the auth gate **and** the page check have
+both passed, and that **re-runs on SPA navigation** and after a re-login.
+`deactivateExtensionUI()` calls `stop()`.
+
+⚠ **`start()` is now idempotent.** Activation can be re-entered; without a guard each entry would
+add another message listener and another flush interval, so every board response would be accepted
+N times and `seen_count` would inflate on the server.
+
+⚠ The `visibilitychange` handler is held in a variable so `stop()` can remove it. As an anonymous
+function it was unremovable and leaked one copy per activate/deactivate cycle.
+
+`report()` gained **`listening`** — the one field that would have made this diagnosable at a glance
+instead of needing a two-phase probe.
+
+⚠ **The `isLoadBoardPage()` guard stays.** The sender still must not run off the board.
+
+#### ✅ The first real data
+
+```
+rows_in_loads    55      (all source = 'similar')
+trailer_provided provided 55 · required 0 · unknown 0
+total_sightings  201
+```
+
+**201 sightings collapsed into 55 rows** — deduplication working on live data, not a fixture. And
+the PAT modal resolved trailer ownership from the API record on the same board:
+`patTrailerSourceReport() → {api: 1, domFallback: 0, mismatch: 0}`.
+
+#### Two things measured and deliberately NOT changed
+
+**`toggleStored: undefined` is not a defect.** `isEnabled()` resolves
+`data[LOAD_SENDER_ENABLED] !== false`, and the popup's initial read is `!== false` too; the popup
+writes the key **only** in its change handler. "Never written" is exactly the true-default state,
+displayed and honoured correctly.
+
+**"Multiple GoTrueClient instances" is real but benign here.** The sender creates its own client
+alongside `authGate.js`'s. They do **not** fight over an auth storage key — both pass
+`persistSession: false`, so GoTrue writes nothing to `localStorage`. The narrower real risk: both
+write the refreshed session back to `chrome.storage.local[SUPABASE_SESSION_KEY]`, and the project
+has `refresh_token_rotation_enabled: true`, so two concurrent refreshes mean one wins and the other
+gets an invalid-token error. **Neither clears the session on failure** — both deliberately — so the
+worst case is one skipped flush, not a logout. `failures: 0` live. Reported, not changed.
+
 ### 2026-09-09 — PAT: trailer ownership from the API, and the parity defect fixed
 
 #### `patTrailerLetter()` now prefers the API record

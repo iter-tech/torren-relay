@@ -323,9 +323,36 @@ var loadSender = (function () {
     }
   }
 
+  // ── START / STOP ─────────────────────────────────────────────────────────────────────────
+  //
+  // 🔴 FIXED 2026-09-12, AFTER A LIVE MEASUREMENT. start() used to be called ONCE, at file load
+  // (document_idle). On a live board the probe measured 13 messages carrying 200 records while
+  // the sender's `seen` stayed at 0 — because `isLoadBoardPage()` was FALSE at document_idle
+  // (the SPA had not routed yet), start() returned early, and NOTHING ever called it again.
+  // Calling start() by hand then produced seen 300 / sent 100 / inserted 55 / updated 45 on the
+  // same page, which is what proved the pipeline itself was fine and the startup path was not.
+  //
+  // 🔑 IT IS NOW WIRED LIKE initCityAssign(): called from content.js's activateExtensionUI(),
+  // which runs when the auth gate and the page check have BOTH passed, and re-runs on SPA
+  // navigation and after a re-login. Torn down by deactivateExtensionUI().
+  //
+  // ⚠ THE isLoadBoardPage() GUARD STAYS. The bug was never that the guard was wrong — it was
+  // that the guard was evaluated once, at the wrong moment. Removing it would let the sender
+  // run off the board.
+  var _listening = false;
+  var _onVisibility = null;
+
   function start() {
     logger.log('loadSender', 'start called');
     try {
+      // ⚠ IDEMPOTENT, AND THAT IS LOAD-BEARING. activateExtensionUI() can be entered more than
+      // once — SPA navigation, a re-login, a manual re-activation. Without this guard each call
+      // would add ANOTHER message listener and ANOTHER flush interval, so every board response
+      // would be accepted N times and seen_count would inflate on the server.
+      if (_listening) {
+        logger.log('loadSender', 'start: already listening — ignoring');
+        return;
+      }
       if (typeof isLoadBoardPage === 'function' && !isLoadBoardPage()) return;
       if (typeof LOAD_SENDER_ENABLED !== 'undefined' && LOAD_SENDER_ENABLED === false) return;
 
@@ -337,10 +364,15 @@ var loadSender = (function () {
       // A tab being hidden or closed is the most likely moment to lose a buffer. Best effort:
       // the flush is async and may not finish, which is acceptable — the same load will be seen
       // again on the next board tick.
-      document.addEventListener('visibilitychange', function () {
+      //
+      // ⚠ Held in a variable so stop() can actually remove it. As an anonymous function it was
+      // unremovable, and every activate/deactivate cycle left another copy on the document.
+      _onVisibility = function () {
         if (document.visibilityState === 'hidden') flush('hidden');
-      });
+      };
+      document.addEventListener('visibilitychange', _onVisibility);
 
+      _listening = true;
       logger.log('loadSender', 'started', { flushMs: every });
     } catch (e) {
       logger.error('loadSender', 'start failed — sender inactive, board unaffected', { error: e });
@@ -352,7 +384,14 @@ var loadSender = (function () {
     try {
       if (_timer) { clearInterval(_timer); _timer = null; }
       window.removeEventListener('message', onMessage);
+      if (_onVisibility) {
+        document.removeEventListener('visibilitychange', _onVisibility);
+        _onVisibility = null;
+      }
+      // Dropped on teardown: deactivation means logout or leaving the board, and buffered loads
+      // cannot be sent without a session. They will be seen again on the next board tick.
       _buffer.clear();
+      _listening = false;
     } catch (e) {
       logger.error('loadSender', 'stop failed', { error: e });
     }
@@ -361,6 +400,10 @@ var loadSender = (function () {
   function report() {
     return {
       enabledConstant: (typeof LOAD_SENDER_ENABLED !== 'undefined') ? LOAD_SENDER_ENABLED : null,
+      // 🔑 THE FIELD THAT WOULD HAVE CAUGHT THE STARTUP BUG IMMEDIATELY. `false` here with a
+      // board on screen means start() never registered the listener — exactly the state the
+      // live probe had to be written to discover.
+      listening: _listening,
       buffered: _buffer.size,
       stats: JSON.parse(JSON.stringify(_stats))
     };
@@ -369,7 +412,11 @@ var loadSender = (function () {
   return { start: start, stop: stop, flush: flush, report: report, isEnabled: isEnabled };
 })();
 
-loadSender.start();
+// ⚠ DELIBERATELY NOT STARTED HERE. This file is injected at document_idle, when the SPA has
+// often not routed yet and isLoadBoardPage() is still false — start() returned early and nothing
+// ever called it again, so the sender never saw a single record on a live board. It is now
+// started by content.js's activateExtensionUI(), which runs only once the auth gate AND the page
+// check have passed, and re-runs on navigation. See the note above start().
 
 // Diagnostics. Read-only except flushNow(), which only does early what the timer would do anyway.
 try {
