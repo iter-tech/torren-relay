@@ -723,6 +723,28 @@ async function activateExtensionUI() {
     step = 'initCityAssign';
     initCityAssign();
 
+    // Load sender (2026-09-12). Started HERE, not at file load.
+    //
+    // 🔴 IT USED TO START ITSELF AT document_idle AND SILENTLY DID NOTHING. isLoadBoardPage()
+    // was still false at that moment because the SPA had not routed, start() returned early,
+    // and nothing ever called it again. Measured live: 13 board messages carrying 200 records
+    // while the sender's `seen` stayed 0. Calling start() by hand on the same page produced
+    // seen 300 / inserted 55 / updated 45.
+    //
+    // Here it is gated on exactly the right thing — activation already means "auth gate open
+    // AND this is the load board" — and it re-runs on SPA navigation. start() is idempotent, so
+    // a repeated activation cannot double-register the listener or the flush interval.
+    //
+    // Last, and deliberately not guarded by `step`: like the panel and the city feed above, a
+    // failure here must not roll back the activation and cost the dispatcher his sidebar.
+    step = 'loadSender.start';
+    try {
+      if (typeof loadSender !== 'undefined') loadSender.start();
+    } catch (e) {
+      logger.error('content', 'loadSender.start failed — the sender is inactive, the board is ' +
+        'unaffected', { error: e });
+    }
+
     _extActivated = true; // ONLY after every step completed without throwing
     logger.log('content', 'extension UI activated — waiting for manual Start');
   } catch (e) {
@@ -778,6 +800,16 @@ function deactivateExtensionUI() {
   // timer. Same reason as the panel above: a logged-out page must be left with no live
   // listener of ours on it.
   teardownCityAssign();
+
+  // Load sender (2026-09-12) — drops its message listener, its flush interval, its
+  // visibilitychange handler and anything still buffered. Same reason as the city feed above: a
+  // logged-out page must be left with no live listener of ours on it, and buffered loads cannot
+  // be sent without a session anyway.
+  try {
+    if (typeof loadSender !== 'undefined') loadSender.stop();
+  } catch (e) {
+    logger.error('content', 'loadSender.stop failed', { error: e });
+  }
 
   var sidebarEl = document.getElementById('ext-sidebar');
   if (sidebarEl) {
