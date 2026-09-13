@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### 2026-09-12 (later) — `loadingType` / `unloadingType` are now transmitted
+
+D10 excluded them when **nothing consumed them**. The board's Load Type column consumes them now,
+so they join the transmitted subset (**D10-AMENDED-2**).
+
+🔑 **They describe the LOAD, not the carrier** — no facility identity, no third party, nothing
+about who was looking. That is what the exclusion rule protects, and it is unchanged; the field
+simply now passes it. `line1`, `label`, `zip` and everything from the raw record stay excluded.
+
+`toRow()` also derives a row-level `load_type` from the **first pickup stop** — the same stop
+`trailer_provided` uses, for the same reason: a multi-leg tour can differ per leg, and the row
+describes the tour, which starts at leg 1. The fallback `loadingType || unloadingType` is not new
+logic: it is the rule `formatEquipment()` in `content/inlinePanel.js` already applies, because a
+stop is either loaded or unloaded and never both in any capture.
+
+The transmitted stop now carries it:
+
+```jsonc
+{ "seq":1, "stopType":"PICKUP", "city":"HEBRON", "state":"KY", "stopCode":"AUV1",
+  "checkIn":"2026-08-03T22:58:00Z", "loadingType":"PRELOADED", "unloadingType":null }
+```
+
+#### 🔴 There is no "Live/Drop" value to send
+
+`loadingType` ∈ {null, PRELOADED, LIVE}; `unloadingType` ∈ {null, DROP, LIVE}; **never both on one
+stop**. "Live or Drop & Hook" is a PAT *form* option — the wider selection a dispatcher makes when
+posting a truck — not a board value. Deriving a combined label would be a guess, and this codebase
+already refused to invent one (`HANDLING_LABELS`).
+
+#### ✅ The sender captures `/search`. It always did after the startup fix.
+
+The report that only `similar` was ever captured turned out to be a stale snapshot:
+
+```
+source   | n  | first_arrived
+search   | 11 | 2026-09-13T00:36:41.541Z
+similar  | 55 | 2026-09-13T00:23:28.405Z
+```
+
+Thirteen minutes apart — the `similar` rows are from the manual `start()` probe run, the `search`
+rows from a later session after the startup fix. **No change was made to the capture path.**
+
 ### 2026-09-12 — 🐛 The load sender never started. Fixed, and verified live.
 
 **The pipeline was always fine. The startup path was broken.**
