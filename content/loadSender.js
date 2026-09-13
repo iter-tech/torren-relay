@@ -107,6 +107,51 @@ var loadSender = (function () {
     };
   }
 
+  // ── LOAD TYPE: TWO STOPS, NOT ONE (2026-09-13, DECISIONS.md D20-REVISED) ─────────────────
+  //
+  // The board's Load Type combines the START of the tour with its END:
+  //
+  //     first stop's loadingType   +   last stop's unloadingType
+  //
+  // Same value twice collapses to one word; different values join with a slash. That is what
+  // produces "Live/Drop" — a load LIVE-loaded at the pickup and DROPped at the delivery.
+  //
+  // 🔑 MEASURED, 326 work opportunities across all 10 captures. Every combination that occurs:
+  //
+  //     PRELOADED × DROP   239      LIVE × LIVE   64      DROP × DROP   14
+  //     PRELOADED × LIVE     7      LIVE × DROP    2
+  //
+  // ⚠ AN EARLIER VERSION READ ONLY THE FIRST PICKUP STOP, with a `loadingType || unloadingType`
+  // fallback. That is why a combined label could never appear: it never looked at the last stop.
+  // The two readings differ on 248 of 326 records, so this is not a cosmetic change.
+  //
+  // ⚠ NOTHING IS INVENTED FOR A COMBINATION THE DATA DOES NOT SHOW. Only the five above exist;
+  // an unseen enum simply passes through as itself, and a missing half yields the other half
+  // alone rather than a guessed pairing.
+  //
+  // ⚠ THE WHOLE TOUR, not loads[0]. Restricting to the first leg gives a different answer
+  // (PRELOADED × LIVE 31 instead of 7), because a multi-leg tour ends on a later leg.
+  function loadTypeOf(loads) {
+    try {
+      var stops = [];
+      for (var i = 0; i < loads.length; i++) {
+        var st = (loads[i] && loads[i].stops) || [];
+        for (var j = 0; j < st.length; j++) stops.push(st[j]);
+      }
+      if (!stops.length) return null;
+
+      var a = stops[0] && stops[0].loadingType;
+      var b = stops[stops.length - 1] && stops[stops.length - 1].unloadingType;
+      if (!a && !b) return null;
+      if (!a) return String(b);
+      if (!b) return String(a);
+      return (a === b) ? String(a) : (String(a) + '/' + String(b));
+    } catch (e) {
+      logger.error('loadSender', 'loadTypeOf failed — load type left unknown', { error: e });
+      return null;
+    }
+  }
+
   // ── Turn one CURATED record into an ingest_loads element ─────────────────────────────────
   function toRow(rec, endpoint) {
     logger.log('loadSender', 'toRow called');
@@ -163,10 +208,7 @@ var loadSender = (function () {
         pickup_lat: first ? first.lat : null,
         pickup_lng: first ? first.lng : null,
         pickup_stop_code: first ? first.stopCode : null,
-        // The board's Load Type, taken from the FIRST PICKUP stop — the same stop trailer
-        // ownership is read from, for the same reason: a multi-leg tour can differ per leg, and
-        // the row describes the tour, which starts at leg 1.
-        load_type: first ? (first.loadingType || first.unloadingType || null) : null,
+        load_type: loadTypeOf(loads),
         // Provided / Required as a typed column, so the site can sort and filter on it without
         // reaching into jsonb. `pickup_postal_code` used to sit here and was dropped by
         // 0003_trailer_provided.sql — it had been permanently null since `zip` was excluded.

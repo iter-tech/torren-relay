@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### 2026-09-13 — Load Type is derived from TWO stops, not one
+
+`loadTypeOf()` now takes the **first stop's `loadingType`** and the **last stop's
+`unloadingType`**, joining them with "/" when they differ. That is what produces **"Live/Drop"** —
+a load live-loaded at the pickup and dropped at the delivery.
+
+🔑 **Measured before building**, 326 work opportunities across all 10 captures:
+
+```
+PRELOADED × DROP  239     LIVE × LIVE  64     DROP × DROP  14
+PRELOADED × LIVE    7     LIVE × DROP   2
+```
+
+All five combinations map to a label with nothing invented. **The previous code read only the
+first pickup stop with a `loadingType || unloadingType` fallback** — it never looked at the last
+stop, so a combined label was unreachable. The two readings differ on **248 of 326** records.
+
+⚠ **The whole tour, not `loads[0]`.** Restricting to the first leg gives a different answer
+(`PRELOADED × LIVE` 31 instead of 7), because a multi-leg tour ends on a later leg.
+
+⚠ An unseen enum passes through as itself, and a missing half yields the other half alone rather
+than a guessed pairing.
+
+
 ### 2026-09-12 (later) — `loadingType` / `unloadingType` are now transmitted
 
 D10 excluded them when **nothing consumed them**. The board's Load Type column consumes them now,
