@@ -312,8 +312,129 @@ async function reportResult(ok, status) {
   return state;
 }
 
+// ── THE WEBSITE BRIDGE ────────────────────────────────────────────────────────────────────
+//
+// The Tenlane website cannot talk to an Amazon tab, and must not: it has no Amazon credentials
+// and must never have any. content/siteBridge.js (on the Tenlane origin) forwards here, and this
+// routes to content/patBridge.js in the Relay tab, which does the posting via patApi.js.
+//
+//     website page  ──postMessage──▶  siteBridge.js  ──sendMessage──▶  THIS
+//                                                                        │ tabs.sendMessage
+//                                                          patBridge.js ◀┘  (Relay tab)
+//                                                                        │
+//                                                        patApi.js submitOrder()
+//
+// ⚠ THIS NEVER CREATES A TAB. Not on status, not on submit, not "helpfully" in the background.
+// A post into an account the dispatcher cannot see is worse than an extra click — he would have
+// no way to know it happened, which account received it, or what it said. If no Relay tab is
+// open, that is an answer, not a problem to route around. DECISIONS.md D23.
+
+// The Relay hosts this extension is allowed on. Kept here rather than imported because the
+// service worker loads no shared module; it mirrors manifest.json's host_permissions.
+var RELAY_TAB_PATTERNS = [
+  'https://relay.amazon.ca/*', 'https://relay.amazon.co.jp/*', 'https://relay.amazon.co.uk/*',
+  'https://relay.amazon.com/*', 'https://relay.amazon.cz/*', 'https://relay.amazon.de/*',
+  'https://relay.amazon.es/*', 'https://relay.amazon.fr/*', 'https://relay.amazon.it/*',
+  'https://relay.amazon.in/*', 'https://relay.amazon.pl/*',
+];
+
+/** Ask one tab for its status. Resolves to null when nothing answers. */
+function askTab(tabId, message) {
+  return new Promise(function (resolve) {
+    try {
+      chrome.tabs.sendMessage(tabId, message, function (res) {
+        // A tab with no content script (wrong page, still loading) sets lastError. Reading it
+        // clears the warning and is how "no listener" is told apart from "answered no".
+        if (chrome.runtime.lastError) { resolve(null); return; }
+        resolve(res || null);
+      });
+    } catch (e) {
+      console.error('[background] askTab threw', e);
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * The first Relay tab that is an authenticated load board.
+ *
+ * ⚠ EVERY MATCHING TAB IS ASKED, not just the active one. The dispatcher is on the Tenlane site
+ * when he clicks Confirm, so the Relay tab is by definition in the background — checking only the
+ * focused tab would report "not signed in" every single time.
+ */
+async function findSignedInRelayTab() {
+  var tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: RELAY_TAB_PATTERNS });
+  } catch (e) {
+    console.error('[background] tabs.query failed', e);
+    return { tab: null, status: null, reason: 'query-failed' };
+  }
+  if (!tabs.length) return { tab: null, status: null, reason: 'no-relay-tab' };
+
+  var sawBoard = false;
+  for (var i = 0; i < tabs.length; i++) {
+    var st = await askTab(tabs[i].id, { type: 'RELAY_TAB_STATUS' });
+    if (!st) continue;
+    if (st.isLoadBoard) sawBoard = true;
+    if (st.signedIn) return { tab: tabs[i], status: st, reason: null };
+  }
+  // A Relay tab exists but none of them can post. Say WHICH, so the site's message is accurate.
+  return { tab: null, status: null, reason: sawBoard ? 'not-signed-in' : 'no-load-board' };
+}
+
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || !msg.type) return false;
+
+  if (msg.type === 'TENLANE_RELAY_STATUS') {
+    findSignedInRelayTab()
+      .then(function (found) {
+        sendResponse({
+          extensionPresent: true,
+          signedIn: !!found.tab,
+          accounts: (found.status && found.status.accounts) || [],
+          reason: found.reason,
+        });
+      })
+      .catch(function (e) {
+        console.error('[background] TENLANE_RELAY_STATUS failed', e);
+        sendResponse({ extensionPresent: true, signedIn: false, accounts: [], reason: 'error' });
+      });
+    return true; // async
+  }
+
+  if (msg.type === 'TENLANE_RELAY_SUBMIT') {
+    (async function () {
+      try {
+        var found = await findSignedInRelayTab();
+        if (!found.tab) {
+          // ⚠ REFUSE. Do not open a tab, do not queue the post for later.
+          console.log('[background] submit refused — no signed-in Relay tab', found.reason);
+          sendResponse({
+            ok: false, refused: true,
+            reason: found.reason === 'not-signed-in'
+              ? 'Your Amazon Relay tab is not signed in. Sign in, then try again.'
+              : 'No Amazon Relay load board tab is open. Open one, sign in, then try again.',
+          });
+          return;
+        }
+        var res = await askTab(found.tab.id, {
+          type: 'RELAY_TAB_SUBMIT',
+          payload: msg.payload, origin: msg.origin, dest: msg.dest,
+        });
+        if (!res) {
+          sendResponse({ ok: false, refused: true,
+            reason: 'The Amazon Relay tab stopped responding. Reload it and try again.' });
+          return;
+        }
+        sendResponse(res);
+      } catch (e) {
+        console.error('[background] TENLANE_RELAY_SUBMIT failed', e);
+        sendResponse({ ok: false, status: 0, body: String(e) });
+      }
+    }());
+    return true; // async
+  }
 
   if (msg.type === 'REQUEST_PERMIT') {
     // Default true (missing/undefined) so an older/mismatched content script that doesn't

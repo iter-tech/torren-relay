@@ -70,6 +70,7 @@
         "content/detailOpener.js",
         "content/patApi.js",
         "content/patModal.js",
+        "content/patBridge.js",
         "content/inlinePanel.js",
         "content/tabAlert.js",
         "content/sidebar.js",
@@ -99,6 +100,14 @@
       "js": ["content/networkObserver.js"],
       "world": "MAIN",
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "http://localhost:3000/*",
+        "http://127.0.0.1:3000/*"
+      ],
+      "js": ["content/siteBridge.js"],
+      "run_at": "document_idle"
     }
   ],
 

@@ -1,5 +1,79 @@
 # Changelog
 
+## 2026-09-18 — website bridge: the Tenlane site can create a truck post through this extension
+
+**Files:** `content/siteBridge.js` (new), `content/patBridge.js` (new), `background.js` (routing),
+`manifest.json` (two entries), `docs/TEST_CASES.md` (40 manual steps).
+
+⚠ **The manifest version was NOT bumped and no store package was built.**
+
+### What it does
+
+```
+Tenlane site ──postMessage──▶ siteBridge.js ──sendMessage──▶ background.js
+                                                                   │ tabs.sendMessage
+                                                     patBridge.js ◀─┘  (this Relay tab)
+                                                                   │
+                                                  patApi.js submitOrder()  ──▶ Amazon
+```
+
+- **`content/siteBridge.js`** — runs on the Tenlane origin only. Answers the site's ping with
+  whether a signed-in Relay tab exists, and forwards submits. Deliberately **dependency-free**:
+  none of the Relay content-script bundle is injected on that origin, so it uses `console`, not
+  `logger`.
+- **`content/patBridge.js`** — runs in the Relay tab. Validates, resolves the two cities via the
+  existing `resolvePATCity()`, and posts via the existing **`submitOrder()`**.
+- **`background.js`** — finds a Relay tab and routes. ⚠ **It never calls `chrome.tabs.create`.**
+
+🔑 **NO SECOND POSTING IMPLEMENTATION.** A duplicate would drift from the one `patModal.js` uses
+and the two would disagree about what a post is.
+
+### Why postMessage rather than externally_connectable
+
+`externally_connectable` would make the website hardcode this extension's id, which differs
+between an unpacked development load and a store build. The manifest's `matches` already pins
+where the content script runs — the same origin guarantee, with no id anywhere.
+
+⚠ Neither channel is more trusted: in both, the caller is page JavaScript.
+
+### The message from the page is untrusted
+
+`patBridgeValidate()` applies the same rules `patModal.js` enforces at its own submit — payout > 0,
+`maxMiles >= minMiles`, stop count >= 1, real ordered timestamps, known loading types, known driver
+types, a known equipment list, the two capture-backed trailer constants with both keys agreeing —
+**plus an allow-list of the 41 top-level keys `buildPatPayload()` produces.**
+
+🔑 The allow-list is not tidiness. Without it a page could add a field Amazon happens to honour;
+every value check would still pass and the post would carry something nobody reviewed.
+
+✅ 17/17 validator cases correct: the real website payload accepted, 16 hostile variants rejected.
+
+⚠ **Whatever the page puts in `originCityInfo`/`endLocationList` is DISCARDED, not merged.** The
+cities are re-resolved here, because a city object accepted from the page could post to a location
+the dispatcher never chose.
+
+### 🔴 UNPROVEN — read before trusting this
+
+**Chrome on the development machine is under an enterprise policy that blocks loading unpacked
+extensions** (`chrome://extensions` shows "Цим налаштуванням керує адміністратор", zero extensions,
+zero service workers), and there is no Amazon Relay session there.
+
+**So none of this was ever executed in a browser.** Not the manifest loading, not the injection,
+not the routing, not a post. What was proven offline: the validator (17/17, the real function), and
+that the manifest is structurally valid with all 41 referenced files present and no unrecognised
+key inside a `content_scripts` entry.
+
+⚠ The `"//"` documentation key was **removed** from the `content_scripts` entry for exactly this
+reason — Chrome is strict about unrecognised keys there, and an untestable risk in the file that
+decides whether the extension loads at all is not worth a comment.
+
+**See `docs/TEST_CASES.md` → "Website bridge" for 40 numbered manual steps.** Step 4 (loads without
+errors) and step 28 (a real post appears on Amazon) are the two that matter.
+
+⚠ **Only `http://localhost:3000` and `http://127.0.0.1:3000` are in `matches`.** When the site is
+deployed, its origin must be added there or the bridge silently does nothing. No production domain
+was invented.
+
 ## [Unreleased]
 
 ### 2026-09-13 — Load Type is derived from TWO stops, not one
