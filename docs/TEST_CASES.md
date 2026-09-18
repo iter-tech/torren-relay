@@ -2767,3 +2767,105 @@ filter on `[EXT]`.
    not match (`matched: false`) — enough to debug the failure without the value.
 10. **Restore before shipping.** Confirm `utils/constants.js` is back to `DEBUG_LEVEL = 1`
     before any build is packaged.
+
+---
+
+## Website bridge — Post a Truck from the Tenlane site (2026-09-18)
+
+🔴 **NONE OF THE STEPS BELOW WERE RUN BY THE AUTHOR.** Chrome on the development machine is under
+an enterprise policy that blocks loading an unpacked extension ("Цим налаштуванням керує
+адміністратор" on `chrome://extensions`, zero extensions listed, zero service workers), and there
+is no Amazon Relay session on it. **The post path is UNPROVEN until someone runs this list on a
+real board.**
+
+What *was* proven offline: the validator rejects 16 hostile payloads and accepts the real one; the
+manifest is structurally valid and every referenced file exists; the site correctly refuses and
+disables Confirm when nothing answers the ping. See DECISIONS.md D24.
+
+### Setup
+
+1. Open `chrome://extensions`.
+2. Turn on **Developer mode** (top right).
+3. Click **Load unpacked** and select the extension folder.
+4. **Expected:** the extension appears with **no red "Errors" button**. If there is one, open it
+   and stop — the manifest was never load-tested (see above) and that error is the first thing to
+   read.
+5. Confirm the extension is enabled.
+
+### A. The site sees the extension
+
+6. Start the website (`npm --prefix web run dev`) and open `http://localhost:3000`.
+7. Sign in to the website.
+8. Open the browser console on that tab.
+9. **Expected:** a line `[Tenlane siteBridge] ready on http://localhost:3000`.
+10. If that line is absent the content script did not inject. Check the site's origin is in
+    `manifest.json` → `content_scripts` → the third entry's `matches`. **Only
+    `http://localhost:3000` and `http://127.0.0.1:3000` are listed** — a deployed site needs its
+    own origin added there or nothing works.
+
+### B. No Relay tab → refuse, and never post
+
+11. Close every Amazon Relay tab.
+12. On the website, click **Post Truck** on any load row.
+13. **Expected:** top right of the dialog reads **"Amazon account: not connected / no Relay tab
+    open"**.
+14. **Expected:** an amber box reads **"No Amazon Relay load board tab is open."**
+15. **Expected:** the **Confirm** button is **disabled**.
+16. In the console run:
+
+    ```js
+    window.postMessage({__tenlaneBridge:'submit', v:1, requestId:'t1',
+      payload:{runType:'ONE_WAY'}, origin:{city:'HEBRON',state:'KY'},
+      dest:{city:'AKRON',state:'OH'}}, location.origin);
+    ```
+
+17. **Expected:** a `submitResult` message comes back with `refused: true` and a reason naming the
+    missing tab. **Expected: no network request to Amazon at all.**
+
+### C. Relay tab open but signed out
+
+18. Open `https://relay.amazon.com/loadboard/search` and **sign out**.
+19. Reload the website tab, open **Post Truck** again.
+20. **Expected:** the message now reads **"Your Amazon Relay tab is not signed in."** — different
+    wording from step 14. If both states show the same sentence, the reason mapping is broken.
+21. **Expected:** Confirm is still disabled.
+
+### D. Signed in → the real post ⚠ THIS CREATES A REAL POST ON A LIVE MARKETPLACE
+
+22. Sign in to Amazon Relay and open the load board.
+23. Reload the website tab.
+24. Open **Post Truck** on a load.
+25. **Expected:** the amber "no Relay tab" box is **gone** and **Confirm is enabled**.
+26. Check every prefilled field against the load. **Expected:** payout equals the load's **actual**
+    payout, with no 10% markup — that is the website's deliberate divergence, DECISIONS.md D21.
+27. Click **Confirm**.
+28. **Expected:** the button reads **"Posting…"**, then a green box: **"Post created. Amazon
+    returned HTTP 200."**
+29. Switch to the Amazon Relay tab and open your posted trucks.
+30. **Expected:** the new post is there, with the origin, destination, radii, times, miles, payout
+    and equipment shown on the website form.
+31. ⚠ **Delete the test post** on Amazon unless you meant to keep it.
+
+### E. The refusals actually refuse
+
+32. With everything signed in, open the console on the website tab and run:
+
+    ```js
+    window.postMessage({__tenlaneBridge:'submit', v:1, requestId:'t2',
+      payload:{runType:'ONE_WAY', autoBook:true}, origin:{city:'HEBRON',state:'KY'},
+      dest:{city:'AKRON',state:'OH'}}, location.origin);
+    ```
+
+33. **Expected:** `refused: true`, reason containing **`Unexpected field in payload: «autoBook»`**.
+34. **Expected: no request to `/api/loadboard/orders/upsert`** in the Relay tab's Network panel.
+35. Repeat with a valid payload but `totalCost: {value: 0, unit: 'USD'}`.
+36. **Expected:** `refused: true`, reason **"Payout must be a positive number."**
+
+### F. Amazon's own error is shown, not a paraphrase
+
+37. Sign in, then in the Relay tab's DevTools → Network, right-click
+    `/api/loadboard/orders/upsert` → **Block request URL**.
+38. On the website, click **Confirm**.
+39. **Expected:** a red box showing a real HTTP status and Amazon's own response text, not a
+    generic "something went wrong".
+40. Unblock the URL afterwards.
