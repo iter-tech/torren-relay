@@ -39,6 +39,51 @@ var PAT_BRIDGE_ALLOWED_KEYS = [
   'repostingDetails',
 ];
 
+/**
+ * The carrier name Amazon renders in its own sidebar.
+ *
+ *   <span id="company-name" class="global-sidebar__company-name"
+ *         title="VIKANN EXPRESS INC">VIKANN EXPRESS INC</span>
+ *
+ * 🔑 THIS IS A DOM READ, AND IT DOES NOT BREAK CLAUDE.md's CLOSED RULE. That rule — "no city,
+ * address, ZIP or warehouse code from the CARD DOM", written after task 7d shipped a DOM origin
+ * reader and left every card unassigned — is about LOAD DATA read off a card. Every one of those
+ * values already exists in the API record, so reading it from markup instead was pure coupling
+ * with a wrong answer waiting behind Amazon's next class rename.
+ *
+ * ⚠ THE COMPANY NAME IS THE OPPOSITE CASE ON ALL THREE COUNTS. It is not load data; it is not on
+ * a card, it is app chrome; and it exists in NO API response this extension can see — all 18
+ * captures were enumerated and none carries a carrier name or id (D22). There is no better source
+ * to prefer, so this is not a fallback for something cleaner — it is the only source there is.
+ *
+ * ⚠ AND IT FAILS TO "cannot be determined", NEVER TO A GUESS. A missing element returns null and
+ * the website says the account is unknown, which is exactly what it said before this existed.
+ * The failure mode of the card-DOM readers was a WRONG value; this one's is an ABSENT value.
+ *
+ * Do not delete this thinking it violates the closed rule. Record: DECISIONS.md D22-RESOLVED.
+ */
+function patBridgeCompanyName() {
+  logger.log('patBridge', 'patBridgeCompanyName called');
+  try {
+    var el = document.getElementById('company-name');
+    if (!el) {
+      logger.log('patBridge', 'patBridgeCompanyName: #company-name not present on this page');
+      return null;
+    }
+    // textContent is what Amazon actually rendered; the title attribute is its own copy of the
+    // same string, kept as the fallback in case the text node is ever split or emptied by a
+    // truncation widget. Neither is invented, and if both are blank the answer is null.
+    var text = (el.textContent || '').trim();
+    var title = (el.getAttribute('title') || '').trim();
+    var name = text || title;
+    return name || null;
+  } catch (e) {
+    logger.error('patBridge', 'patBridgeCompanyName failed — reporting no account rather than a guess',
+      { error: e });
+    return null;
+  }
+}
+
 /** Is this tab an authenticated load board? Both halves matter and neither is assumed. */
 function patBridgeTabStatus() {
   logger.log('patBridge', 'patBridgeTabStatus called');
@@ -46,13 +91,15 @@ function patBridgeTabStatus() {
   // 🔑 THE CSRF META IS THE SIGNED-IN TEST. It is what patApi.js already requires to post, so
   // "signed in" here means exactly "a post could succeed", not a guess from the URL.
   var csrf = (typeof getCsrfToken === 'function') ? getCsrfToken() : null;
+  // ⚠ STILL NOTHING IN ANY API RESPONSE. The name comes from Amazon's own sidebar, which is the
+  // only place it exists — see patBridgeCompanyName above. An empty list stays the honest answer
+  // when the element is absent, and the site renders "cannot be determined" for it.
+  // ⚠ Do not fill this with a domicile code or existingSubCarrierName; neither names the viewer.
+  var company = patBridgeCompanyName();
   return {
     isLoadBoard: onBoard,
     signedIn: onBoard && !!csrf,
-    // ⚠ NO ACCOUNT NAME. Nothing Amazon returns to this extension names the logged-in carrier —
-    // measured across all 18 captures, DECISIONS.md D22. An empty list is the honest answer and
-    // the site renders "cannot be determined" for it. Do not fill this with a domicile code.
-    accounts: [],
+    accounts: company ? [{ name: company, id: null }] : [],
   };
 }
 
