@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-09-18 (2) — the carrier name, read from Amazon's own sidebar
+
+**File:** `content/patBridge.js` → `patBridgeCompanyName()`. Recorded in `docs/AMAZON_SELECTORS.md`.
+
+D22 measured that **no** API response this extension sees names the logged-in carrier — all 18
+captures enumerated, nothing but scores, payment flags and other carriers’ codes. The name is in
+Relay’s own sidebar:
+
+```html
+<span id="company-name" class="global-sidebar__company-name"
+      title="VIKANN EXPRESS INC">VIKANN EXPRESS INC</span>
+```
+
+The bridge now reports it, so the website’s Post a Truck form shows the real company name instead
+of “cannot be determined”.
+
+### ⚠ THIS DOES NOT BREAK CLAUDE.md’s CLOSED DOM RULE — read before deleting it
+
+The rule is *“no city, address, ZIP or warehouse code from the **card** DOM”*, written after task
+7d shipped a DOM origin reader and left every card unassigned. **It is about LOAD DATA read off a
+CARD**, and it exists because every value it names already sits in the API record — so reading
+markup instead was pure coupling, with a wrong answer waiting behind Amazon’s next class rename.
+
+`#company-name` is the opposite case on all three counts: it is **not load data** (it identifies
+the viewer), it is **not on a card** (it is app chrome), and it has **no API source at all**, so it
+is not a fallback preferred over something cleaner — it is the only source there is.
+
+⚠ **Its failure mode is an ABSENT value, not a wrong one.** A missing element returns `null` and
+the site says the account cannot be determined — exactly what it said before this existed.
+
+⚠ **Display only. The name is never sent in the payload.** The account is decided by the Relay
+tab’s session, so a renamed element can only stop labelling a post, never misdirect one.
+
+⚠ **Not verified in a browser.** Chrome here is under an enterprise policy that blocks unpacked
+extensions (see the previous entry), so this read has never been executed against a live Relay
+page. The selector comes from markup the dispatcher supplied. Step 25 of the Website-bridge list
+in `docs/TEST_CASES.md` is where it gets proven.
 ## 2026-09-18 — website bridge: the Tenlane site can create a truck post through this extension
 
 **Files:** `content/siteBridge.js` (new), `content/patBridge.js` (new), `background.js` (routing),

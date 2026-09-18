@@ -535,3 +535,48 @@ how the radius-unit caveat ended up invisible in a shipped build.
 **What closes this:** open the load board on ONE non-`.com` domain and read the address bar. If
 the first path segment is `loadboard`, the table above becomes measured for that domain. If it is
 not, the warning will already be in the console naming the real path.
+
+---
+
+## 🔑 The CARRIER NAME — Amazon's own sidebar ✅ (2026-09-18)
+
+The only place the logged-in carrier is named anywhere this extension can see.
+
+```html
+<span id="company-name" class="global-sidebar__company-name"
+      title="VIKANN EXPRESS INC">VIKANN EXPRESS INC</span>
+```
+
+| what | value |
+|---|---|
+| selector | `#company-name` — an **id**, not a generated class |
+| read by | `content/patBridge.js` → `patBridgeCompanyName()` |
+| used for | the Amazon-account label in the website's Post a Truck form |
+| value read | `textContent`, falling back to the `title` attribute |
+| if absent | returns `null`; the website shows **"cannot be determined"** |
+
+### ⚠ THIS DOES NOT BREAK THE CLOSED DOM RULE — read this before deleting it
+
+CLAUDE.md's closed rule is *"no city, address, ZIP or warehouse code from the **card** DOM"*,
+written after task 7d shipped a DOM origin reader and left every card unassigned.
+
+**That rule is about LOAD DATA read off a CARD.** Every value it names already exists in the API
+record, so taking it from markup instead was pure coupling — with a wrong answer waiting behind
+Amazon's next class rename.
+
+The company name is the opposite case on all three counts:
+
+| | the card-DOM readers 7d banned | `#company-name` |
+|---|---|---|
+| is it load data? | yes | **no — it identifies the viewer** |
+| is there an API source? | yes, the record already had it | **no — all 18 captures carry no carrier name or id (D22)** |
+| failure mode | a **wrong** value silently | an **absent** value, shown as "cannot be determined" |
+
+It is app chrome, not a load card, and it is the **only** source there is — so this is not a
+fallback preferred over something cleaner. See DECISIONS.md D22-RESOLVED.
+
+### 🔴 If this id changes
+
+The label reverts to "cannot be determined" and nothing else breaks — no post is affected, because
+the account is decided by the Relay tab's session, never by this string. The name is displayed so
+the dispatcher knows *where the post is going*; it is not sent in the payload.
