@@ -49,7 +49,8 @@
 
       var d = event.data;
       if (!d || typeof d !== 'object') return;
-      if (d.__tenlaneBridge !== 'ping' && d.__tenlaneBridge !== 'submit') return;
+      if (d.__tenlaneBridge !== 'ping' && d.__tenlaneBridge !== 'submit' &&
+          d.__tenlaneBridge !== 'resolveCity') return;
 
       if (d.__tenlaneBridge === 'ping') {
         chrome.runtime.sendMessage({ type: 'TENLANE_RELAY_STATUS' }, function (res) {
@@ -70,6 +71,41 @@
             relaySignedIn: res.signedIn === true,
             accounts: Array.isArray(res.accounts) ? res.accounts : [],
             reason: res.reason || null,
+          });
+        });
+        return;
+      }
+
+      // ── resolveCity ──
+      // 🔑 THE SITE ASKS US BECAUSE ONLY WE CAN ASK AMAZON. resolvePATCity() is a same-origin
+      // fetch from the Relay tab; the website has no such session. Answering here is what makes
+      // the site's city coordinates identical to the extension's own (DECISIONS.md D27 option A).
+      //
+      // ⚠ READ-ONLY AND HARMLESS. It resolves a city name to a point. It posts nothing, changes
+      // nothing, and is deliberately NOT gated the way submit is: the worst a hostile page can do
+      // with it is learn the coordinates of a city it already named.
+      if (d.__tenlaneBridge === 'resolveCity') {
+        var cityReqId = (typeof d.requestId === 'string') ? d.requestId : null;
+        log('city resolve requested', { requestId: cityReqId });
+        chrome.runtime.sendMessage({
+          type: 'TENLANE_RELAY_RESOLVE_CITY',
+          city: (typeof d.city === 'string') ? d.city : '',
+          state: (typeof d.state === 'string') ? d.state : '',
+        }, function (res) {
+          // ⚠ A failure answers with nulls rather than staying silent: the page waits on a
+          // timeout otherwise, and its fallback is instant and already correct.
+          if (chrome.runtime.lastError || !res || !res.ok) {
+            log('city resolve unavailable', chrome.runtime.lastError);
+            reply({
+              __tenlaneBridge: 'cityResult', v: SITE_BRIDGE_VERSION, requestId: cityReqId,
+              lat: null, lng: null,
+            });
+            return;
+          }
+          reply({
+            __tenlaneBridge: 'cityResult', v: SITE_BRIDGE_VERSION, requestId: cityReqId,
+            lat: (typeof res.lat === 'number') ? res.lat : null,
+            lng: (typeof res.lng === 'number') ? res.lng : null,
           });
         });
         return;
