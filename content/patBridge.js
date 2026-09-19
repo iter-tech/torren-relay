@@ -309,6 +309,47 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return false;
   }
 
+  /*
+   * ── RESOLVE ONE CITY FOR THE WEBSITE ──────────────────────────────────────────────────
+   *
+   * 🔑 THE WHOLE POINT IS THAT resolvePATCity() LIVES HERE. It is a same-origin fetch against
+   * Amazon's own cities endpoint, using this tab's session — the website has no such access and
+   * must never have one. Answering from here is what makes the board's city coordinates
+   * IDENTICAL to the extension's, rather than merely similar (DECISIONS.md D27, option A).
+   *
+   * ⚠ READ-ONLY. It turns a name into a point. Nothing is posted, nothing is changed, and no
+   * load is touched — so unlike RELAY_TAB_SUBMIT it needs no payload validation. The worst a
+   * hostile page could learn is the coordinates of a city it already knew the name of.
+   *
+   * ⚠ A FAILURE ANSWERS { ok: false } rather than throwing. The site falls back to its bundled
+   * gazetteer, which is a normal outcome, not an error.
+   */
+  if (msg.type === 'RELAY_TAB_RESOLVE_CITY') {
+    (async function () {
+      try {
+        if (typeof resolvePATCity !== 'function') {
+          sendResponse({ ok: false, reason: 'resolver-unavailable' });
+          return;
+        }
+        var res = await resolvePATCity({
+          city: String(msg.city || ''),
+          state: String(msg.state || ''),
+        });
+        if (!res || typeof res.latitude !== 'number' || typeof res.longitude !== 'number') {
+          logger.log('patBridge', 'RELAY_TAB_RESOLVE_CITY: no match');
+          sendResponse({ ok: false, reason: 'no-match' });
+          return;
+        }
+        logger.log('patBridge', 'RELAY_TAB_RESOLVE_CITY: resolved');
+        sendResponse({ ok: true, lat: res.latitude, lng: res.longitude });
+      } catch (e) {
+        logger.error('patBridge', 'RELAY_TAB_RESOLVE_CITY failed', { error: e });
+        sendResponse({ ok: false, reason: 'error' });
+      }
+    }());
+    return true; // async
+  }
+
   if (msg.type === 'RELAY_TAB_SUBMIT') {
     patBridgeSubmit(msg)
       .then(sendResponse)

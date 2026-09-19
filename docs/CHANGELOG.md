@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-20 — the bridge resolves a typed city for the website
+
+**Files:** `content/siteBridge.js`, `background.js`, `content/patBridge.js`.
+
+The website lets the dispatcher TYPE an origin city, and needs its coordinates. `resolvePATCity()`
+is a same-origin fetch against Amazon’s own cities endpoint using the Relay tab’s session — the
+site has no such access and must never have one. So it asks us.
+
+New message chain: `resolveCity` from the page → `TENLANE_RELAY_RESOLVE_CITY` →
+`RELAY_TAB_RESOLVE_CITY` → `resolvePATCity()`, answered as `cityResult`.
+
+⚠ **READ-ONLY, AND DELIBERATELY NOT GATED LIKE `submit`.** It turns a name into a point: nothing
+is posted, nothing changes, no load is touched. The worst a hostile page can learn from it is the
+coordinates of a city it already named. That is why it carries no payload validation, while
+`RELAY_TAB_SUBMIT` carries a 41-key allow-list.
+
+⚠ **A FAILURE ANSWERS `{ ok: false }` RATHER THAN STAYING SILENT.** No Relay tab is the ORDINARY
+state for the website — it is usually open in a tab of its own — and the site falls back to a
+bundled US Census gazetteer. Leaving it on a timeout would make the normal case slow; an exception
+would make it an error. DECISIONS.md D27 (tenlane-network).
+
+⚠ **Not verified in a browser.** Chrome here is under an enterprise policy that blocks unpacked
+extensions, so this path has never run against a live Relay page. The website half is verified and
+falls back correctly when nothing answers, which is what this environment can prove.
 ## 2026-09-18 (2) — the carrier name, read from Amazon's own sidebar
 
 **File:** `content/patBridge.js` → `patBridgeCompanyName()`. Recorded in `docs/AMAZON_SELECTORS.md`.

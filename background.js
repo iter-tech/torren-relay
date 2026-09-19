@@ -403,6 +403,29 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return true; // async
   }
 
+  if (msg.type === 'TENLANE_RELAY_RESOLVE_CITY') {
+    (async function () {
+      try {
+        var found = await findSignedInRelayTab();
+        if (!found.tab) {
+          // ⚠ NOT AN ERROR. No Relay tab is the ordinary state for the website, and the site has
+          // a bundled gazetteer to fall back to (DECISIONS.md D27 option G). Answering "not ok"
+          // immediately is better than leaving it on a timeout.
+          sendResponse({ ok: false, reason: found.reason });
+          return;
+        }
+        var res = await askTab(found.tab.id, {
+          type: 'RELAY_TAB_RESOLVE_CITY', city: msg.city, state: msg.state,
+        });
+        sendResponse(res || { ok: false, reason: 'no-answer' });
+      } catch (e) {
+        console.error('[background] TENLANE_RELAY_RESOLVE_CITY failed', e);
+        sendResponse({ ok: false, reason: 'error' });
+      }
+    }());
+    return true; // async
+  }
+
   if (msg.type === 'TENLANE_RELAY_SUBMIT') {
     (async function () {
       try {
