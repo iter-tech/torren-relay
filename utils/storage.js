@@ -45,6 +45,14 @@ const STORAGE_KEYS = {
 // Supabase session — intentionally NOT in STORAGE_KEYS. "Reset to Defaults" clears
 // Object.values(STORAGE_KEYS) and must not log the dispatcher out as a side effect
 // of resetting extension preferences.
+// Cumulative sender counters — what the sender saw, sent, and dropped, and why.
+//
+// ⚠ DELIBERATELY NOT IN STORAGE_KEYS, for the same reason the session below is not:
+// "Reset to Defaults" clears Object.values(STORAGE_KEYS), and wiping a loss measurement as a
+// side effect of resetting display preferences would destroy the only record of what the
+// sender dropped. The Load Network block has its own Reset. See docs/DECISIONS.md EXT-D2.
+const LOAD_SENDER_STATS_KEY = 'loadSenderStats';
+
 const SUPABASE_SESSION_KEY = 'supabaseSession';
 
 // Pending OTP email — set when "Send code" succeeds, so the code-entry step survives

@@ -11,7 +11,9 @@
 
     <div class="popup-header">
       <span class="popup-title">Tenlane Relay</span>
-      <span class="popup-version" data-testid="popup-version">v0.1.0</span>
+      <!-- Filled by popup.js from chrome.runtime.getManifest(). Empty here ON PURPOSE:
+           a literal in this file is a second version number that drifts. See EXT-D1. -->
+      <span class="popup-version" id="popup-version" data-testid="popup-version"></span>
     </div>
 
     <div class="popup-section-title">Account</div>
@@ -230,6 +232,25 @@
         <input type="checkbox" id="popup-load-sender" data-testid="popup-load-sender">
         <span class="toggle-track"></span>
       </label>
+    </div>
+
+    <!-- 🔑 WHAT THE SENDER SAW, SENT AND DROPPED. Plain text on purpose: this exists to make
+         loss measurable, not to look like a dashboard. Every drop reason is listed even when
+         it is zero — a reason that only appears when it fires is a reason nobody remembers to
+         look for. Filled by popup.js from chrome.storage.local. See docs/DECISIONS.md EXT-D2. -->
+    <div class="popup-sender-stats" id="popup-sender-stats" data-testid="popup-sender-stats">
+      <div class="popup-stat-line">seen <span id="popup-stat-seen" data-testid="popup-stat-seen">—</span></div>
+      <div class="popup-stat-line">sent <span id="popup-stat-sent" data-testid="popup-stat-sent">—</span></div>
+      <div class="popup-stat-line">buffered <span id="popup-stat-buffered" data-testid="popup-stat-buffered">—</span></div>
+      <div class="popup-stat-line">dropped, no id <span id="popup-stat-noid" data-testid="popup-stat-noid">—</span></div>
+      <div class="popup-stat-line">dropped, error <span id="popup-stat-threw" data-testid="popup-stat-threw">—</span></div>
+      <div class="popup-stat-line">dropped, buffer full <span id="popup-stat-evicted" data-testid="popup-stat-evicted">—</span></div>
+      <div class="popup-stat-line">dropped, switched off <span id="popup-stat-disabled" data-testid="popup-stat-disabled">—</span></div>
+      <div class="popup-stat-line">bad responses <span id="popup-stat-notarray" data-testid="popup-stat-notarray">—</span></div>
+      <div class="popup-stat-line">dropped, teardown <span id="popup-stat-teardown" data-testid="popup-stat-teardown">—</span></div>
+      <div class="popup-stat-line">dropped, accept error <span id="popup-stat-acceptthrew" data-testid="popup-stat-acceptthrew">—</span></div>
+      <div class="popup-stat-line">send failures <span id="popup-stat-failures" data-testid="popup-stat-failures">—</span></div>
+      <button type="button" id="popup-stats-reset" data-testid="popup-stats-reset" class="popup-stats-reset">Reset counters</button>
     </div>
 
     <div class="popup-divider"></div>
