@@ -100,6 +100,76 @@ async function previewSound(soundId, volume) {
 document.addEventListener('DOMContentLoaded', function () {
   logger.log('popup', 'DOMContentLoaded');
 
+  // 🔑 THE VERSION IS READ FROM THE MANIFEST, NEVER DECLARED TWICE.
+  //
+  // popup.html used to carry the literal "v0.1.0" while manifest.json said "1.0.0" — two
+  // hardcoded numbers, and the popup showed the wrong one from the day the other changed.
+  // chrome.runtime.getManifest() is available on every extension page, so there is nothing
+  // left to keep in sync.
+  //
+  // ⚠ NO FALLBACK STRING. If the call is unavailable the element stays empty rather than
+  // printing a guessed number — an empty slot is visibly missing, a stale number is not.
+  /*
+   * 🔑 THE SENDER COUNTERS. Read straight from chrome.storage.local — the content script owns
+   * them and the popup only displays them, so there is no message channel to keep alive and
+   * nothing breaks when no board tab is open.
+   *
+   * ⚠ EVERY DROP REASON IS RENDERED EVEN AT ZERO. A row that appears only once it fires is a
+   * row nobody thinks to look for, which is how the losses went unnoticed in the first place.
+   */
+  var STAT_FIELDS = [
+    ['popup-stat-seen',      function (s) { return s.seen; }],
+    ['popup-stat-sent',      function (s) { return s.sent; }],
+    ['popup-stat-buffered',  function (s) { return s.buffered; }],
+    ['popup-stat-noid',      function (s) { return (s.dropped || {}).noId; }],
+    ['popup-stat-threw',     function (s) { return (s.dropped || {}).threw; }],
+    ['popup-stat-evicted',   function (s) { return (s.dropped || {}).evicted; }],
+    ['popup-stat-disabled',  function (s) { return (s.dropped || {}).discardedDisabled; }],
+    ['popup-stat-notarray',  function (s) { return (s.dropped || {}).notArrayEvents; }],
+    ['popup-stat-teardown',   function (s) { return (s.dropped || {}).discardedTeardown; }],
+    ['popup-stat-acceptthrew',function (s) { return (s.dropped || {}).acceptThrew; }],
+    ['popup-stat-failures',  function (s) { return s.failures; }]
+  ];
+
+  function renderSenderStats(s) {
+    var stats = s || {};
+    for (var i = 0; i < STAT_FIELDS.length; i++) {
+      var el = document.getElementById(STAT_FIELDS[i][0]);
+      if (!el) continue;
+      var v = STAT_FIELDS[i][1](stats);
+      // ⚠ An em dash for "never recorded", 0 for "recorded as zero". They are different facts.
+      el.textContent = (typeof v === 'number') ? String(v) : '—';
+    }
+  }
+
+  chrome.storage.local.get(LOAD_SENDER_STATS_KEY, function (data) {
+    renderSenderStats(data && data[LOAD_SENDER_STATS_KEY]);
+  });
+
+  var statsResetBtn = document.getElementById('popup-stats-reset');
+  if (statsResetBtn) {
+    statsResetBtn.addEventListener('click', function () {
+      // ⚠ CLEARS THE COUNTERS ONLY. It does not touch the toggle, the session or any
+      // preference — "Reset to defaults" in the footer is a different control with a different
+      // blast radius, and the stats key is deliberately outside STORAGE_KEYS so that one
+      // cannot wipe this measurement as a side effect.
+      var zero = {
+        seen: 0, accepted: 0, buffered: 0, sent: 0, inserted: 0, updated: 0,
+        failures: 0, lastError: null,
+        dropped: { noId: 0, threw: 0, evicted: 0, discardedDisabled: 0,
+                   notArrayEvents: 0, discardedTeardown: 0, acceptThrew: 0 }
+      };
+      var o = {};
+      o[LOAD_SENDER_STATS_KEY] = zero;
+      chrome.storage.local.set(o, function () { renderSenderStats(zero); });
+    });
+  }
+
+  var versionEl = document.getElementById('popup-version');
+  if (versionEl && chrome.runtime && chrome.runtime.getManifest) {
+    versionEl.textContent = 'v' + chrome.runtime.getManifest().version;
+  }
+
   var nightToggle        = document.getElementById('popup-night-mode');
   var tabToggle          = document.getElementById('popup-tab-alert');
   var autoOpenToggle     = document.getElementById('popup-auto-open');
@@ -667,6 +737,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // ── Live sync: storage → UI (handles changes from other extension pages) ──
   chrome.storage.onChanged.addListener(function (changes, area) {
+  // The sender writes its counters while the popup is open; follow them rather than showing a
+  // snapshot that is already stale by the time anyone reads it.
+  if (area === 'local' && changes[LOAD_SENDER_STATS_KEY]) {
+    renderSenderStats(changes[LOAD_SENDER_STATS_KEY].newValue);
+  }
     if (area !== 'local') return;
     if (changes[KEY_NIGHT_MODE] !== undefined) {
       var nightOn = changes[KEY_NIGHT_MODE].newValue === true;

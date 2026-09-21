@@ -1,5 +1,126 @@
 # Changelog
 
+## 2026-09-20 — the sender loses nothing: measured on a live board (EXT-D3)
+
+**Documentation only. No code changed.** EXT-D2's counters were run on a real Amazon board.
+
+```
+seen 3047 · sent 953 · failures 0
+dropped: noId 0 · evicted 0 · discardedTeardown 0 · acceptThrew 0
+         discardedDisabled 0 · notArrayEvents 0
+```
+
+🔑 **EVERY DROP COUNTER IS ZERO.** Every mechanism `tenlane-network/docs/LOSS_ANALYSIS.md`
+identified as able to drop a load silently — the 500-entry buffer eviction above all — fired zero
+times. **No load is being lost by the sender**, and the buffer limit does not need changing.
+
+⚠ **THE GAP BETWEEN 3047 AND 953 IS DEDUPLICATION, NOT LOSS.** `seen` counts every record the
+sender is handed, and the board re-sends the same loads on every tick; the buffer is keyed by
+`amazon_wo_id`, so a load seen twenty times is twenty `seen` and one row. The database agrees:
+1006 distinct ids, 4496 sightings, 0 duplicates.
+
+⚠ **IHOR'S DECISION: pages 2+ of Amazon's results are NOT a target.** The product is for finding
+good loads, and those are on the first page. Not fetching deeper pages is acceptable **by decision,
+not by oversight** — "the site does not have every load on Amazon" must not be filed as a defect.
+
+The counters stay, as regression detection rather than diagnosis. See EXT-D3.
+
+## 2026-09-20 — load loss is now countable (EXT-D2)
+
+**Files:** `content/loadSender.js`, `utils/storage.js`, `popup/popup.html`, `popup/popup.js`,
+`popup/popup.css`, `docs/DECISIONS.md`.
+
+`tenlane-network/docs/LOSS_ANALYSIS.md` concluded load loss **could not be measured**. This makes
+it measurable. ⚠ **NO BEHAVIOUR CHANGED — nothing is fixed.**
+
+### 🔑 `seen` moved to the front
+
+It was incremented **after** `toRow()` returned a row, so a record dropped for a missing `id` was
+counted nowhere at all. It is now the first thing that happens to every record, and a new
+`accepted` counter holds what `seen` used to mean.
+
+⚠ **THIS CHANGES WHAT `seen` MEANS** — `loadSenderReport().stats.seen` is no longer comparable with
+numbers recorded before today.
+
+### Seven drop reasons — five asked for, two found while instrumenting
+
+| counter | where |
+|---|---|
+| `noId` | `toRow()` — record has no `id` |
+| `threw` | `toRow()` catch |
+| `evicted` | `accept()` — buffer over `LOAD_SENDER_MAX_BUFFER` |
+| `discardedDisabled` | `flush()` — toggle went off, buffer cleared |
+| `notArrayEvents` | `accept()` handed a non-array |
+| **`discardedTeardown`** | `stop()` — deactivation clears the buffer ⚠ **found while instrumenting** |
+| **`acceptThrew`** | `accept()` catch — the rest of the batch never ran ⚠ **found while instrumenting** |
+
+⚠ **`notArrayEvents` COUNTS EVENTS, NOT LOADS.** There is no array to measure, so a record count
+there would be invented; the name says which it is.
+
+The arithmetic that must balance on a live board, and is the test for a path still uncounted:
+
+```
+seen     === accepted + dropped.noId + dropped.threw + dropped.acceptThrew
+accepted === sent + buffered + dropped.evicted + dropped.discardedDisabled
+                             + dropped.discardedTeardown
+```
+
+### Persisted, and shown in the popup
+
+`chrome.storage.local` — the mechanism the toggle and the session already use, **no new storage
+layer**, debounced 2 s. ⚠ **The key sits OUTSIDE `STORAGE_KEYS` on purpose**, like
+`SUPABASE_SESSION_KEY`: "Reset to Defaults" clears `Object.values(STORAGE_KEYS)`, and wiping a loss
+measurement as a side effect of resetting display preferences would be the same class of mistake.
+The Load Network block carries its own **Reset counters**.
+
+Plain-text rows under Load Network. ⚠ **Every drop reason renders even at zero** — a row that
+appears only when it fires is a row nobody thinks to look for. An em dash means "never recorded",
+`0` means "recorded as zero".
+
+### 🔴 Unchanged, deliberately
+
+The 500-entry limit, the `no id` skip, the discard-on-disable and the discard-on-teardown all
+behave exactly as before. ⚠ **Not verified on a live board** — enterprise policy blocks unpacked
+extensions here; Ihor checks it himself.
+
+## 2026-09-20 — the popup showed v0.1.0 while the extension shipped 1.0.0
+
+**Files:** `popup/popup.html`, `popup/popup.js`, `utils/constants.js`, `docs/DECISIONS.md` (new).
+
+🐛 **THE VERSION WAS DECLARED IN THREE PLACES AND TWO OF THEM WERE STALE.**
+
+| file:line | literal | |
+|---|---|---|
+| `manifest.json:4` | `"version": "1.0.0"` | ✅ the source of truth |
+| `popup/popup.html:14` | `v0.1.0` | 🔴 hardcoded — **this is what the popup rendered** |
+| `utils/constants.js:26` | `const EXT_VERSION = '0.1.0';` | 🔴 a second hardcoded copy |
+
+🔑 **ESTABLISHED BY TRACING, NOT ASSUMED.** `popup/popup.js` has no reference to `popup-version`
+and none to the version at all — its only matches for the word are prose in comments at lines 266
+and 298. Nothing overwrote the span, so the literal in the HTML is what reached the screen.
+`utils/constants.js` IS loaded by the popup (`popup.html:244`) but nothing there reads it; its sole
+reader is `content/content.js:1`, a log line.
+
+### Both now read the manifest at runtime
+
+`chrome.runtime.getManifest().version` — available on every extension page and in content scripts,
+and `utils/constants.js` loads in no other kind of context. **No file but `manifest.json` declares
+a version any more, so the two cannot drift again.**
+
+⚠ **NO FALLBACK STRING.** If the call is unavailable the popup's span stays empty and `EXT_VERSION`
+is `null`. An empty slot is visibly missing; a stale number looks right and is not — and a fallback
+literal would be the very second copy this change removes.
+
+⚠ **THE VERSION NUMBER ITSELF IS UNCHANGED.** `manifest.json` said `1.0.0` before and says `1.0.0`
+after. This is about where the number is read from, not what it is.
+
+⚠ `popup.html:14` now carries no text and gained `id="popup-version"`. A test asserting on
+`[data-testid="popup-version"]` must wait for `DOMContentLoaded` rather than read the static HTML.
+`EXT_VERSION` is now `string | null`.
+
+Decision recorded as **EXT-D1** in the new `docs/DECISIONS.md` — this repo had no decisions file;
+records here are numbered `EXT-D…` so they can never be confused with `tenlane-network`'s `D1`–`D33`.
+
 ## 2026-09-20 — the bridge resolves a typed city for the website
 
 **Files:** `content/siteBridge.js`, `background.js`, `content/patBridge.js`.

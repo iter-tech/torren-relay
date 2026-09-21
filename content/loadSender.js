@@ -32,8 +32,102 @@ var loadSender = (function () {
   var _client = null;
   var _flushing = false;
 
-  // Counters for __EXT_DEBUG.loadSenderReport(). Diagnostics only; nothing reads them.
-  var _stats = { seen: 0, buffered: 0, sent: 0, inserted: 0, updated: 0, failures: 0, lastError: null };
+  // Counters for __EXT_DEBUG.loadSenderReport() AND for the popup, which renders them from
+  // chrome.storage.local. No longer diagnostics-only.
+  /*
+   * 🔑 EVERY WAY A RECORD CAN VANISH HAS ITS OWN COUNTER. (docs/DECISIONS.md EXT-D2.)
+   *
+   * ⚠ `seen` NOW COUNTS EVERY RECORD HANDED TO accept(), BEFORE ANY SKIP. It used to be
+   * incremented only after toRow() succeeded, so a record dropped for a missing id was
+   * counted nowhere at all — not in seen, not in sent, not in failures.
+   *
+   * The arithmetic that must hold:
+   *   seen === accepted + dropped.noId + dropped.threw
+   *   accepted === sent + buffered + dropped.evicted + dropped.discardedDisabled
+   */
+  var _stats = {
+    seen: 0,          // every record accept() was handed, before any filter
+    accepted: 0,      // records that became a row and entered the buffer
+    buffered: 0,      // in the buffer right now (runtime only, not cumulative)
+    sent: 0, inserted: 0, updated: 0, failures: 0, lastError: null,
+    dropped: {
+      noId: 0,               // toRow() — record has no `id`
+      discardedTeardown: 0,  // stop() — deactivation clears the buffer
+      acceptThrew: 0,        // accept() threw mid-loop; the rest of that batch never ran
+      threw: 0,              // toRow() catch — the record threw while being converted
+      evicted: 0,            // accept() — buffer over LOAD_SENDER_MAX_BUFFER, oldest evicted
+      discardedDisabled: 0,  // flush() — the toggle went off, buffer cleared
+      notArrayEvents: 0      // accept() was handed a non-array; RECORD COUNT UNKNOWABLE
+    }
+  };
+
+  /*
+   * ⚠ PERSISTED, BECAUSE A COUNTER THAT DIES WITH THE TAB CANNOT MEASURE LOSS. Written
+   * through chrome.storage.local — the same mechanism the toggle and the session already use.
+   * No new storage layer.
+   *
+   * ⚠ DEBOUNCED. accept() runs per record; writing storage on each one would be hundreds of
+   * writes a minute. The flush path also saves explicitly, so a number is never more than one
+   * flush interval stale.
+   */
+  var _saveTimer = null;
+  function saveStats() {
+    if (_saveTimer) return;
+    _saveTimer = setTimeout(function () {
+      _saveTimer = null;
+      try {
+        var o = {};
+        o[LOAD_SENDER_STATS_KEY] = _stats;
+        chrome.storage.local.set(o);
+      } catch (e) {
+        logger.error('loadSender', 'saveStats failed', { error: e });
+      }
+    }, 2000);
+  }
+
+  // Merge whatever was persisted, so the counters are cumulative across reloads.
+  async function loadStats() {
+    try {
+      var data = await chrome.storage.local.get(LOAD_SENDER_STATS_KEY);
+      var s = data && data[LOAD_SENDER_STATS_KEY];
+      if (!s || typeof s !== 'object') return;
+      var d = s.dropped || {};
+      _stats.seen      = s.seen      || 0;
+      _stats.accepted  = s.accepted  || 0;
+      _stats.sent      = s.sent      || 0;
+      _stats.inserted  = s.inserted  || 0;
+      _stats.updated   = s.updated   || 0;
+      _stats.failures  = s.failures  || 0;
+      _stats.lastError = s.lastError || null;
+      _stats.dropped.noId              = d.noId              || 0;
+      _stats.dropped.threw             = d.threw             || 0;
+      _stats.dropped.evicted           = d.evicted           || 0;
+      _stats.dropped.discardedDisabled = d.discardedDisabled || 0;
+      _stats.dropped.notArrayEvents    = d.notArrayEvents    || 0;
+      _stats.dropped.discardedTeardown = d.discardedTeardown || 0;
+      _stats.dropped.acceptThrew       = d.acceptThrew       || 0;
+      // ⚠ NOT restored: `buffered` describes this tab's live Map, not history.
+      _stats.buffered = _buffer.size;
+    } catch (e) {
+      logger.error('loadSender', 'loadStats failed — counters start at zero', { error: e });
+    }
+  }
+
+  function resetStats() {
+    _stats.seen = 0; _stats.accepted = 0; _stats.sent = 0; _stats.inserted = 0;
+    _stats.updated = 0; _stats.failures = 0; _stats.lastError = null;
+    _stats.dropped = { noId: 0, threw: 0, evicted: 0, discardedDisabled: 0,
+                       notArrayEvents: 0, discardedTeardown: 0, acceptThrew: 0 };
+    _stats.buffered = _buffer.size;
+    try {
+      var o = {};
+      o[LOAD_SENDER_STATS_KEY] = _stats;
+      chrome.storage.local.set(o);
+    } catch (e) {
+      logger.error('loadSender', 'resetStats failed to persist', { error: e });
+    }
+    return report();
+  }
 
   // ── Is the sender switched on? ───────────────────────────────────────────────────────────
   // TRUE-DEFAULT: an unset key means ON, exactly like AUTO_OPEN. The build-time constant is the
@@ -156,7 +250,9 @@ var loadSender = (function () {
   function toRow(rec, endpoint) {
     logger.log('loadSender', 'toRow called');
     try {
-      if (!rec || !rec.id) return null;
+      // ⚠ COUNTED, NOT CHANGED. The skip itself is exactly as it was — a record with no id
+      // cannot be keyed for the upsert. It is simply no longer invisible.
+      if (!rec || !rec.id) { _stats.dropped.noId++; return null; }
 
       var loads = [];
       var srcLoads = rec.loads || [];
@@ -219,20 +315,33 @@ var loadSender = (function () {
         source: (endpoint === 'similar' || endpoint === 'recommendations') ? endpoint : 'search'
       };
     } catch (e) {
+      _stats.dropped.threw++;
       logger.error('loadSender', 'toRow failed — record skipped', { error: e });
       return null;
     }
   }
 
   // ── Buffer ───────────────────────────────────────────────────────────────────────────────
+  var _acceptIndex = 0;
   function accept(records, endpoint) {
+    _acceptIndex = 0;
     logger.log('loadSender', 'accept called', { count: records ? records.length : 0 });
     try {
-      if (!Array.isArray(records)) return;
+      if (!Array.isArray(records)) {
+        // ⚠ THE RECORD COUNT HERE IS UNKNOWABLE — there is no array to measure. Counted as an
+        // EVENT, not as a number of loads, so the arithmetic above is never quietly wrong.
+        _stats.dropped.notArrayEvents++;
+        saveStats();
+        return;
+      }
       for (var i = 0; i < records.length; i++) {
+        _acceptIndex = i;
+        // 🔑 BEFORE ANY FILTER. This is the whole point: every record the sender is handed is
+        // counted here, whether or not it survives toRow().
+        _stats.seen++;
         var row = toRow(records[i], endpoint);
         if (!row) continue;
-        _stats.seen++;
+        _stats.accepted++;
         // Re-inserting moves nothing in a Map, so delete first: the newest sighting must be the
         // youngest entry, or the eviction below would drop the freshest data first.
         if (_buffer.has(row.amazon_wo_id)) _buffer.delete(row.amazon_wo_id);
@@ -246,9 +355,19 @@ var loadSender = (function () {
         var oldest = _buffer.keys().next();
         if (oldest.done) break;
         _buffer.delete(oldest.value);
+        // 🔴 THE ONE PLACE A LOAD IS LOST OUTRIGHT. The limit is unchanged; it is now visible.
+        _stats.dropped.evicted++;
       }
       _stats.buffered = _buffer.size;
+      saveStats();
     } catch (e) {
+      // ⚠ FOUND WHILE INSTRUMENTING. If this throws at record i, records i+1..n never ran —
+      // they were never seen, never buffered and never counted anywhere. `_acceptIndex` is the
+      // loop counter, so the remainder is knowable and is recorded rather than lost silently.
+      if (Array.isArray(records)) {
+        _stats.dropped.acceptThrew += Math.max(0, records.length - _acceptIndex);
+      }
+      saveStats();
       logger.error('loadSender', 'accept failed', { error: e });
     }
   }
@@ -309,8 +428,12 @@ var loadSender = (function () {
         // Switched off mid-shift: drop what was buffered rather than holding it to send later.
         // "Off" must mean nothing leaves, including anything already collected.
         if (_buffer.size) logger.log('loadSender', 'disabled — buffer discarded', { dropped: _buffer.size });
+        // A DROP, and it was uncounted. Deliberate behaviour — "off" must mean nothing leaves —
+        // but the loads still vanish, so they are counted like any other loss.
+        _stats.dropped.discardedDisabled += _buffer.size;
         _buffer.clear();
         _stats.buffered = 0;
+        saveStats();
         return;
       }
 
@@ -338,6 +461,7 @@ var loadSender = (function () {
         // silently; the ceiling in accept() is what stops that becoming unbounded.
         _stats.failures++;
         _stats.lastError = res.error.message || String(res.error);
+        saveStats();
         logger.warn('loadSender', 'ingest_loads failed — batch retained for retry', {
           message: res.error.message, code: res.error.code, batch: batch.length
         });
@@ -351,6 +475,7 @@ var loadSender = (function () {
       _stats.inserted += (typeof out.inserted === 'number') ? out.inserted : 0;
       _stats.updated += (typeof out.updated === 'number') ? out.updated : 0;
       _stats.buffered = _buffer.size;
+      saveStats();
 
       logger.log('loadSender', 'flush ok', {
         sent: batch.length, inserted: out.inserted, updated: out.updated, remaining: _buffer.size
@@ -415,6 +540,11 @@ var loadSender = (function () {
       if (typeof isLoadBoardPage === 'function' && !isLoadBoardPage()) return;
       if (typeof LOAD_SENDER_ENABLED !== 'undefined' && LOAD_SENDER_ENABLED === false) return;
 
+      // ⚠ CUMULATIVE ACROSS RELOADS. Without this the counters restart at zero on every SPA
+      // navigation and a whole shift's losses are invisible again. Async on purpose — the
+      // listener below must be attached now, not after a storage round-trip.
+      loadStats();
+
       window.addEventListener('message', onMessage);
 
       var every = (typeof LOAD_SENDER_FLUSH_MS === 'number') ? LOAD_SENDER_FLUSH_MS : 15000;
@@ -449,7 +579,12 @@ var loadSender = (function () {
       }
       // Dropped on teardown: deactivation means logout or leaving the board, and buffered loads
       // cannot be sent without a session. They will be seen again on the next board tick.
+      // ⚠ FOUND WHILE INSTRUMENTING, AND UNCOUNTED UNTIL NOW. The behaviour is unchanged and
+      // deliberate; what changes is that the loads no longer vanish without a number.
+      _stats.dropped.discardedTeardown += _buffer.size;
       _buffer.clear();
+      _stats.buffered = 0;
+      saveStats();
       _listening = false;
     } catch (e) {
       logger.error('loadSender', 'stop failed', { error: e });
@@ -468,7 +603,8 @@ var loadSender = (function () {
     };
   }
 
-  return { start: start, stop: stop, flush: flush, report: report, isEnabled: isEnabled };
+  return { start: start, stop: stop, flush: flush, report: report, isEnabled: isEnabled,
+           resetStats: resetStats, loadStats: loadStats };
 })();
 
 // ⚠ DELIBERATELY NOT STARTED HERE. This file is injected at document_idle, when the SPA has
@@ -482,4 +618,5 @@ try {
   window.__EXT_DEBUG = window.__EXT_DEBUG || {};
   window.__EXT_DEBUG.loadSenderReport = function () { return loadSender.report(); };
   window.__EXT_DEBUG.loadSenderFlush = function () { return loadSender.flush('manual'); };
+  window.__EXT_DEBUG.loadSenderResetStats = function () { return loadSender.resetStats(); };
 } catch (e) { /* diagnostics are optional; never let them break startup */ }

@@ -23,7 +23,15 @@ const ALLOWED_CLICK_INTENTS = {
 // showing while the extension ships as "Tenlane Relay" (manifest.json `name`). Sole reader is
 // content/sidebar.js's ext-sidebar-title.
 const EXT_NAME    = 'Tenlane Relay';
-const EXT_VERSION = '0.1.0';
+// ⚠ DERIVED FROM THE MANIFEST, NOT DECLARED HERE. This read '0.1.0' while manifest.json said
+// '1.0.0' — a second copy that had already drifted, and the reason the popup was wrong.
+// constants.js loads only in extension contexts (content scripts per manifest.json, and
+// popup.html), both of which have chrome.runtime.getManifest().
+// ⚠ Falls back to null, never to a number: `version: null` in a log line is obviously unknown,
+// a stale number is not. Sole reader is content/content.js:1. See docs/DECISIONS.md EXT-D1.
+const EXT_VERSION = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest)
+  ? chrome.runtime.getManifest().version
+  : null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Console verbosity. THIS IS THE ONE LINE TO RAISE WHILE DEVELOPING — set it to 4

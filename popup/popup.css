@@ -562,6 +562,16 @@ input[type="range"] {
 }
 
 /* ── Footer — bottom-left reset link ── */
+/* Sender counters — plain text rows, deliberately unstyled beyond alignment. */
+.popup-sender-stats{padding:6px 0 2px;font-size:11px;color:#6B7280;}
+.popup-stat-line{display:flex;justify-content:space-between;padding:1px 0;}
+.popup-stat-line span{font-variant-numeric:tabular-nums;color:#111827;}
+.popup-stats-reset{
+  margin-top:6px;width:100%;padding:4px;font-size:11px;cursor:pointer;
+  background:none;border:1px solid #D1D5DB;border-radius:4px;color:#6B7280;
+}
+.popup-stats-reset:hover{background:#F3F4F6;color:#111827;}
+
 .popup-footer {
   display: flex;
   justify-content: flex-start;
