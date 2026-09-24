@@ -1,211 +1,137 @@
 // content/tabAlert.js
-// "Tab Alert" — when a new load is found and this tab is NOT focused, mark the tab so the
-// dispatcher notices it without being startled: the title alternates with a bulleted count and
-// the favicon breathes between two ALPHAS OF ONE HUE (a soft accent dot). Auto-stops the instant
-// the dispatcher returns here, RESTORING the page's own title and favicon.
+// The wiring between this extension's own state and the tab indicator — it draws nothing itself.
 //
-// NOTE: a page cannot recolor the real tab strip — that is Chrome UI. The favicon is the only
-// surface available, so the indicator lives there.
+// 🔑 THE INDICATOR IS `utils/tabIndicator.js`, WHICH IS THE SITE'S, COPIED (EXT-D4). This file only
+// says WHEN each state applies:
 //
-// U1 (2026-08-20) rewrote the appearance and fixed a real defect. Before: solid RED alternating
-// with solid YELLOW, two hardcoded literals, a 600ms strobe, a red-circle emoji in the title, and
-// stopping only REMOVED our <link> — which does not bring the page's icon back. See
-// extRestoreOriginalFavicon().
+//   the loop is running        -> searching   (the magnifier sweep)
+//   new loads were found       -> alert       (the blinking disc + "(3) " on the title)
+//   neither                    -> idle        (Amazon's own favicon, written back explicitly)
 //
-// JS only, no clicks, no Amazon DOM changes. Single interval, cleared on stop —
-// nothing accumulates in memory. Reads STORAGE_KEYS.TAB_ALERT.
-
-var TAB_ALERT_LINK_ID = 'ext-tab-alert-favicon';
-var tabAlertTimer     = null;
-var tabAlertPhase     = 0;
-var tabAlertOrigTitle = null;
-// U1 (2026-08-20): the indicator was a solid RED block alternating with solid YELLOW —
-// alarming, and two hardcoded literals. It is now a soft accent DOT that breathes between two
-// alphas of the SAME hue: present enough to catch the eye in a tab strip, quiet enough not to
-// read as an emergency. Ihor's reference is Apple's visual language.
-var EXT_ICON_DOT_SOFT   = null;
-var EXT_ICON_DOT_STRONG = null;
-// The favicon the page had before we touched it. Captured at start and RESTORED on stop —
-// see extRestoreOriginalFavicon() for why removing our <link> is not enough.
-var tabAlertOrigIconHref = null;
-var tabAlertOrigIconEl   = null;
-
-// Resolves an --ext-* token to a concrete colour. Canvas needs a real value, so the token is
-// READ at runtime rather than a literal being written here — that keeps the "tokens only, no
-// new literals" rule while still being paintable. If the token cannot be resolved (design
-// tokens not loaded yet), it returns null and the caller skips the favicon rather than
-// inventing a colour.
-function extToken(name) {
-  logger.log('tabAlert', 'extToken called', { name: name });
-  try {
-    var v = getComputedStyle(document.documentElement).getPropertyValue(name);
-    v = (v || '').trim();
-    return v.length ? v : null;
-  } catch (e) {
-    logger.error('tabAlert', 'extToken failed — the favicon will be left alone rather than ' +
-      'painted with an invented colour', { error: e, name: name });
-    return null;
-  }
-}
-
-// A soft filled dot, centred, at the given alpha. Not a full-bleed block: a 32px square of
-// saturated colour is what made the old indicator shout.
-function extMakeDotIcon(color, alpha) {
-  logger.log('tabAlert', 'extMakeDotIcon called', { alpha: alpha });
-  try {
-    if (!color) return null;
-    var c = document.createElement('canvas');
-    c.width = 32; c.height = 32;
-    var ctx = c.getContext('2d');
-    ctx.clearRect(0, 0, 32, 32);
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(16, 16, 9, 0, Math.PI * 2);
-    ctx.fill();
-    return c.toDataURL('image/png');
-  } catch (e) {
-    logger.error('tabAlert', 'extMakeDotIcon failed — no favicon change', { error: e });
-    return null;
-  }
-}
-
-function extEnsureAlertFavicon(href) {
-  var link = document.getElementById(TAB_ALERT_LINK_ID);
-  if (!link) {
-    link = document.createElement('link');
-    link.id  = TAB_ALERT_LINK_ID;
-    link.rel = 'icon';
-  }
-  link.href = href;
-  document.head.appendChild(link); // keep ours last so the browser uses it
-}
-
-// ⚠ THE DEFECT U1 FIXES. Removing our <link> does NOT reliably bring the page's own favicon
-// back: browsers do not re-read the remaining icon links just because one was detached, so the
-// tab kept showing our block after the alert had "stopped". The indicator stopped ANIMATING
-// but never DISAPPEARED.
+// 🔴 IT IS ALWAYS ON. NO SETTING GATES IT (EXT-D5, Ihor 2026-09-24).
 //
-// The fix is to hand the browser the original href explicitly before letting go of the element,
-// which forces a re-read, and only then remove ours.
-function extRestoreOriginalFavicon() {
-  logger.log('tabAlert', 'extRestoreOriginalFavicon called');
-  try {
-    var link = document.getElementById(TAB_ALERT_LINK_ID);
-    if (link) {
-      if (tabAlertOrigIconHref) {
-        // Point our own link back at the page's icon first — the browser repaints the tab from
-        // it — then drop the element.
-        link.href = tabAlertOrigIconHref;
-      }
-      link.remove();
-    }
-    // Re-assert the page's own <link> so it is unambiguously the last icon declared.
-    if (tabAlertOrigIconEl && tabAlertOrigIconEl.parentNode) {
-      var href = tabAlertOrigIconEl.href;
-      tabAlertOrigIconEl.parentNode.appendChild(tabAlertOrigIconEl);
-      tabAlertOrigIconEl.href = href;
-    }
-    tabAlertOrigIconHref = null;
-    tabAlertOrigIconEl   = null;
-  } catch (e) {
-    logger.error('tabAlert', 'extRestoreOriginalFavicon failed — the tab may keep our icon ' +
-      'until the next navigation', { error: e });
-  }
+// EXT-D4 shipped it behind the old "Tab Alert" checkbox, which defaults to OFF — so on a real
+// install the indicator never started once: `tabAlertEnabled` stayed false, and the `running`
+// subscriber and `flashTabAlert()` both returned on their first line. Ihor tested it live and saw
+// nothing change. The site has no such switch and he asked for the site's behaviour, so the switch
+// is gone rather than defaulted differently: the popup control, its storage write and its change
+// listener were removed with it.
+//
+// 🔑 THE TRANSITIONS ARE THE SITE'S, read from `web/src/components/LoadsTable.tsx`:
+//   - the alert WINS over searching while it is up (the indicator decides that, not this file);
+//   - starting the loop CLEARS the alert — resuming is the acknowledgement, and leaving a count up
+//     after the dispatcher has plainly seen it trains him to ignore the next one;
+//   - an alert clears by itself after NEW_LOAD_ALERT_MS, the site's 60-second highlight window;
+//   - leaving the page clears everything and hands Amazon its own icon and title back.
+//
+// ⚠ ONE TRANSITION IS OURS AND IS KEPT ON PURPOSE: returning to this tab clears the alert (U1,
+// 2026-08-20 — "auto-stops the instant the dispatcher returns here"). The site has no such rule
+// because nobody is ever "away" from a page they are looking at; here the whole point of the mark
+// is a tab in the background, so seeing it is acknowledging it.
+//
+// U1's soft breathing dot, its two alphas of one hue, its title alternation and its 900 ms pulse
+// are GONE — replaced by the site's three states so both tabs read the same. U1's real lesson is
+// not gone: it is the reason `tabIndicator` writes an href for idle instead of removing our link.
+//
+// JS only, no clicks, no Amazon DOM changes beyond <head> icon links and document.title.
+
+/** The site's NEW_HIGHLIGHT_MS (`components/BoardToolbar.tsx`): one batch, sixty seconds. */
+var NEW_LOAD_ALERT_MS = 60000;
+
+var tabAlertExpiry = null;
+
+function clearTabAlertExpiry() {
+  if (tabAlertExpiry === null) return;
+  clearTimeout(tabAlertExpiry);
+  tabAlertExpiry = null;
 }
 
-// Captures the page's own icon once, before we replace it.
-function extCaptureOriginalFavicon() {
-  logger.log('tabAlert', 'extCaptureOriginalFavicon called');
-  try {
-    if (tabAlertOrigIconEl) return;
-    var links = document.querySelectorAll('link[rel~="icon"]');
-    for (var i = links.length - 1; i >= 0; i--) {
-      if (links[i].id === TAB_ALERT_LINK_ID) continue;
-      tabAlertOrigIconEl   = links[i];
-      tabAlertOrigIconHref = links[i].href;
-      return;
-    }
-  } catch (e) {
-    logger.error('tabAlert', 'extCaptureOriginalFavicon failed — restore will fall back to ' +
-      'removing our link only', { error: e });
-  }
-}
-
+/** Drop the count, keep the sweep if the loop is still running. The site's `clearTabAlert()`. */
 function stopTabAlert() {
-  if (tabAlertTimer !== null) {
-    clearInterval(tabAlertTimer);
-    tabAlertTimer = null;
-  }
-  if (tabAlertOrigTitle !== null) {
-    document.title = tabAlertOrigTitle;
-    tabAlertOrigTitle = null;
-  }
-  extRestoreOriginalFavicon();   // U1: RESTORE, not merely remove — see that function
-  tabAlertPhase = 0;
+  clearTabAlertExpiry();
+  tabIndicator.setAlertCount(0);
 }
 
+/**
+ * New loads found. `count` is what the title shows.
+ * ⚠ THE LOOP HAS USUALLY JUST STOPPED ITSELF by the time this runs (content.js sets `running`
+ * false on new loads), so the alert is what remains on the tab — which is the site's behaviour too.
+ */
 function startTabAlert(count) {
-  if (tabAlertTimer !== null) return; // already blinking
-  // U1: one hue, two alphas — a breath rather than a strobe. The colour comes from the
-  // --ext-accent token, read at runtime; --ext-n700 is the fallback, also a token. If neither
-  // resolves, the icons stay null and only the title alternates.
-  if (EXT_ICON_DOT_SOFT === null) {
-    var dotColor = extToken('--ext-accent') || extToken('--ext-n700');
-    EXT_ICON_DOT_SOFT   = extMakeDotIcon(dotColor, 0.35);
-    EXT_ICON_DOT_STRONG = extMakeDotIcon(dotColor, 0.90);
-  }
-  extCaptureOriginalFavicon();
-
-  tabAlertOrigTitle = document.title;
-  // U1: the red-circle emoji read as an alarm. A small neutral bullet marks the tab without
-  // shouting, and the count carries the actual information.
-  var label = (count && count > 1)
-    ? ('\u2022 ' + count + ' new loads')
-    : '\u2022 New load';
-
-  tabAlertTimer = setInterval(function () {
-    tabAlertPhase = tabAlertPhase ? 0 : 1;
-    if (tabAlertPhase) {
-      document.title = label;
-      if (EXT_ICON_DOT_STRONG) extEnsureAlertFavicon(EXT_ICON_DOT_STRONG);
-    } else {
-      document.title = tabAlertOrigTitle;
-      if (EXT_ICON_DOT_SOFT) extEnsureAlertFavicon(EXT_ICON_DOT_SOFT);
-    }
-  // U1: 900ms, not 600 — slow enough to read as a pulse rather than a flash.
-  }, 900);
-
+  tabIndicator.setAlertCount(count && count > 0 ? count : 1);
+  // One batch, one window: a newer batch replaces the old one and restarts the clock, exactly as
+  // the site's highlight does.
+  clearTabAlertExpiry();
+  tabAlertExpiry = setTimeout(function () {
+    tabAlertExpiry = null;
+    logger.log('tabAlert', 'alert window elapsed — clearing the count', { afterMs: NEW_LOAD_ALERT_MS });
+    tabIndicator.setAlertCount(0);
+  }, NEW_LOAD_ALERT_MS);
   logger.log('tabAlert', 'started', { count: count || 0 });
 }
 
-// Public entry — called by the orchestrator when new loads are found.
-// Self-gates on the setting and only blinks when this tab is NOT focused.
+/**
+ * Public entry — called by the orchestrator when new loads are found.
+ * ⚠ IT DOES NOT SELF-GATE ON FOCUS. The indicator is a state, not a notification: with the tab in
+ * front of him the count appears and the `focus`/`visibilitychange` handlers below clear it on his
+ * next interaction with the window, which is the same outcome by a simpler route.
+ */
 async function flashTabAlert(count) {
   try {
-    var on = await storage.get(STORAGE_KEYS.TAB_ALERT, false);
-    if (on !== true) return;
-    var focused = document.hasFocus() && document.visibilityState === 'visible';
-    if (focused) return;
     startTabAlert(count);
   } catch (e) {
     logger.warn('tabAlert', 'flashTabAlert failed', { error: e });
   }
 }
 
-// Auto-stop the moment the dispatcher returns to this tab.
+// ── the searching state: the loop itself ─────────────────────────────────────────────────────────
+// ⚠ THE SAME SUBSCRIBER THE REST OF THE EXTENSION USES (`tabState.subscribe('running')`), so the
+// sweep starts and stops with the loop whatever started or stopped it — the sidebar's Play/Pause,
+// an auto-stop on new loads, a logout, or the rate limiter.
+tabState.subscribe('running', function (val) {
+  if (val) {
+    // 🔑 STARTING THE LOOP IS THE ACKNOWLEDGEMENT (the site's ring toggle).
+    clearTabAlertExpiry();
+    tabIndicator.setAlertCount(0);
+  }
+  tabIndicator.setSearching(val === true);
+});
+
+// Auto-stop the moment the dispatcher returns to this tab — U1's rule, kept.
 window.addEventListener('focus', function () { stopTabAlert(); });
 document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'visible') stopTabAlert();
 });
 
-// If the feature is switched OFF while blinking, stop immediately.
-chrome.storage.onChanged.addListener(function (changes, area) {
-  if (area !== 'local') return;
-  if (!changes[STORAGE_KEYS.TAB_ALERT]) return;
-  if (changes[STORAGE_KEYS.TAB_ALERT].newValue !== true) stopTabAlert();
-});
+// Leaving the page: Amazon's icon and title back, our link gone. The site's unmount rule.
+window.addEventListener('pagehide', function () { tabIndicator.release(); });
+
+/*
+ * 🔑 ONE LINE AT CONTENT-SCRIPT START, VISIBLE IN A SHIPPED BUILD (Ihor 2026-09-24). EXT-D4 was
+ * tested live and nothing happened, and the console could not answer the first question — is the
+ * new code even loaded? This says so, with the version, before anything else can go wrong.
+ *
+ * ⚠ logger.notice, NOT logger.log: `log` needs DEBUG_LEVEL >= 3 and the shipped default is 1, which
+ * is exactly how radiusUnitCaveat()'s warning ended up invisible in a shipped build
+ * (utils/constants.js). `notice` is the level that survives it.
+ *
+ * ⚠ THE VERSION COMES FROM THE MANIFEST, never a literal (EXT-D1).
+ */
+(function () {
+  var version = 'unknown';
+  try {
+    if (chrome && chrome.runtime && typeof chrome.runtime.getManifest === 'function') {
+      version = chrome.runtime.getManifest().version || 'unknown';
+    }
+  } catch (e) { /* the line is worth printing even without a version */ }
+  logger.notice('tabIndicator', 'tab-indicator ready', {
+    version: version,
+    states: 'paused = Amazon favicon · searching = magnifier · new load = red disc + (n) title',
+    gatedBy: 'nothing — always on (EXT-D5)'
+  });
+})();
 
 window.__EXT_DEBUG = window.__EXT_DEBUG || {};
 window.__EXT_DEBUG.flashTabAlert = function (n) { startTabAlert(n || 1); };
 window.__EXT_DEBUG.stopTabAlert  = stopTabAlert;
+window.__EXT_DEBUG.tabIndicator  = tabIndicator;

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tenlane Relay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Monitors the Amazon Relay load board, alerts you to new loads, filters by origin city, and streamlines your dispatch workflow.",
 
   "icons": {
@@ -55,6 +55,8 @@
         "vendor/supabase.min.js",
         "utils/authGate.js",
         "utils/tabState.js",
+        "utils/tabIndicator.js",
+        "utils/priceProbe.js",
         "utils/loadStore.js",
         "utils/soundDefs.js",
         "vendor/html2canvas.min.js",

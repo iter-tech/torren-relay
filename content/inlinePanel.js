@@ -1582,6 +1582,30 @@ function renderPanelFromData(cardElement, sheetLoadId, data) {
 
   panelGate('5 ok — PANEL RENDERED', sheetLoadId, data.segments.length + ' segment(s)');
   logger.log('inlinePanel', 'panel rendered', { segments: data.segments.length });
+
+  /*
+   * 🔑 PASSIVE PRICE-READ MEASUREMENT (EXT-D6). Fast Book is to become one click and must refuse to
+   * book when the price cannot be read — so how often each outcome happens has to be known before
+   * the gate is tightened, and the only honest source is a real board.
+   *
+   * ⚠ IT RUNS THE GATE'S OWN READ AND FILES THE VERDICT. `payoutGateFor()` is the function the
+   * booking path calls; nothing is re-implemented here, so the measurement cannot drift from the
+   * thing being measured.
+   *
+   * ⚠ IT DECIDES NOTHING AND CLICKS NOTHING. `payoutGateFor` only reads — `getLoadRecord()` and the
+   * sheet's textContent — and its return value is handed to the recorder and then dropped. Fast
+   * Book's behaviour is byte-for-byte what it was; FAST_BOOK_ENABLED is still false.
+   *
+   * ⚠ BOTH ENTRY PATHS ARE COVERED BY BEING HERE: showInlinePanel() is where the manual card click
+   * and the auto-open converge, and it is only reached once the panel has actually bound to a load.
+   */
+  try {
+    if (typeof priceProbe !== 'undefined' && typeof payoutGateFor === 'function') {
+      priceProbe.record(sheetLoadId, payoutGateFor(sheetLoadId, document.querySelector(SHEET_SELECTOR)));
+    }
+  } catch (e) {
+    logger.error('inlinePanel', 'price probe failed — measurement only, the panel is unaffected', { error: e });
+  }
   return true;
 }
 
