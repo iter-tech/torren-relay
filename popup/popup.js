@@ -186,8 +186,65 @@ document.addEventListener('DOMContentLoaded', function () {
     ['popup-price-to15',   function (s) { return dirLine(s.buckets.to15); }],
     ['popup-price-to50',   function (s) { return dirLine(s.buckets.to50); }],
     ['popup-price-over50', function (s) { return dirLine(s.buckets.over50); }],
-    ['popup-price-window', function (s) { return s.total ? (shortTs(s.first) + ' → ' + shortTs(s.last)) : '—'; }]
+    ['popup-price-window', function (s) { return s.total ? (shortTs(s.first) + ' → ' + shortTs(s.last)) : '—'; }],
+
+    /*
+     * ── EXT-D8: THE SPLIT BY TRIGGER, AND WHETHER THE READ WAS MERELY EARLY ──────────────────
+     *
+     * Live, 25 sheets: 6 unreadable (24 %). Two questions this block answers and the block above
+     * could not: WHICH path those were (Ihor's observation is that they are the auto-opened ones),
+     * and whether the sheet was unreadable AT ALL or only unreadable YET — the same sheet is read
+     * again at +1 s and +3 s.
+     *
+     * ⚠ EACH TRIGGER LINE PRINTS "unreadable / opened" — a bare count of unreadable auto-opens
+     * means nothing without how many auto-opens there were, and the two paths do not open equal
+     * numbers of sheets.
+     *
+     * ⚠ +1s AND +3s ARE OVER THE SAME POOL, NOT A FUNNEL. Both say "how many of the unreadable
+     * sheets could be read by then", so a sheet readable at both appears in both.
+     */
+    ['popup-price-nosheet-auto',   function (s) { return trigLine(s, 'auto-open'); }],
+    ['popup-price-nosheet-manual', function (s) { return trigLine(s, 'manual-click'); }],
+    // 'other' here is every remaining label summed — the console helper, a synthetic click that
+    // was not ours, and every event recorded before EXT-D8 carried no trigger at all.
+    ['popup-price-nosheet-other',  function (s) { return otherTrigLine(s); }],
+    ['popup-price-at1',     function (s) { return recLine(s, 'at1'); }],
+    ['popup-price-at3',     function (s) { return recLine(s, 'at3'); }],
+    ['popup-price-never',   function (s) { return recLine(s, 'never'); }],
+    ['popup-price-pending', function (s) { return recLine(s, 'pending'); }]
   ];
+
+  var OTHER_TRIGGERS = ['synthetic-other', 'other', 'unknown'];
+
+  function trigLine(s, trig) {
+    var t = s.triggers && s.triggers[trig];
+    if (!t || !t.total) return '0 of 0';
+    return t['sheet-unreadable'] + ' of ' + t.total + ' opened';
+  }
+
+  function otherTrigLine(s) {
+    var un = 0, tot = 0;
+    for (var i = 0; i < OTHER_TRIGGERS.length; i++) {
+      var t = s.triggers && s.triggers[OTHER_TRIGGERS[i]];
+      if (!t) continue;
+      un += t['sheet-unreadable'] || 0;
+      tot += t.total || 0;
+    }
+    return tot ? (un + ' of ' + tot + ' opened') : '0 of 0';
+  }
+
+  /**
+   * One recovery line: the count, and out of how many unreadable sheets, plus the auto-open /
+   * manual split in brackets — which is the comparison the whole measurement exists to make.
+   */
+  function recLine(s, field) {
+    var r = s.recovery;
+    if (!r || !r.unreadable) return '0 of 0';
+    var by = r.byTrigger || {};
+    var a = (by['auto-open'] && by['auto-open'][field]) || 0;
+    var m = (by['manual-click'] && by['manual-click'][field]) || 0;
+    return r[field] + ' of ' + r.unreadable + ' (auto ' + a + ', mine ' + m + ')';
+  }
 
   function dirLine(b) { return (b.higher + b.lower) + ' (higher ' + b.higher + ', lower ' + b.lower + ')'; }
   function shortTs(iso) { return iso ? String(iso).slice(5, 16).replace('T', ' ') : '—'; }

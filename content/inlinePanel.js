@@ -1373,8 +1373,12 @@ function panelGate(step, loadId, detail) {
     (detail ? '  ' + detail : ''));
 }
 
-function showInlinePanel(cardElement) {
-  logger.log('inlinePanel', 'showInlinePanel called');
+// `trigger` (EXT-D8) is measurement only: which path opened this sheet, for the price probe at the
+// end of renderPanelFromData. It is passed DOWN rather than re-derived there, because only the
+// caller knows — by the time the panel renders, the event that started it is gone. Callers that do
+// not say become 'other'; nothing about the panel, the gates or Fast Book reads it.
+function showInlinePanel(cardElement, trigger) {
+  logger.log('inlinePanel', 'showInlinePanel called', { trigger: trigger || 'other' });
   panelGate('0 — reached', null, 'showInlinePanel was CALLED (absence of this line means no ' +
     'caller ran: check initManualToggle and the auto-open path)');
 
@@ -1420,7 +1424,7 @@ function showInlinePanel(cardElement) {
 
   // Gates 4 (anchor missing / hidden by the filter) and 5 (the build throwing) are inside
   // renderPanelFromData, which reports them itself.
-  return renderPanelFromData(cardElement, sheetLoadId, data);
+  return renderPanelFromData(cardElement, sheetLoadId, data, trigger);
 }
 
 // Everything below this point is the Stage B render path, currently unreachable. Left in place
@@ -1429,7 +1433,7 @@ function showInlinePanel(cardElement) {
 // The render half, now reached from showInlinePanel() with a record-derived `data` and an id
 // resolved by the caller. Unchanged in what it BUILDS — textContent only, data-testids, --ext-*
 // tokens — only in where its data comes from.
-function renderPanelFromData(cardElement, sheetLoadId, data) {
+function renderPanelFromData(cardElement, sheetLoadId, data, trigger) {
   logger.log('inlinePanel', 'renderPanelFromData called', { loadId: sheetLoadId });
 
   injectPanelStyle();
@@ -1598,10 +1602,34 @@ function renderPanelFromData(cardElement, sheetLoadId, data) {
    *
    * ⚠ BOTH ENTRY PATHS ARE COVERED BY BEING HERE: showInlinePanel() is where the manual card click
    * and the auto-open converge, and it is only reached once the panel has actually bound to a load.
+   *
+   * ── EXT-D8: THE TRIGGER, AND TWO MORE READS OF THE SAME SHEET ───────────────────────────────
+   *
+   * Live, 25 sheets: 6 were `sheet-unreadable` (24 %), and Ihor's observation is that those are the
+   * AUTO-OPENED ones — a load he clicks himself reads fine. This call now files WHICH path opened
+   * the sheet, and re-reads the same sheet at +1 s and +3 s.
+   *
+   * ⚠ THE RE-READ IS THIS CLOSURE, not a selector handed to priceProbe: priceProbe touches no DOM
+   * (it also loads in the popup), so the read has to stay on this side of the boundary.
+   *
+   * ⚠ IT RETURNS null RATHER THAN READING SOMEONE ELSE'S SHEET. Three seconds is long enough for
+   * the dispatcher to open another load; if our panel is gone or is now bound to a different id,
+   * whatever `#selected-work-sheet` holds is not this event's sheet, and a wrong number filed as
+   * evidence is worse than a missing one. priceProbe records that as `skipped`.
+   *
+   * ⚠ STILL NOT A CLICK, AND STILL NOT A DECISION — on all three reads. `payoutGateFor` only reads.
    */
   try {
     if (typeof priceProbe !== 'undefined' && typeof payoutGateFor === 'function') {
-      priceProbe.record(sheetLoadId, payoutGateFor(sheetLoadId, document.querySelector(SHEET_SELECTOR)));
+      priceProbe.record(sheetLoadId, payoutGateFor(sheetLoadId, document.querySelector(SHEET_SELECTOR)), {
+        trigger: trigger || 'other',
+        reread: function () {
+          if (!document.getElementById(PANEL_ID)) return null;              // our panel is gone
+          if (!currentPanelCard || !document.contains(currentPanelCard)) return null;
+          if (cardLoadIdFor(currentPanelCard) !== sheetLoadId) return null; // another load now
+          return payoutGateFor(sheetLoadId, document.querySelector(SHEET_SELECTOR));
+        }
+      });
     }
   } catch (e) {
     logger.error('inlinePanel', 'price probe failed — measurement only, the panel is unaffected', { error: e });
@@ -2271,8 +2299,36 @@ function initManualToggle() {
     // else is bound, and would do it silently from the dispatcher's side. showInlinePanel() only
     // ever returns false when it declines; a throw means a real defect, so it is logged at error
     // level and visible at the shipped DEBUG_LEVEL.
+    /*
+     * ── WHICH PATH IS THIS? (EXT-D8) ────────────────────────────────────────────────────────
+     *
+     * This one listener handles BOTH the dispatcher's click and the auto-open's, because the
+     * auto-open works by dispatching a click that bubbles to this very handler
+     * (content/detailOpener.js dispatches it; there is no second call to showInlinePanel).
+     * The price probe has to tell them apart, so the label is decided HERE, where the event is.
+     *
+     * 🔑 `ev.isTrusted` IS THE BROWSER'S OWN BIT: true only for a real input device, false for
+     * anything dispatchEvent() produced. It cannot be spoofed from page or content-script code.
+     *
+     * 🔑 CORROBORATED, NOT INFERRED. An untrusted click is only called 'auto-open' when our own
+     * dispatch is on the stack (`isAutoOpenClickInFlight()`); any other synthetic click is
+     * 'synthetic-other' rather than being absorbed into the auto-open figures. And the trigger is
+     * NEVER derived from how long the read took — that is the thing being measured.
+     *
+     * ⚠ MEASUREMENT ONLY. Nothing below branches on it: both paths render the same panel, run the
+     * same gates and reach the same disabled Fast Book.
+     */
+    var extTrigger;
+    if (ev.isTrusted) {
+      extTrigger = 'manual-click';
+    } else if (typeof isAutoOpenClickInFlight === 'function' && isAutoOpenClickInFlight()) {
+      extTrigger = 'auto-open';
+    } else {
+      extTrigger = 'synthetic-other';
+    }
+
     try {
-      showInlinePanel(card);
+      showInlinePanel(card, extTrigger);
     } catch (e) {
       logger.error('inlinePanel', 'manual card open — panel render threw', { error: e });
     }

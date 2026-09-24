@@ -27,6 +27,27 @@
 // into the void.
 var AUTO_OPEN_LAYOUT_ATTEMPTS = 10;
 
+// ── WHOSE CLICK IS THIS? (EXT-D8, 2026-09-24) ────────────────────────────────────────────────
+//
+// The price probe has to say which path opened the sheet, and the two paths converge inside ONE
+// listener (content/inlinePanel.js initManualToggle) — so the listener has to be able to tell a
+// click it is handling for us from a click the dispatcher made.
+//
+// 🔑 `event.isTrusted` IS THE PRIMARY ANSWER AND IT IS THE BROWSER'S, NOT OURS: false for anything
+// dispatchEvent() produced, true only for a real input device. This flag CORROBORATES it, so the
+// label is positive ("our auto-open dispatch is on the stack") rather than merely "not trusted".
+//
+// ⚠ IT IS TRUE ONLY FOR THE DURATION OF ONE SYNCHRONOUS dispatchEvent CALL, set on the line before
+// it and cleared on the line after — the same window `_autoDiagPending` uses, and for the same
+// reason: a flag left set would mislabel the dispatcher's next real click as an auto-open.
+//
+// ⚠ DIAGNOSTIC AND MEASUREMENT ONLY. Nothing in the click, the gates or the booking path reads it.
+var _autoOpenClickInFlight = false;
+
+function isAutoOpenClickInFlight() {
+  return _autoOpenClickInFlight === true;
+}
+
 // A real, laid-out box. Zero on either axis means "not laid out yet", which is exactly the
 // measured failure. Also treats a missing element as no box rather than throwing.
 function hasLayoutBox(el) {
@@ -265,7 +286,16 @@ function attemptNeutralZoneClick(load, el, attemptsLeft, scheduledAt, seqNo) {
       button:     0,
       buttons:    0           // no button held DURING a click event — 0 is what a real click carries
     });
-    target.dispatchEvent(ev);
+    // EXT-D8: set on the line before the dispatch and cleared on the line after, so the panel's
+    // click listener — which runs INSIDE this call — can label the price probe's event 'auto-open'.
+    _autoOpenClickInFlight = true;
+    try {
+      target.dispatchEvent(ev);
+    } finally {
+      // ⚠ `finally`, NOT THE NEXT LINE. A listener downstream that throws must not leave the flag
+      // set, or the dispatcher's next real click would be filed as an auto-open.
+      _autoOpenClickInFlight = false;
+    }
 
     // AUTODIAG: dispatchEvent is SYNCHRONOUS, so the probe has already run and the pending flag
     // closes here — a real mouse click can never be mislabelled as ours.

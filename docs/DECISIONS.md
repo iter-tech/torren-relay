@@ -13,6 +13,120 @@ behind.
 
 ---
 
+## EXT-D8 — ✅ THE PROBE NOW SAYS WHICH PATH OPENED THE SHEET, AND READS IT AGAIN AT +1 s AND +3 s
+
+**2026-09-24, Ihor — follow-up to EXT-D6.** The live result over **25 sheets: 18 `match`, 1 `differ`,
+6 `sheet-unreadable` (24 %)**. His observation with it: **when auto-refresh finds a new load and
+AUTO-OPENS it the price is not read; when he clicks the load himself it is.** EXT-D6's event could
+neither confirm nor deny that — it recorded no trigger and read the sheet exactly once.
+
+So two fields, and **still nothing decided**: `FAST_BOOK_ENABLED` is `false`
+(`utils/constants.js:152`), `payoutGateFor()` is untouched, and no click of any kind was added.
+
+### 1. The two paths, traced to the probe call
+
+| | auto-open | manual click |
+|---|---|---|
+| what starts it | `openTopNewLoad()` → `attemptNeutralZoneClick()`, `content/detailOpener.js:331`, `:172` | the dispatcher's own click |
+| before the click | `el.scrollIntoView()`, then **`setTimeout(…, 250)`** (`content/detailOpener.js:394`), then up to 10 frames waiting for a layout box (`:28`) | nothing |
+| the click itself | **ONE constructed `MouseEvent('click')`**, `content/detailOpener.js:276-293` | the browser's own input sequence |
+| what precedes it | **nothing** — "No pointerdown/mousedown/mouseup sequence was added" (`content/detailOpener.js:156`) | `pointerdown` → `mousedown` → `pointerup` → `mouseup`, **each in its own task**, separated by the dwell |
+| our listener | `initManualToggle`'s one `document` click listener, `content/inlinePanel.js:2197` — **both paths, because the dispatched click bubbles to it** | the same listener |
+| then | `showInlinePanel()` → `renderPanelFromData()` → the probe (`content/inlinePanel.js:1624`) | identical |
+
+🔑 **THE DIFFERENCE IS NOT IN OUR CODE — IT IS IN WHAT PRECEDES THE `click` EVENT.** Both paths reach
+the probe **synchronously inside the click dispatch**, so both read the sheet at T+0 ms from *the
+click*. But a real click is the **last** of four input events and the browser delivers each in its
+own task: by the time our listener runs, Amazon has had `pointerdown`, `mousedown` and the
+dispatcher's dwell — **measured at +126 ms and +136 ms below** — to render. The auto-open dispatches
+the `click` **alone**, so Amazon gets **zero**: measured at **+0 ms and +1 ms**. The 250 ms settle
+does not help, because it is spent *before* the click, i.e. before Amazon has been told anything.
+
+⚠ **WHAT AMAZON DOES WITH THOSE EARLIER EVENTS IS `[?]` AND IS NOT ASSERTED HERE.** Amazon is React
+and its handlers cannot be enumerated from a content script — the same limit `content/inlinePanel.js`
+already records for the click-zone rule. The proof below therefore drives **both** possibilities
+rather than picking one, and only one of them can produce what Ihor saw.
+
+### 2. What was added
+
+- **`trig` on every event** — `'auto-open'` / `'manual-click'` / `'synthetic-other'` / `'other'`, plus
+  `'unknown'` for every event recorded before today. Decided in the listener
+  (`content/inlinePanel.js:2321-2328`) from **`ev.isTrusted`**, the browser's own bit: `true` only for
+  a real input device, `false` for anything `dispatchEvent()` produced.
+  🔑 **CORROBORATED, NOT INFERRED.** An untrusted click is only called `'auto-open'` when our own
+  dispatch is on the stack — `isAutoOpenClickInFlight()` (`content/detailOpener.js:47`), set on the
+  line before `dispatchEvent` and cleared in a `finally` on the line after. Any other synthetic click
+  is `'synthetic-other'` and is **kept out of the auto-open figures**.
+  ⚠ **THE TRIGGER IS NEVER DERIVED FROM HOW LONG THE READ TOOK.** That is the thing being measured;
+  inferring the trigger from the timing and then explaining the timing by the trigger is circular.
+- **`re1` and `re3`** — the **same** read again at **+1 s** and **+3 s** (`PRICE_PROBE_REREADS`,
+  `utils/priceProbe.js`), each recording its **actual** elapsed ms rather than the nominal one,
+  because a background tab throttles these timers exactly as it throttles the auto-open settle.
+  ⚠ **SCHEDULED EVEN WHEN THE FIRST READ SUCCEEDED**, which is what makes "the read was too early"
+  **falsifiable**: if an early read failed for some other reason, the later ones fail too.
+- **The re-read is a CALLBACK the caller supplies** (`content/inlinePanel.js:1626-1631`), because
+  `utils/priceProbe.js` touches no DOM — it also loads in the popup, which has no sheet to read.
+- ⚠ **A RE-READ THAT WOULD READ ANOTHER LOAD'S SHEET IS `skipped`, NOT FILED.** Three seconds is long
+  enough for the dispatcher to open a different load, so the closure re-checks that our panel still
+  exists, that its card is still attached and that `cardLoadIdFor()` still returns the same id;
+  otherwise it returns `null`. A wrong number filed as evidence is worse than a missing one.
+- ⚠ **EVERY WRITE NOW GOES THROUGH ONE CHAIN** (`mutate()` in `utils/priceProbe.js`). One sheet is now
+  **three** read-modify-write cycles over one key instead of one, and `chrome.storage` has no
+  transaction — overlapping them loses whichever finished first.
+- ⚠ **`pending` IS NOT `never`.** A tab closed inside the 3 seconds, and every pre-EXT-D8 event, has
+  no re-read at all; counting those as "never became readable" would manufacture evidence against the
+  hypothesis.
+
+### 3. The popup
+
+Three new lines split `sheet unreadable` **by trigger**, each printed as `n of m opened` — a bare
+count of unreadable auto-opens says nothing without how many auto-opens there were — then
+`readable at +1s`, `readable at +3s`, `still unreadable at +3s` and `no re-read`, each with the
+auto/mine split in brackets. ⚠ `+1s` and `+3s` are **cumulative over the same pool, not a funnel**.
+
+### 4. ✅ Proved in headless Chrome, and one model is ruled out
+
+`utils/priceProbe.js` **whole and unmodified**, plus `payoutGateFor()` and `sheetPayoutAmounts()`
+**sliced verbatim out of `content/inlinePanel.js` by the harness itself**. The manual click is a
+**real trusted click** (CDP `Input.dispatchMouseEvent`: `mousePressed` → 120 ms dwell →
+`mouseReleased`), so `isTrusted` is genuinely `true` and the input events are genuinely separate
+tasks; the auto-open is the extension's own dispatch. The sheet appears with its route text at once
+and its **price only later**, which is exactly what `sheetPayoutAmounts()` returns `[]` for.
+
+| Amazon model | price lands | manual click | auto-open |
+|---|---|---|---|
+| **M** — sheet starts on `mousedown` | +800 ms | read at **+126 ms** → `sheet-unreadable` | read at **+0 ms** → `sheet-unreadable` |
+| **M** — sheet starts on `mousedown` | +100 ms | read at **+136 ms** → **`match $588.62`** | read at **+0 ms** → `sheet-unreadable` |
+| **C** — sheet starts on the `click` | +800 ms | read at **+0 ms** → `sheet-unreadable` | read at **+1 ms** → `sheet-unreadable` |
+| **C** — sheet starts on the `click` | +100 ms | read at **+1 ms** → `sheet-unreadable` | read at **+0 ms** → `sheet-unreadable` |
+
+**In all eight sheets the +1 s and +3 s re-reads returned `match`** — `match (1007ms)`,
+`match (3005ms)` and so on — **so every `sheet-unreadable` above was unreadable YET, not unreadable.**
+Trigger labelling was correct in all eight (`isTrusted true` → `manual-click`, `false` →
+`auto-open`), every event carried both re-reads, so no patch was lost by the write chain, and
+`logger.error` was never called.
+
+🔑 **ONLY ONE ROW REPRODUCES WHAT IHOR SAW**, the second: **model M with the price landing inside the
+dwell**. It is the only combination in which the manual path matches while the auto-open path cannot.
+Two consequences follow, and neither needed a guess about Amazon:
+- **Model C is ruled out as the explanation.** If Amazon began rendering only on the `click` event,
+  both paths would read at the same offset and his manual clicks would fail as often as the
+  auto-opens. They do not — 18 of 25 matched.
+- **The gap that matters is small.** At +800 ms even a real click fails, so for 18 of 25 manual reads
+  to have matched, Amazon's price must normally land **within roughly the dwell** — and the auto-open
+  misses it by dispatching a lone `click`. `[?]` Whether the earlier events are `pointerdown` or
+  `mousedown`, and whether the price comes from state already held or from a fetch, is still unproven,
+  and is exactly what the live `re1`/`re3` numbers will now settle.
+
+⚠ **THE OBVIOUS FIX IS DELIBERATELY NOT TAKEN YET.** Reading at the click and again a second later,
+and trusting the later value, would change what the gate sees — and the real Fast Book gate reads at
+the **moment of the Book button click**, later still than any of these probes. Which read the gate
+should trust is a decision for the live numbers, not for this step. Nothing here alters a gate.
+
+`node scripts/build-zip.mjs` → all assertions passed, 46 files, `dist/tenlane-relay-1.1.0.zip`.
+
+---
+
 ## EXT-D7 — ✅ 1.1.0, AND THE NAME IS FULLY "Tenlane Relay". THREE EXTERNAL IDENTIFIERS STAY AS THEY ARE
 
 **2026-09-24, Ihor.** Ship the rename as **1.1.0**. The product name was already changed on

@@ -272,6 +272,18 @@
       <div class="popup-stat-line">$15–50 <span id="popup-price-to50" data-testid="popup-price-to50">—</span></div>
       <div class="popup-stat-line">over $50 <span id="popup-price-over50" data-testid="popup-price-over50">—</span></div>
       <div class="popup-stat-line">first / last <span id="popup-price-window" data-testid="popup-price-window">—</span></div>
+      <!-- EXT-D8. Which path opened the sheet, and whether an unreadable sheet was merely read too
+           early: the same sheet is read again at +1 s and +3 s. "recovered" counts sheets that were
+           unreadable on the first read and readable later — if that number is high, the read is
+           early rather than the sheet unreadable. Auto-open and manual are separated because the
+           live 24 % was not spread evenly between them. -->
+      <div class="popup-stat-line">sheet unreadable · auto-open <span id="popup-price-nosheet-auto" data-testid="popup-price-nosheet-auto">—</span></div>
+      <div class="popup-stat-line">sheet unreadable · my click <span id="popup-price-nosheet-manual" data-testid="popup-price-nosheet-manual">—</span></div>
+      <div class="popup-stat-line">sheet unreadable · other <span id="popup-price-nosheet-other" data-testid="popup-price-nosheet-other">—</span></div>
+      <div class="popup-stat-line">readable at +1s <span id="popup-price-at1" data-testid="popup-price-at1">—</span></div>
+      <div class="popup-stat-line">readable at +3s <span id="popup-price-at3" data-testid="popup-price-at3">—</span></div>
+      <div class="popup-stat-line">still unreadable at +3s <span id="popup-price-never" data-testid="popup-price-never">—</span></div>
+      <div class="popup-stat-line">no re-read (closed / pre-D8) <span id="popup-price-pending" data-testid="popup-price-pending">—</span></div>
       <button type="button" id="popup-price-copy" data-testid="popup-price-copy" class="popup-stats-reset">Copy raw events</button>
       <button type="button" id="popup-price-clear" data-testid="popup-price-clear" class="popup-stats-reset">Clear measurement</button>
     </div>

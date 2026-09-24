@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-09-24 — the price probe now names the trigger and re-reads the sheet at +1 s and +3 s (EXT-D8)
+
+**Live result of EXT-D6: 25 sheets, 18 `match`, 1 `differ`, 6 `sheet-unreadable` (24 %)** — and Ihor's
+observation that the unreadable ones are the **auto-opened** loads, while a load he clicks himself
+reads fine. The EXT-D6 event could not test that: it carried no trigger and read the sheet once.
+
+- **`content/inlinePanel.js`**: the one `document` click listener that serves **both** paths (`:2197`
+  — the auto-open works by dispatching a click that bubbles into it) now labels the event from
+  **`ev.isTrusted`**, the browser's own bit, and `showInlinePanel(card, trigger)` carries that label
+  down to the probe (`:1624`). The probe call also hands in a **re-read closure** (`:1626-1631`) that
+  returns `null` rather than reading a sheet that is no longer this load's.
+- **`content/detailOpener.js`**: `_autoOpenClickInFlight` / `isAutoOpenClickInFlight()` (`:47`), set
+  on the line before `dispatchEvent` and cleared in a `finally` after it, so an untrusted click is
+  called `auto-open` only when **our own dispatch is on the stack**. Any other synthetic click is
+  filed as `synthetic-other` and kept out of the comparison.
+- **`utils/priceProbe.js`**: `trig` and `re1` / `re3` on every event; the re-reads run at **+1 s and
+  +3 s** and record their **actual** elapsed ms, because a background tab throttles those timers.
+  `summarise()` gained a per-trigger split and a recovery count. Every write now goes through **one
+  chain** — one sheet is three read-modify-write cycles over one key now, and `chrome.storage` has no
+  transaction.
+- **`popup/popup.html` + `popup/popup.js`**: `sheet unreadable` split by trigger as `n of m opened`,
+  plus `readable at +1s` / `at +3s` / `still unreadable at +3s` / `no re-read`, each with the
+  auto/mine split.
+- ⚠ **Nothing decides anything, again.** `FAST_BOOK_ENABLED` is still `false`
+  (`utils/constants.js:152`), `payoutGateFor()` is byte-for-byte what it was, and all three reads are
+  reads. The fix this suggests — trust a later read — is **not** taken: the real gate reads at the
+  moment of the Book click, later than any of these probes, so which read it should trust is a
+  decision for the live numbers.
+- ⚠ **`pending` is not `never`**, and a `skipped` re-read is not a failed one. A tab closed inside the
+  3 seconds, and every event recorded before today, has no re-read at all.
+
+**Proved in headless Chrome** (CDP, no dependencies) with `utils/priceProbe.js` whole and unmodified
+and `payoutGateFor` / `sheetPayoutAmounts` sliced verbatim out of `content/inlinePanel.js` by the
+harness, against a sheet whose price renders late. The manual click is a **real trusted click**
+(`Input.dispatchMouseEvent`, 120 ms dwell). Measured read offsets: **manual +126 ms / +136 ms,
+auto-open +0 ms / +1 ms** — and with the price landing at +100 ms the manual read is `match $588.62`
+while the auto-open is `sheet-unreadable`. **All seven unreadable sheets read `match` at both +1 s and
++3 s**, so they were unreadable *yet*. A click-only Amazon model was **ruled out**: it makes both paths
+fail alike, which contradicts the live 18-of-25. `node scripts/build-zip.mjs` passes (46 files).
+
 ## 2026-09-24 — version 1.1.0; the "Tenlane Relay" rename verified complete (EXT-D7)
 
 - **`manifest.json`**: `"version": "1.1.0"` (was `1.0.0`). It is declared **in exactly one place** —
