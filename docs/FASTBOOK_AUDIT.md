@@ -18,7 +18,7 @@ not merely of the default settings.
 | Gate | Where | Effect |
 |---|---|---|
 | 1 | `content/inlinePanel.js:853-860` (`buildActionBar`) | the Fast Book button is never **created** — absent, not hidden, so no click listener is ever attached (`:1551` finds no node) |
-| 2 | `popup/popup.js:191-196` | the whole Booking section is **removed** from the popup DOM (`popup/popup.html:206-218`), so the toggle cannot be set |
+| 2 | `popup/popup.js:321-329` | the whole Booking section is **removed** from the popup DOM (`popup/popup.html:206-218`), so the toggle cannot be set |
 | 3 | `content/inlinePanel.js:392-399` (`executeFastBook`, first statement) | refuses at **entry**, above every DOM read, so a direct `__EXT_DEBUG` call cannot reach a click |
 
 Each gate uses a `typeof` guard so a context that failed to load `constants.js` fails **closed**.
@@ -62,8 +62,8 @@ used to make booking structurally impossible was emptied two months before the f
 | 6 | Amazon's sheet is resolved (`SHEET_SELECTOR`); absent → abort `no-sheet` | `content/inlinePanel.js:417-422` |
 | 7 | Amazon's Book button is found: `#rlb-book-btn`, else the first `<button>` in the sheet whose text is exactly "Book"; absent → abort `no-book-button` | `content/inlinePanel.js:425-437` |
 | 8 | `isForbiddenElement(bookBtn)` → abort `forbidden` **(inert: the list is empty — see §6)** | `content/inlinePanel.js:438-442` |
-| 9 | **Identity gate**: the load id the button is bound to must equal the id of the load the board has selected; a missing marker gets its own louder abort | `content/inlinePanel.js:459-518` (`sheetOpenLoadId()` at `:1833`) |
-| 10 | **Payout gate**: the record's payout must match an amount in the open sheet within `PAYOUT_TOLERANCE = 0.01` (`:31`); abstains when it cannot check | `content/inlinePanel.js:524-562` (`payoutGateFor()` at `:1769`) |
+| 9 | **Identity gate**: the load id the button is bound to must equal the id of the load the board has selected; a missing marker gets its own louder abort | `content/inlinePanel.js:459-518` (`sheetOpenLoadId()` at `:1885`) |
+| 10 | **Payout gate**: the record's payout must match an amount in the open sheet within `PAYOUT_TOLERANCE = 0.01` (`:31`); abstains when it cannot check | `content/inlinePanel.js:524-562` (`payoutGateFor()` at `:1821`) |
 | 11 | Rehearsal stop — `dryRun` returns here, above both `.click()` calls | `content/inlinePanel.js:563-572` |
 | 12 | **`bookBtn.click()`** — Amazon's own Book button | `content/inlinePanel.js:575` |
 | 13 | A 100 ms poll, 5 000 ms ceiling, looks for `#rlb-book-trip-confirm-booking-btn` document-wide, falling back to a `<button>` inside the **sheet** whose text is "Book" / "Confirm" / "Confirm booking" | `content/inlinePanel.js:594-617` |

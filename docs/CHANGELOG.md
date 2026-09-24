@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-09-24 — docs: SAFETY.md now tells the truth about the empty selector list; the $583.90 question is answered
+
+Documentation only. **No code changed, `FORBIDDEN_SELECTORS` was NOT touched, and no selector was
+added or removed.**
+
+- **`docs/SAFETY.md`**: the file printed an **empty** `FORBIDDEN_SELECTORS` block directly above
+  "**NEVER modify or remove these selectors**", which read as a list someone had lost. It now states
+  that the list is **empty by decision** — commit `e40c26e` (2026-07-20) removed `#rlb-book-btn`,
+  `#rlb-book-trip-confirm-booking-btn` and `#book-btn-row` **in the same commit that added the
+  `FAST_BOOK` click intent**, because Fast Book's two clicks target exactly those ids (verified in the
+  commit diff, not taken on trust) — and that **D30 closed it: do not restore them, do not raise it as
+  a risk again.** `docs/FASTBOOK_AUDIT.md` §7 risk 1 still recommends restoring them and is now marked
+  as **predating D30 (2026-09-20) and superseded as a standing request**.
+- It also now says plainly that `isForbiddenElement()` is **called but cannot refuse** — an empty array
+  makes `.some()` vacuously false (`utils/constants.js:6`) — lists the **nine** call sites at their
+  current lines, and names what actually protects booking: `FAST_BOOK_ENABLED === false`
+  (`utils/constants.js:152`) behind three gates, then the **identity gate**
+  (`content/inlinePanel.js:459-519`, `sheetOpenLoadId()` at `:1885`) and the **payout gate**
+  (`:524-562`, `payoutGateFor()` at `:1821`, `PAYOUT_TOLERANCE` at `:31`). Every line re-read against
+  the source rather than copied forward; three stale citations in `docs/FASTBOOK_AUDIT.md` were
+  corrected the same way.
+  ⚠ The payout gate's **abstain** behaviour is stated as the 🔴 it is: no record, no payout on the
+  record, or nothing readable in the sheet all **continue to the click**, and 24 % of live sheets were
+  unreadable (EXT-D6/EXT-D8).
+- ⚠ **The one condition is recorded where it will be seen**: this all holds because `FAST_BOOK_ENABLED`
+  is `false`, so **D30 must be revisited by Ihor before that flag is ever flipped**, not alongside it.
+- **`docs/AI_CHAT_CAPTURE.md` §8** (new): every payout value for load 3 (KILN Wilmington OH → DCL5
+  Toledo OH) in `samples/ai-chat.har`, with entry index and time. **The 588.62-vs-$583.90 difference is
+  a real price change, not a chat artefact**: Amazon raised that load's `Base Rate` by exactly
+  $4.7190369583 and incremented `version` 35 → 36 between 21:56:48 (entry 18) and 21:57:15 (entry 36),
+  while `Fuel Surcharge`, distance, duration, stop count, equipment and load type stayed identical. The
+  next ordinary board refresh (entry 46, 21:57:38) returns 588.62 too, and the assistant's "$589" is
+  588.6224 rounded — so the chat showed the board's *next* number first, 27 s early.
+- ⚠ **That is directly relevant to the payout gate**: our own sender shipped 583.90 at 21:56:55 (entry
+  27) and 588.62 at 21:57:41 (entry 49), so between those moments a stored record and Amazon's sheet
+  legitimately disagree by **$4.72** — the probe's own "up to $5" bucket. **A `differ` verdict is not
+  automatically a bug in the read.**
+- ⚠ `[?]` **`workOpportunityVersion` in the request did not pin the answer**: entries 36 and 41 both
+  sent version 35 and both got version 36 back. Whether a *booking* would refuse a stale version is not
+  in this capture and must not be assumed from it.
+- Load ids appear only as `first-4***`; the HAR itself stays uncommitted (`.gitignore` covers
+  `samples/`). No request was sent to Amazon and Relay was not opened.
+
 ## 2026-09-24 — the price probe now names the trigger and re-reads the sheet at +1 s and +3 s (EXT-D8)
 
 **Live result of EXT-D6: 25 sheets, 18 `match`, 1 `differ`, 6 `sheet-unreadable` (24 %)** — and Ihor's

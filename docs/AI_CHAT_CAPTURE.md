@@ -69,10 +69,12 @@ Proof that the binding is *honoured* server-side: each response echoes a `workOp
 whose `id` equals the id sent, with that load's own payout — `624.1434…` (entries 5, 10),
 `1840.7455…` (21, 28), `588.6224…` (36, 41).
 
-⚠ **[?] One figure does not match the brief:** load 3 is described as `$583.90`, and the capture's
-`workOpportunity.payout` for it is **588.62** (entries 36, 41), with the assistant saying "$589".
-Loads 1 and 2 match exactly (624.14, 1840.75). Not explained by the HAR — a different option or
-version, or the price moved between the board render and the chat.
+✅ **The one figure that did not match the brief is now explained — see §8.** Load 3 is described as
+`$583.90` while the capture's `workOpportunity.payout` for it is **588.62** (entries 36, 41), with the
+assistant saying "$589". Loads 1 and 2 match exactly (624.14, 1840.75). **Amazon raised that load's
+`Base Rate` by $4.7190369583 and incremented its `version` 35 → 36 between 21:56:48 and 21:57:15**;
+the next ordinary board refresh (entry 46, 21:57:38) returns 588.62 too. The screenshot is version 35
+and the chat is version 36 — 27 seconds apart, both correct. No markup is involved.
 
 ---
 
@@ -200,6 +202,91 @@ both:**
 
 That one session answers both the "why" and the "how to trigger it" — and it needs no booking, no
 `Book` button and no clicking of anything on our side.
+
+---
+
+## 8. The $583.90 / 588.62 question on load 3 — ✅ ANSWERED FROM THE CAPTURE ALONE
+
+**The load:** `KILN` in Wilmington, OH → `DCL5` in Toledo, OH, `9a92***` (36 chars),
+`majorVersion: 2`, `workOpportunityOptionId: "1"`, 2 stops, 186.52 mi, 20 040 000 ms,
+`FIFTY_THREE_FOOT_TRUCK`, `LOADED`. Identified by its own id, not by its route, and the route is then
+confirmed by the assistant's own sentence (entry 41, quoted below).
+
+> ⚠ **PRIVACY.** The load id appears only as `9a92***`. The `x-csrf-token` was not read for this
+> analysis; no cookie or authorization value exists in the HAR to read. The HAR is not committed
+> (`.gitignore:8` covers `samples/`).
+
+### Every payout value for that load in the capture, in time order
+
+| # | HAR clock (UTC) | where | field | value | `version` |
+|---|---|---|---|---|---|
+| **18** | 21:56:48.215 | `POST /api/loadboard/search` (50 rows, row **[9]**) | `workOpportunities[9].payout.value` | **583.9034164677198** | **35** |
+| 18 | 21:56:48.215 | ″ | `loads[0].payout.value` | 583.9034164677198 | 35 |
+| 18 | 21:56:48.215 | ″ | `loads[0].costItems[0]` *Fuel Surcharge* | 162.2751839432276 | 35 |
+| 18 | 21:56:48.215 | ″ | `loads[0].costItems[1]` *Base Rate* | **421.6282325244922** | 35 |
+| **27** | 21:56:55.986 | `POST …supabase.co/rest/v1/rpc/ingest_loads` — **our own sender** | request body | contains **583.9034** | — |
+| **36** | 21:57:15.154 | `POST …/demand-support/query` (`start_new_conversation`) | `workOpportunity.payout.value` | **588.6224534260689** | **36** |
+| 36 | 21:57:15.154 | ″ | `loads[0].costItems[0]` *Fuel Surcharge* | 162.2751839432276 | 36 |
+| 36 | 21:57:15.154 | ″ | `loads[0].costItems[1]` *Base Rate* | **426.3472694828412** | 36 |
+| **41** | 21:57:23.843 | `POST …/demand-support/query` (`query: "hi chat 3"`) | `workOpportunity.payout.value` | **588.6224534260689** | **36** |
+| 41 | 21:57:23.843 | ″ | the assistant's **prose** | **"$589"** | 36 |
+| **46** | 21:57:38.180 | `POST /api/loadboard/search` (50 rows, row **[9]**) | `workOpportunities[9].payout.value` | **588.6224534260689** | **36** |
+| **49** | 21:57:41.023 | `POST …/rpc/ingest_loads` — **our own sender** | request body | contains **588.6224** | — |
+
+Entries **35** (`chat-history`) and **17 / 19 / 45 / 47** also concern this minute but carry no payout
+for this load: `chat-history` responses are 163 bytes and contain no `workOpportunity`, the 5-row
+`search` calls and both `recommendations/get` calls (20 rows) do not include this id at all.
+
+### The difference is a real price change, not a chat artefact
+
+```
+              version 35 (21:56:48)      version 36 (21:57:15)        diff
+payout          583.9034164677198          588.6224534260689       +4.7190369583
+Fuel Surcharge  162.2751839432276          162.2751839432276        0.0000000000
+Base Rate       421.6282325244922          426.3472694828412       +4.7190369583
+distance        186.52319993474435         186.52319993474435       unchanged
+duration        20040000                   20040000                 unchanged
+rounded         $583.90                    $588.62
+```
+
+🔑 **THE WHOLE DIFFERENCE IS ONE COST ITEM.** `Base Rate` rose by **$4.7190369583**, to the tenth
+decimal the same as the payout's rise; `Fuel Surcharge`, distance, duration, stop count, equipment and
+load type are **byte-identical** across all four entries. Amazon also **incremented `version` 35 → 36**
+across the same boundary — the field exists precisely to say "this offer is not the one you were
+looking at".
+
+🔑 **THE BOARD ITSELF AGREES 23 SECONDS LATER.** Entry 46, an ordinary board refresh at 21:57:38,
+returns **588.6224534260689 at version 36** for the same row `[9]`. So the chat was not showing a
+different number from the board; it was showing the board's **next** number first, because it was
+called 27 s later than the search Ihor's screenshot came from.
+
+**Therefore: Ihor's screenshot ($583.90) is version 35, and the chat (588.62, spoken as "$589") is
+version 36.** Both are correct, 27 seconds apart. Nothing in the capture supports a chat-side markup:
+the two versions differ by a single named cost component, and `583.9034` appears **nowhere** after
+21:56:55 while `588.6224` appears **nowhere** before 21:57:15.
+
+### Three things this settles for our own code
+
+- ⚠ **OUR CAPTURE TRACKED IT, WHICH IS WHY IT MATTERS.** Our sender shipped `583.9034` at 21:56:55
+  (entry 27) and `588.6224` at 21:57:41 (entry 49) — the same change, 45 s apart. Between those two
+  moments, a stored record and Amazon's open sheet legitimately disagree by **$4.72**, which lands in
+  the payout probe's own **"up to $5"** bucket (`utils/priceProbe.js`, EXT-D6). **A `differ` verdict is
+  therefore not necessarily a bug in the read** — Amazon's price does move, by single-digit dollars,
+  inside a minute. Ihor's live run recorded exactly **one** `differ`; this is what one can look like.
+- ⚠ **`workOpportunityVersion` IN THE REQUEST DID NOT PIN THE ANSWER.** Entries 36 and 41 both **sent**
+  `workOpportunityVersion: 35` (the page's stale value) and both got **version 36** back. So the field
+  is not a "give me this version" parameter; the server answers with whatever is current. `[?]` Whether
+  it is validated at all — e.g. whether a *booking* would refuse a stale version — is not in this
+  capture and must not be assumed from it.
+- ⚠ **"$589" IS THE ASSISTANT ROUNDING, NOT A THIRD NUMBER.** Entry 41's text reads:
+  *"It picks up tomorrow at midnight from KILN in Wilmington, OH and delivers to DCL5 in Toledo, OH for
+  $589."* `588.6224…` to the nearest dollar. No other money figure appears in that response's prose.
+
+**Method (read-only).** `samples/ai-chat.har` parsed in node; for every entry whose request **or**
+response body contains the load id, every key matching `payout|rate|monetaryAmount|price` inside
+**that load's own subtree** was printed with its JSON path, plus a whole-capture scan for
+`583[.,]?9`. No request was sent to Amazon, Relay was not opened, and nothing in the extension was
+changed by this analysis.
 
 ---
 

@@ -5,22 +5,101 @@
 This extension interacts with a live commercial booking system. The following rules are non-negotiable and apply to every feature in the backlog:
 
 - The extension CAN execute a booking sequence ONLY when the dispatcher explicitly clicks the custom 'Fast Book' UI toggle/button.
-- **`isForbiddenElement()` is called before every `.click()` on Amazon's DOM.**
+- **`isForbiddenElement()` is called before every `.click()` on Amazon's DOM.** ⚠ **It is CALLED, but
+  it cannot currently REFUSE: `FORBIDDEN_SELECTORS` is deliberately empty** (`utils/constants.js:1-2`),
+  so every such check passes. What actually protects booking today is `FAST_BOOK_ENABLED === false`
+  plus the identity and payout gates — see the next section, which states exactly what each one does.
 - None of the planned features (Night Mode, Tab Alert, Sound, Price Surge, Hide filters, Card Action Bar) add any new click site or touch booking.
 
 Separately, `content/sidebar.js` has one click site on our own extension-owned UI (`ext-memory-indicator`, a manual dispatcher-triggered `location.reload()`). It is not Amazon DOM, carries no booking risk, and is intentionally **not** part of the "three click sites" list below — see "Allowed click sites" for the rationale.
 
 ---
 
-## FORBIDDEN_SELECTORS (utils/constants.js)
+## FORBIDDEN_SELECTORS (utils/constants.js:1-2) — ⚠ EMPTY, ON PURPOSE
 
+```js
+const FORBIDDEN_SELECTORS = [
+];
 ```
 
+🔑 **THE LIST IS EMPTY BY DECISION, NOT BY ACCIDENT, AND IT MUST STAY THAT WAY UNTIL SOMEONE DECIDES
+OTHERWISE.** It held exactly three selectors — `#rlb-book-btn`,
+`#rlb-book-trip-confirm-booking-btn` and `#book-btn-row` — and commit **`e40c26e`** (2026-07-20)
+removed all three **in the same commit that added the `FAST_BOOK` click intent**
+(`utils/constants.js` `ALLOWED_CLICK_INTENTS`). That is the whole reason: **Fast Book's two clicks
+target precisely those ids**, so a guard that blocks them blocks the feature. See
+`docs/FASTBOOK_AUDIT.md` §7 risk 1 and `tenlane-network/docs/DECISIONS.md` **D30**
+("`FORBIDDEN_SELECTORS` is EMPTY ON PURPOSE", Ihor's closing decision).
+
+⚠ **SO `isForbiddenElement()` CANNOT CURRENTLY BLOCK ANYTHING.** It is still **called** before every
+`.click()` on Amazon's DOM — the call sites are real and are listed below — but with an empty list
+`FORBIDDEN_SELECTORS.some(...)` (`utils/constants.js:6`) is `false` for every element, so **every one
+of those checks passes unconditionally**. Reading the gate list below as "and the selector guard
+would have caught it" is wrong today. The checks are kept because they are the enforcement point that
+a restored list switches back on with no code change.
+
+The **nine** call sites, re-read on 2026-09-24 (D30 recorded the same nine at their then-current
+lines; the code has moved since, the count has not):
+
+```
+content/detailOpener.js:227   content/detailOpener.js:357     (open-card gates)
+content/inlinePanel.js:438    content/inlinePanel.js:621      (executeFastBook — Book / Confirm)
+content/inlinePanel.js:2246                                   (the card-click listener)
+content/panelCloser.js:119    content/panelCloser.js:152
+content/refreshManager.js:65  content/refreshManager.js:94    (the refresh click)
 ```
 
-`isForbiddenElement(el)` returns true if `el` or any ancestor matches any of these selectors. Called before **every** `.click()`.
+⚠ **WHAT THIS DOES *NOT* MEAN.** It does not mean the extension can book: **`FAST_BOOK_ENABLED` is
+`false`** (`utils/constants.js:152`) behind three independent gates, so no booking click exists in a
+shipped build at all —
 
-**NEVER modify or remove these selectors.**
+| | where | effect |
+|---|---|---|
+| Gate 1 | `content/inlinePanel.js:853-860` (`buildActionBar`) | the Fast Book button is never **created** — absent, not hidden, so no listener is attached |
+| Gate 2 | `popup/popup.js:321-329` | the whole Booking section is **removed** from the popup DOM |
+| Gate 3 | `content/inlinePanel.js:392-399` (`executeFastBook`, first statement) | refuses at **entry**, above every DOM read |
+
+Each uses a `typeof` guard, so a context that failed to load `constants.js` fails **closed**.
+
+### What actually stands between a Fast Book press and a booking
+
+Verified against the source on 2026-09-24, not copied forward:
+
+1. **The identity gate — `content/inlinePanel.js:459-519`** (`sheetOpenLoadId()` at `:1885`). The
+   load id the button is bound to must equal the id of the load **the board has selected**, by strict
+   string equality with no normalising. ✅ **It fails CLOSED three ways**: the ids differ, the bound id
+   is missing, or the sheet id is missing — an absent id never compares equal and is never treated as
+   "probably fine". A missing `.load-card__selected` marker gets its own louder abort
+   (`no-selected-card`), because "Amazon changed a class" and "these are two different loads" are
+   different problems. Returns `abort-identity`.
+2. **The payout gate — `content/inlinePanel.js:524-562`** (`payoutGateFor()` at `:1821`,
+   `PAYOUT_TOLERANCE = 0.01` at `:31`). The record's payout must appear among the amounts parsed out
+   of Amazon's open sheet. Returns `abort-payout` on a positive contradiction.
+   🔴 **BUT IT ABSTAINS RATHER THAN BLOCKING WHEN IT CANNOT READ EITHER NUMBER** (`:552-562`): no
+   record, no payout on the record, or no amount readable in the sheet all **continue to the click**.
+   So "the price is re-checked before booking" is true only when both numbers happen to be readable.
+   Measured live over 25 sheets (EXT-D6/EXT-D8): **6 were unreadable — 24 %**. Inverting that rule is
+   an open decision, which is what `utils/priceProbe.js` is measuring for.
+
+⚠ **THEREFORE, IF FAST BOOK IS EVER RE-ENABLED, THESE TWO GATES ARE THE *ONLY* THING PROTECTING THE
+BOOKING CLICKS** — there is no selector-level protection behind them while the list is empty.
+
+🔴 **DO NOT "FIX" THIS, AND DO NOT RAISE IT AS A RISK AGAIN.** D30 closed it: the selectors are **not**
+to be restored, and the changelog history of the array being built up in Stage 1 / Stage 8-pre is
+**not** a reason to put them back. A reader who finds the empty array and that history together is
+looking at this decision, not at a defect someone forgot to fix. `docs/FASTBOOK_AUDIT.md` §7 risk 1
+still recommends restoring them; **it predates D30 (2026-09-20) and is superseded as a standing
+request** — it is kept there as the audit's record of the exposure, not as a task.
+
+⚠ **THE ONE CONDITION ON ALL OF THE ABOVE.** This decision holds *because* `FAST_BOOK_ENABLED` is
+`false`. **If it is ever flipped to `true`, D30 must be revisited by Ihor FIRST — before the flip, not
+alongside it**, because with the flag on those nine `isForbiddenElement()` sites are the layer
+underneath. `utils/constants.js:148-151` already requires the manifest description to change in that
+same commit; this belongs on the same checklist.
+
+**Never add a selector here, or remove one, without a DECISIONS entry.** An empty list is load-bearing
+for Fast Book, and a restored list is load-bearing for every other click. Both directions are Ihor's
+decision, not a cleanup.
 
 ---
 
