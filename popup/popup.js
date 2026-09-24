@@ -15,7 +15,6 @@
 // verified key-by-key against STORAGE_KEYS before the swap; the local aliases are kept
 // purely so the ~60 usages below stay untouched.
 var KEY_NIGHT_MODE         = STORAGE_KEYS.NIGHT_MODE;
-var KEY_TAB_ALERT          = STORAGE_KEYS.TAB_ALERT;
 var KEY_AUTO_OPEN          = STORAGE_KEYS.AUTO_OPEN;          // true-default
 var KEY_HIDE_SIMILAR       = STORAGE_KEYS.HIDE_SIMILAR;
 var KEY_VOLUME             = STORAGE_KEYS.VOLUME;             // 0–100, default 70
@@ -165,13 +164,89 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  /*
+   * 🔑 THE PRICE-READ MEASUREMENT (EXT-D6). Rendered the moment the popup opens — no button to
+   * press first, because a measurement nobody can see in one click is a measurement nobody reads.
+   * The buckets and the classification come from utils/priceProbe.js, the same file the content
+   * script writes through, so the popup cannot disagree with what was recorded.
+   *
+   * ⚠ IT DECIDES NOTHING. Fast Book stays off; this block only displays what the passive probe
+   * filed while the dispatcher worked.
+   */
+  var PRICE_FIELDS = [
+    ['popup-price-total',  function (s) { return String(s.total); }],
+    ['popup-price-match',  function (s) { return s.results.match + ' (' + s.pct.match + '%)'; }],
+    ['popup-price-differ', function (s) { return s.results.differ + ' (' + s.pct.differ + '%)'; }],
+    ['popup-price-norec',  function (s) { return s.results['record-unreadable'] + ' (' + s.pct['record-unreadable'] + '%)'; }],
+    ['popup-price-nosheet',function (s) { return s.results['sheet-unreadable'] + ' (' + s.pct['sheet-unreadable'] + '%)'; }],
+    // ⚠ $0 has no direction, so it prints as one number; every other bucket prints both, because
+    // "Amazon wants more than we recorded" and "less" are different risks.
+    ['popup-price-eq0',    function (s) { return String(s.buckets.eq0.higher + s.buckets.eq0.lower); }],
+    ['popup-price-to5',    function (s) { return dirLine(s.buckets.to5); }],
+    ['popup-price-to15',   function (s) { return dirLine(s.buckets.to15); }],
+    ['popup-price-to50',   function (s) { return dirLine(s.buckets.to50); }],
+    ['popup-price-over50', function (s) { return dirLine(s.buckets.over50); }],
+    ['popup-price-window', function (s) { return s.total ? (shortTs(s.first) + ' → ' + shortTs(s.last)) : '—'; }]
+  ];
+
+  function dirLine(b) { return (b.higher + b.lower) + ' (higher ' + b.higher + ', lower ' + b.lower + ')'; }
+  function shortTs(iso) { return iso ? String(iso).slice(5, 16).replace('T', ' ') : '—'; }
+
+  function renderPriceStats(list) {
+    if (typeof priceProbe === 'undefined') return;
+    var sum = priceProbe.summarise(list);
+    for (var i = 0; i < PRICE_FIELDS.length; i++) {
+      var el = document.getElementById(PRICE_FIELDS[i][0]);
+      if (!el) continue;
+      try {
+        el.textContent = PRICE_FIELDS[i][1](sum);
+      } catch (e) {
+        el.textContent = '—';
+      }
+    }
+  }
+
+  if (typeof priceProbe !== 'undefined') {
+    priceProbe.read(function (list) { renderPriceStats(list); });
+
+    var priceCopyBtn = document.getElementById('popup-price-copy');
+    if (priceCopyBtn) {
+      priceCopyBtn.addEventListener('click', function () {
+        priceProbe.read(function (list) {
+          var text = JSON.stringify({
+            exportedAt: new Date().toISOString(),
+            version: (chrome.runtime && chrome.runtime.getManifest) ? chrome.runtime.getManifest().version : null,
+            summary: priceProbe.summarise(list),
+            events: list
+          }, null, 2);
+          // clipboardWrite is already granted in manifest.json (the card screenshot uses it).
+          navigator.clipboard.writeText(text).then(function () {
+            priceCopyBtn.textContent = 'Copied ' + list.length + ' events';
+            logger.log('popup', 'price probe events copied', { events: list.length });
+          }).catch(function (e) {
+            priceCopyBtn.textContent = 'Copy failed — see console';
+            logger.error('popup', 'price probe copy failed', { error: e });
+          });
+        });
+      });
+    }
+
+    var priceClearBtn = document.getElementById('popup-price-clear');
+    if (priceClearBtn) {
+      priceClearBtn.addEventListener('click', function () {
+        // ⚠ CLEARS THE MEASUREMENT ONLY — like "Reset counters" above, and for the same reason the
+        // key sits outside STORAGE_KEYS: the footer's "Reset to defaults" must not wipe evidence.
+        priceProbe.clear(function () { renderPriceStats([]); });
+      });
+    }
+  }
+
   var versionEl = document.getElementById('popup-version');
   if (versionEl && chrome.runtime && chrome.runtime.getManifest) {
     versionEl.textContent = 'v' + chrome.runtime.getManifest().version;
   }
 
   var nightToggle        = document.getElementById('popup-night-mode');
-  var tabToggle          = document.getElementById('popup-tab-alert');
   var autoOpenToggle     = document.getElementById('popup-auto-open');
   var similarToggle      = document.getElementById('popup-hide-similar');
   var volumeSlider       = document.getElementById('popup-volume');
@@ -544,7 +619,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // ── Read all settings from storage and initialise the UI ──────────────────
   chrome.storage.local.get(
     [
-      KEY_NIGHT_MODE, KEY_TAB_ALERT, KEY_AUTO_OPEN, KEY_HIDE_SIMILAR,
+      KEY_NIGHT_MODE, KEY_AUTO_OPEN, KEY_HIDE_SIMILAR,
       KEY_VOLUME, KEY_SOUND_ID,
       KEY_HIDE_PROMOTED, KEY_HIDE_STARTING_SOON, KEY_HIDE_TRAILER_READY, KEY_HIDE_PAST_BOOK,
       KEY_SURGE_ENABLED, KEY_SURGE_THRESHOLD, KEY_FAST_BOOK_ENABLED, KEY_SHARED_LIMIT,
@@ -553,7 +628,6 @@ document.addEventListener('DOMContentLoaded', function () {
     function (data) {
       if (nightToggle)        nightToggle.checked        = data[KEY_NIGHT_MODE] === true;
       document.documentElement.classList.toggle('ext-night', data[KEY_NIGHT_MODE] === true);
-      if (tabToggle)          tabToggle.checked          = data[KEY_TAB_ALERT] === true;
       if (autoOpenToggle)     autoOpenToggle.checked     = data[KEY_AUTO_OPEN] !== false; // true-default
       if (similarToggle)      similarToggle.checked      = data[KEY_HIDE_SIMILAR] === true;
       if (volumeSlider)       volumeSlider.value         = (data[KEY_VOLUME] !== undefined) ? data[KEY_VOLUME] : 70;
@@ -580,12 +654,6 @@ document.addEventListener('DOMContentLoaded', function () {
   if (nightToggle) {
     nightToggle.addEventListener('change', function () {
       chrome.storage.local.set({ [KEY_NIGHT_MODE]: nightToggle.checked });
-    });
-  }
-
-  if (tabToggle) {
-    tabToggle.addEventListener('change', function () {
-      chrome.storage.local.set({ [KEY_TAB_ALERT]: tabToggle.checked });
     });
   }
 
@@ -717,7 +785,6 @@ document.addEventListener('DOMContentLoaded', function () {
       chrome.storage.local.remove(keys, function () {
         logger.log('popup', 'extension storage cleared', { keys: keys });
         if (nightToggle)        nightToggle.checked        = false;
-        if (tabToggle)          tabToggle.checked          = false;
         if (autoOpenToggle)     autoOpenToggle.checked     = true; // true-default
         if (similarToggle)      similarToggle.checked      = false;
         if (volumeSlider)       volumeSlider.value         = 70;
@@ -739,6 +806,9 @@ document.addEventListener('DOMContentLoaded', function () {
   chrome.storage.onChanged.addListener(function (changes, area) {
   // The sender writes its counters while the popup is open; follow them rather than showing a
   // snapshot that is already stale by the time anyone reads it.
+  if (area === 'local' && changes[PRICE_PROBE_KEY] && typeof renderPriceStats === 'function') {
+    renderPriceStats(changes[PRICE_PROBE_KEY].newValue);
+  }
   if (area === 'local' && changes[LOAD_SENDER_STATS_KEY]) {
     renderSenderStats(changes[LOAD_SENDER_STATS_KEY].newValue);
   }
@@ -748,7 +818,6 @@ document.addEventListener('DOMContentLoaded', function () {
       document.documentElement.classList.toggle('ext-night', nightOn);
       if (nightToggle) nightToggle.checked = nightOn;
     }
-    if (changes[KEY_TAB_ALERT]          !== undefined && tabToggle)          tabToggle.checked          = changes[KEY_TAB_ALERT].newValue === true;
     if (changes[KEY_AUTO_OPEN]          !== undefined && autoOpenToggle)     autoOpenToggle.checked     = changes[KEY_AUTO_OPEN].newValue !== false;
     if (changes[KEY_HIDE_SIMILAR]       !== undefined && similarToggle)      similarToggle.checked      = changes[KEY_HIDE_SIMILAR].newValue === true;
     if (changes[KEY_VOLUME]   !== undefined && volumeSlider)  volumeSlider.value = (changes[KEY_VOLUME].newValue   !== undefined) ? changes[KEY_VOLUME].newValue   : 70;

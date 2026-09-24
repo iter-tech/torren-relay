@@ -79,13 +79,11 @@
       </label>
     </div>
 
-    <div class="popup-row">
-      <label class="popup-label" for="popup-tab-alert">Tab Alert</label>
-      <label class="toggle-switch">
-        <input type="checkbox" id="popup-tab-alert" data-testid="popup-tab-alert">
-        <span class="toggle-track"></span>
-      </label>
-    </div>
+    <!--
+      "Tab Alert" was here. REMOVED 2026-09-24 (EXT-D5): the tab indicator is always on, so the
+      toggle controlled nothing. It is not a hidden setting — there is no stored value left that
+      any code reads.
+    -->
 
     <div class="popup-row">
       <label class="popup-label" for="popup-auto-open">Auto-Open Top Load</label>
@@ -255,6 +253,31 @@
 
     <div class="popup-divider"></div>
 
+    <!-- 🔑 HOW RELIABLE IS THE PRICE READ (EXT-D6). Filled on open by popup.js from
+         chrome.storage.local — no console, no board tab needed. It measures; it decides nothing:
+         Fast Book is still off, and this block exists so the "must not book when the price cannot
+         be read" rule can be set from evidence rather than a guess. Same plain-text treatment as
+         the sender counters above, and every result is printed even at zero. -->
+    <div class="popup-section-title">Price check (measurement)</div>
+
+    <div class="popup-sender-stats" id="popup-price-stats" data-testid="popup-price-stats">
+      <div class="popup-stat-line">sheets opened <span id="popup-price-total" data-testid="popup-price-total">—</span></div>
+      <div class="popup-stat-line">price matched <span id="popup-price-match" data-testid="popup-price-match">—</span></div>
+      <div class="popup-stat-line">price differed <span id="popup-price-differ" data-testid="popup-price-differ">—</span></div>
+      <div class="popup-stat-line">record unreadable <span id="popup-price-norec" data-testid="popup-price-norec">—</span></div>
+      <div class="popup-stat-line">sheet unreadable <span id="popup-price-nosheet" data-testid="popup-price-nosheet">—</span></div>
+      <div class="popup-stat-line">$0 <span id="popup-price-eq0" data-testid="popup-price-eq0">—</span></div>
+      <div class="popup-stat-line">up to $5 <span id="popup-price-to5" data-testid="popup-price-to5">—</span></div>
+      <div class="popup-stat-line">$5–15 <span id="popup-price-to15" data-testid="popup-price-to15">—</span></div>
+      <div class="popup-stat-line">$15–50 <span id="popup-price-to50" data-testid="popup-price-to50">—</span></div>
+      <div class="popup-stat-line">over $50 <span id="popup-price-over50" data-testid="popup-price-over50">—</span></div>
+      <div class="popup-stat-line">first / last <span id="popup-price-window" data-testid="popup-price-window">—</span></div>
+      <button type="button" id="popup-price-copy" data-testid="popup-price-copy" class="popup-stats-reset">Copy raw events</button>
+      <button type="button" id="popup-price-clear" data-testid="popup-price-clear" class="popup-stats-reset">Clear measurement</button>
+    </div>
+
+    <div class="popup-divider"></div>
+
     <div class="popup-footer">
       <button type="button" id="popup-reset" data-testid="popup-reset" class="popup-reset">Reset to defaults</button>
     </div>
@@ -265,6 +288,9 @@
   <script src="../utils/constants.js"></script>
   <script src="../utils/logger.js"></script>
   <script src="../utils/storage.js"></script>
+  <!-- Reads and summarises the price-read measurement (EXT-D6). Same file the content scripts
+       write through, so the buckets have exactly one definition. -->
+  <script src="../utils/priceProbe.js"></script>
   <script src="../utils/soundDefs.js"></script>
   <script src="../vendor/supabase.min.js"></script>
   <script src="../utils/supabaseConfig.js"></script>

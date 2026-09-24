@@ -3,6 +3,10 @@ const STORAGE_KEYS = {
   RUNNING:            'isRunning',            // legacy — no longer written (moved to tabState); kept so Reset cleans old installs
   AUTO_OPEN:          'autoOpenTopNew',
   NIGHT_MODE:         'nightMode',
+  // The "Tab Alert" toggle — legacy as of 2026-09-24 (EXT-D5). NOTHING reads or writes it any
+  // more: the tab indicator is always on, so the switch controlled nothing and its popup control
+  // is gone. ⚠ The KEY stays listed on purpose, exactly as SPEED and RUNNING above do, so "Reset
+  // to Defaults" still clears the value sitting in existing installs.
   TAB_ALERT:          'tabAlert',
   HIDE_SIMILAR:       'hideSimilarMatches',
   VOLUME:             'soundVolume',

@@ -1,5 +1,149 @@
 # Changelog
 
+## 2026-09-24 — version 1.1.0; the "Tenlane Relay" rename verified complete (EXT-D7)
+
+- **`manifest.json`**: `"version": "1.1.0"` (was `1.0.0`). It is declared **in exactly one place** —
+  `EXT_VERSION` (`utils/constants.js:32`), the popup (EXT-D1) and the archive name all derive from
+  the manifest, so the build now produces `dist/tenlane-relay-1.1.0.zip` with nothing else to edit.
+  The two `1.0.0` strings left in comments record the drift EXT-D1 fixed and stay as written.
+- **The name needed no code change — verified rather than assumed.** The rename shipped on
+  2026-09-07 (`docs/RENAME.md`). A case-insensitive search now finds **zero** "Torren" in `*.js`,
+  `*.json`, `*.html`, `*.css`; every user-visible surface reads **Tenlane Relay**: `manifest.json:3`,
+  `:117`, `utils/constants.js:25`, `:270`, `content/cityAssign.js:1273/1391/2205/3573`,
+  `content/sidebar.js:444`, `popup/popup.html:6/13/28`. No `short_name` key exists, so nothing
+  shortened can drift. `icons/icon128.png` is a "T" glyph with no wordmark — looked at, not assumed;
+  no icon file touched.
+- **Nothing internal was renamed, because nothing internal carries the brand.** Storage keys,
+  message types, `data-testid` values, CSS names and Supabase identifiers were searched for
+  `torren`: zero matches, as in 2026-09-07. A stored key is a contract with the installed base, so
+  even if one had carried it, it would have stayed.
+- **45 mentions of "torren" remain, all in Markdown, all external identifiers that exist at that
+  spelling** — the live privacy-policy URL `https://iter-tech.github.io/torren-relay/` (the path is
+  the GitHub repo name), the repo itself, and the reviewer mailbox `torrenrelayreview@proton.me` —
+  plus `docs/RENAME.md` and one verbatim commit-message quote in `docs/FASTBOOK_AUDIT.md:39`.
+  Editing any of them would cite a page or an account that does not exist.
+- **No URL was changed and no domain invented.** There is still no production domain. What will need
+  it: `manifest.json:105-110` (the `siteBridge` matches, currently `localhost:3000` / `127.0.0.1:3000`
+  — the only place the site origin is pinned) and a `externally_connectable` key, which does not
+  exist today. `utils/supabaseConfig.js:4` is the backend and is unrelated to the name.
+- ⚠ **Still open before submitting 1.1.0:** the *deployed* privacy-policy page still read "Torren
+  Relay" at its last check, while this repo's `docs/index.html` says "Tenlane Relay". Deploy it, or
+  a reviewer comparing listing and policy sees two products.
+
+Build: `node scripts/build-zip.mjs` → all assertions passed, 46 files, `dist/tenlane-relay-1.1.0.zip`.
+`FAST_BOOK_ENABLED` is still `false`; no booking path changed.
+
+## 2026-09-24 — how reliable is the price read? Now measured, passively (EXT-D6)
+
+Fast Book is to become **one click** and must **refuse to book when the price cannot be read**. Today
+the payout gate does the opposite — it **abstains** and lets the booking through whenever one of the
+two numbers is unreadable (`content/inlinePanel.js:524-562`). Inverting that blindly could refuse
+most bookings, so this step measures first and changes no behaviour: **`FAST_BOOK_ENABLED` stays
+`false` and the gate is untouched.**
+
+- **`utils/priceProbe.js`** (new): classifies a gate verdict into `match` / `differ` /
+  `record-unreadable` / `sheet-unreadable`, files it in `chrome.storage.local.priceProbeEvents` (ring
+  buffer, **500** events), and summarises — totals, percentages, and the differences bucketed
+  `$0 / up to $5 / $5–15 / $15–50 / over $50`, each split higher/lower. No DOM and no messaging, so
+  the same file loads in the content scripts (which write) and the popup (which reads).
+- **`content/inlinePanel.js`**: at the end of `showInlinePanel()` — where the card click and the
+  auto-open converge — it runs **the gate's own read** once and files the verdict. It calls
+  `payoutGateFor()` itself rather than a copy, so the measurement cannot drift from the thing being
+  measured, and `payoutGateFor` only reads: no click, no booking.
+- **`popup/popup.html` + `popup/popup.js`**: a **Price check (measurement)** block, filled the moment
+  the popup opens, plus **Copy raw events** (JSON with summary + events to the clipboard) and **Clear
+  measurement**. One click to read, two to copy — no console.
+- **`manifest.json`**: `utils/priceProbe.js` added to the content scripts.
+- ⚠ The storage key sits **outside `STORAGE_KEYS`** on purpose, like `loadSenderStats`: "Reset to
+  defaults" clears settings, and evidence is not a setting.
+- **The difference is signed and measured against the NEAREST sheet amount** — the sheet prints the
+  payout *and* rate-per-mile figures, so the first amount in DOM order would report a $2.31 per-mile
+  number as a "$665 difference".
+- **Verified, because it would have blocked every booking:** the gate compares Amazon's raw payout
+  (`content/networkObserver.js:441`) with Amazon's raw sheet text (`content/inlinePanel.js:1741`).
+  The +10 % display rule is only in the Post-a-Truck modal's Payout field (`content/patModal.js:18`,
+  applied at `:1080`) and touches neither side.
+
+**Proved in headless Chrome** with the real gate and recorder over seven sheets: normal → `match`;
+`$2,320.23` beside `$2.31/mi` → `match`; +$31.83 → `differ +31.83`; −$18.17 → `differ −18.17`; no
+`$` in the sheet → `sheet-unreadable`; null record payout → `record-unreadable`; no record →
+`record-unreadable`. `node scripts/build-zip.mjs` passes (46 files).
+
+## 2026-09-24 — the tab indicator never started: a default-OFF switch was in front of it (EXT-D5)
+
+**🔴 EXT-D4 was tested live and nothing changed** — Amazon's favicon stayed, no magnifier, no
+alert. The indicator was behind the old "Tab Alert" checkbox, which is `false` until someone turns
+it on: `content/tabAlert.js:38` (`tabAlertEnabled = false`), read back as `false` at `:128`, and the
+`running` subscriber (`:107`) and `flashTabAlert()` (`:80`) both returned on their first line. Not
+one state was rendered and not one `tab-state` line was written. Nothing else was blocking it.
+
+- **The indicator is now always on** — no setting gates it, because the site it copies has no such
+  switch. A hidden toggle that silently disables a state machine is how this was lost for a day.
+- **"Tab Alert" removed** — the popup row (`popup/popup.html`), and in `popup/popup.js` the
+  `KEY_TAB_ALERT` alias, the `tabToggle` lookup, the settings read, the `change` listener and its
+  storage write, the Reset line and the `storage.onChanged` line. Zero references left.
+  ⚠ The **storage key stays listed** in `utils/storage.js`, marked legacy exactly as `SPEED` and
+  `RUNNING` are, so "Reset to Defaults" still clears the value in existing installs.
+- **`logger.notice`** (new, `utils/logger.js`): level **1** — the shipped `DEBUG_LEVEL` — printed
+  with `console.info`. `log` needs 3 and `warn` needs 2, which is exactly how
+  `radiusUnitCaveat()`'s warning ended up invisible in a shipped build.
+- **One line at content-script start:** `tab-indicator ready`, with the version read from the
+  manifest (EXT-D1), so a live check can answer "is the new code loaded?" before anything else.
+  The `tab-state` diagnostics stay at `log`.
+
+Everything else from EXT-D4 is unchanged. **Proved in headless Chrome with default storage —
+nothing pre-set:** paused → search ON → new load `(3) Relay | Load Board` → alert cleared → pause,
+with one live icon link (ours) in every state and one `href` write per idle transition.
+`node scripts/build-zip.mjs` passes.
+
+## 2026-09-24 — the Relay tab shows the board's own indicator; idle is Amazon's favicon (EXT-D4)
+
+**The Amazon Relay tab now says what the Tenlane Network board's tab says**, in the same drawing and
+by the same rules, with one deliberate difference: **idle is Amazon's own favicon**, not our logo.
+
+```
+paused / idle   Amazon's own favicon, written back explicitly
+searching       our magnifier, a sweep round its ring while the loop runs (12 frames, 250 ms)
+new load        our red disc with an exclamation, blinking (2 frames, 550 ms) + "(3) " on the title
+```
+
+- **`utils/tabIndicator.js`** (new): the site's `web/src/lib/tabState.ts` — drawing, frame counts,
+  intervals, the alert-wins rule and the title rule — copied, because the site repo is read-only
+  from here. **If you change one, change both.**
+- **`content/tabAlert.js`**: no longer draws anything. It says WHEN each state applies: the
+  searching state rides the existing `tabState.subscribe('running')`, so the sweep starts and stops
+  with the loop whatever started or stopped it; new loads set the count; starting the loop clears
+  it (the site's ring toggle); it clears itself after the site's 60-second window; `pagehide`
+  releases. U1's breathing dot, its title alternation and its 900 ms pulse are gone.
+- **`content/content.js`**: `deactivateExtensionUI()` calls `tabIndicator.release()` — "reverted to
+  fully untouched" has to include the tab strip.
+- **`manifest.json`**: `utils/tabIndicator.js` added to the content scripts, before `tabAlert.js`.
+
+**🔴 The two hard parts, both already paid for once.** Idle is an explicit `href` write, never just
+removing our link — U1 found that here in August, and the site measured it on 2026-09-24: the idle
+path made **zero `href` writes** while the sweep moves precisely because it writes four a second.
+And Relay is a single-page app that can re-insert its own icon links, so ours is the only **live**
+one while a state shows: the others are parked (`rel` renamed), a `<head>` observer parks any that
+appear between writes, and the parked list holds only what is still in the document (the site's
+version climbed 1, 6, 9… over a session).
+
+- **Amazon's href is measured at runtime** — the last icon link in document order, captured before
+  anything is parked — with `location.origin + '/favicon.ico'` as the fallback. ⚠ **The exact shape
+  of Relay's `<head>` is still unmeasured** (no capture in this repo, and the live page was not
+  opened); the design does not depend on it and was proved against three heads.
+- **The "Tab Alert" setting now gates the whole indicator**, not only the new-load state, and stays
+  OFF by default: with it off we never touch Amazon's tab at all.
+- ⚠ **One extra transition is ours and is kept:** returning to the tab clears the alert (U1). That
+  and the idle icon are the only two differences from the site.
+- **Logged through the existing switch** (`DEBUG_LEVEL ≥ 3`): `tab-state` with the site's fields —
+  `liveIconLinks`, `ours`, `effectiveHref`, `parkedLinks` included — and `tab-title-set`.
+
+**Proved in headless Chrome** against one classic `shortcut icon`, three icon links re-inserted
+every 1.5 s, and no icon link at all, driving the real modules through paused → search ON → new
+load → alert cleared → pause → search ON → pause → unload: exactly one live icon link, and ours, in
+every state; one `href` write per idle transition; a flat parked count; and after unload Amazon's
+links live with ours gone. `node scripts/build-zip.mjs` passes with the new file included.
+
 ## 2026-09-20 — the sender loses nothing: measured on a live board (EXT-D3)
 
 **Documentation only. No code changed.** EXT-D2's counters were run on a real Amazon board.

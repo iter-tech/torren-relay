@@ -21,7 +21,7 @@ does not match the code is a rejection.
 | Board refresh | keeping the board current so new loads appear | `content/refreshManager.js:7` |
 | New-load detection | identifying which loads are new | `content/loadDetector.js:7` |
 | Sound alert | surfacing a new load when the tab is not being watched | `content/soundAlert.js:59` |
-| Tab alert | same, in the tab title/favicon | `content/tabAlert.js:148` |
+| Tab indicator | the tab says what the loop is doing: Amazon's own favicon when paused, our magnifier while searching, a red disc plus `(n)` on the title when a load is found. Always on, no setting (EXT-D5) | `utils/tabIndicator.js`, `content/tabAlert.js` |
 | Auto-open top new load | surfacing the newest load without a manual click | `content/detailOpener.js:301` |
 | Per-origin-city filtering | surfacing only loads from cities the dispatcher works | `content/cityAssign.js:1681` |
 | Inline load panel | showing that load's details in place | `content/inlinePanel.js:1376` |

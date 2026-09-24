@@ -834,6 +834,16 @@ function deactivateExtensionUI() {
   // "revert to fully untouched" guarantee intact.
   document.body.style.removeProperty('padding-top');
 
+  // Tab indicator (EXT-D4) — Amazon's own favicon and title back, our icon link removed and the
+  // <head> observer dropped. Same reason as the panel and the city feed above: "reverted to fully
+  // untouched" has to include the tab strip, and an icon link is exactly the kind of leftover that
+  // survives everything else on this list.
+  try {
+    if (typeof tabIndicator !== 'undefined') tabIndicator.release();
+  } catch (e) {
+    logger.error('content', 'tabIndicator.release failed', { error: e });
+  }
+
   logger.log('content', 'extension UI deactivated — page reverted to untouched state');
 }
 

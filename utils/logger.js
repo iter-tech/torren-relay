@@ -10,10 +10,20 @@
 // an error is worth showing even at the quietest non-silent setting; a debug line is the
 // first thing to drop.
 const LOG_LEVEL_REQUIRED = {
-  error: 1,
-  warn:  2,
-  log:   3,
-  debug: 4
+  error:  1,
+  // 🔑 A LINE THAT MUST SURVIVE A SHIPPED BUILD, WITHOUT BEING AN ERROR (2026-09-24).
+  //
+  // The shipped DEBUG_LEVEL is 1, so `log` and `warn` are silent in the field — which is exactly
+  // how radiusUnitCaveat()'s warning ended up invisible (see utils/constants.js), and why
+  // warnIfUnrecognisedRelayPage() reaches past this file to console.warn. `notice` is that need
+  // met properly: level 1, like an error, but printed as information.
+  //
+  // ⚠ RESERVED FOR READINESS LINES AND THE LIKE — a handful per page load at most. Anything a
+  // dispatcher would see repeatedly belongs at `log`.
+  notice: 1,
+  warn:   2,
+  log:    3,
+  debug:  4
 };
 
 // Used only if utils/constants.js somehow did not load before this file (it is listed
@@ -42,6 +52,13 @@ const logger = {
     if (!this._enabled('log')) return;
     const line = `[EXT][${this._ts()}][${module}] ${msg}`;
     data !== undefined ? console.log(line, data) : console.log(line);
+  },
+
+  // Always printed in a shipped build — see LOG_LEVEL_REQUIRED.notice above for the rule.
+  notice(module, msg, data) {
+    if (!this._enabled('notice')) return;
+    const line = `[EXT][${this._ts()}][${module}] ${msg}`;
+    data !== undefined ? console.info(line, data) : console.info(line);
   },
 
   warn(module, msg, data) {

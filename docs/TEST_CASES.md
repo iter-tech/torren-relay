@@ -449,13 +449,21 @@ listener at all — asserted by `autodiag-suite`.
 make the browser re-read the page's own icon, so the tab kept our mark after the alert stopped.
 
 ### Steps
-1. Tab Alert ON in the popup. Start the loop on a load board, then switch to **another tab**.
-2. Wait for a new load. **PASS:** the board tab title alternates with `• New load` (or
-   `• N new loads`) and its favicon breathes softly — one hue, two alphas, about one pulse a
-   second. **FAIL:** a solid red or yellow square, or a fast strobe.
+⚠ **REWRITTEN 2026-09-24 (EXT-D4, EXT-D5).** There is no "Tab Alert" setting to switch on any more —
+the indicator is always on — and the mark is the site's, not U1's dot. The defect this case exists
+for is unchanged, and so is the way to see it: watch the favicon, not the title.
+1. Start the loop on a load board, then switch to **another tab**. **PASS:** the board tab's favicon
+   is our **magnifier with a sweep** travelling round its ring, about four frames a second.
+   **FAIL:** Amazon's own favicon (nothing started — check the console for `tab-indicator ready`),
+   or a still magnifier.
+2. Wait for a new load. **PASS:** the favicon becomes a **red disc with an exclamation, blinking**
+   about twice a second, and the title reads `(1) …` — the count first, Amazon's title after it.
+   **FAIL:** a magnifier still sweeping, or a title with a glyph in it.
 3. Switch **back** to the board tab.
-   **PASS:** the title returns to Amazon's own AND **the favicon returns to Amazon's own**.
-   **FAIL:** the favicon stops moving but our dot is still sitting there — the defect is back.
+   **PASS:** the title returns to Amazon's own AND, once the loop is paused, **the favicon returns
+   to Amazon's own**. (While the loop is still running the magnifier is correct — the alert cleared,
+   the search did not.)
+   **FAIL:** the favicon stops moving but our mark is still sitting there — the defect is back.
 4. Repeat 2–3 twice more without reloading. **PASS:** it restores every time.
 
 ⚠ Watch the favicon, not just the title. The title always restored; the favicon was the bug.
