@@ -298,6 +298,191 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+
+  /*
+   * ── THE NEGOTIATION PHRASES (EXT-D9) ────────────────────────────────────────────────────────
+   *
+   * 🔑 THE EDITOR IS IN THE POPUP, NOT THE SIDEBAR, and that is a decision rather than a default.
+   * The popup is where every stored preference is already edited, it opens without touching
+   * Amazon's page, and it has room for a list that scrolls. The sidebar sits ON the load board,
+   * where the dispatcher is working a load — the phrases will be USED there, next to Amazon's
+   * chat, but a list you edit is not a list you are reading mid-negotiation.
+   *
+   * ⚠ ALL FORMATTING AND STORAGE LIVE IN utils/phrases.js. This block draws rows and calls it, so
+   * the popup and the future chat panel cannot disagree about what a phrase renders to.
+   */
+  var phraseItems = [];
+  var phraseArea = null;
+  var phraseSelected = 0;
+
+  var phraseListEl = document.getElementById('popup-phrase-list');
+  var phraseNoteEl = document.getElementById('popup-phrase-note') || document.getElementById('popup-phrases-note');
+  var phraseSampleEl = document.getElementById('popup-phrase-sample');
+  var phrasePreviewEl = document.getElementById('popup-phrase-preview');
+  var phraseImportBox = document.getElementById('popup-phrase-import-box');
+
+  function phraseNote(extra) {
+    if (!phraseNoteEl) return;
+    var where = phraseArea === 'sync'
+      ? 'Stored in your Chrome account, so they follow you to another computer.'
+      : phraseArea === 'local'
+        ? 'Stored in THIS browser only — Chrome sync refused the write.'
+        : 'Not saved yet.';
+    phraseNoteEl.textContent = phraseItems.length + ' of ' + phrases.MAX_PHRASES + ' phrases · '
+      + where + (extra ? ' ' + extra : '');
+  }
+
+  function renderPreview() {
+    if (!phrasePreviewEl) return;
+    var item = phraseItems[phraseSelected] || phraseItems[0];
+    if (!item) { phrasePreviewEl.textContent = '—'; return; }
+    var sample = Number(phraseSampleEl && phraseSampleEl.value);
+    // ⚠ The SAME record shape the board holds: { payout: <number> }. An empty box means "no payout
+    // recorded", which is the case the chat panel must refuse to send.
+    var record = isFinite(sample) && (phraseSampleEl.value !== '') ? { payout: sample } : null;
+    var r = phrases.renderPhrase(item.text, record);
+    phrasePreviewEl.textContent = r.usable
+      ? r.text + (r.unknown.length ? '   ⚠ unknown: ' + r.unknown.join(' ') : '')
+      : '⚠ Not usable with no payout: ' + r.text;
+  }
+
+  function renderPhraseList() {
+    if (!phraseListEl) return;
+    phraseListEl.textContent = '';
+    phraseItems.forEach(function (item, i) {
+      var row = document.createElement('div');
+      row.className = 'popup-phrase-row';
+      row.setAttribute('data-testid', 'popup-phrase-row-' + i);
+
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.value = item.text;
+      input.maxLength = phrases.MAX_PHRASE_LENGTH;
+      input.setAttribute('data-testid', 'popup-phrase-text-' + i);
+      input.addEventListener('input', function () {
+        phraseItems[i].text = input.value;
+        phraseSelected = i;
+        renderPreview();
+      });
+      // Saved when the field is left, not on every keystroke: one write per edit, not per letter.
+      input.addEventListener('change', savePhrases);
+      input.addEventListener('focus', function () { phraseSelected = i; renderPreview(); });
+      row.appendChild(input);
+
+      row.appendChild(phraseBtn('↑', 'Move up', i === 0, function () { movePhrase(i, -1); }, 'up-' + i));
+      row.appendChild(phraseBtn('↓', 'Move down', i === phraseItems.length - 1, function () { movePhrase(i, 1); }, 'down-' + i));
+      row.appendChild(phraseBtn('×', 'Delete', false, function () { deletePhrase(i); }, 'del-' + i));
+
+      phraseListEl.appendChild(row);
+    });
+    phraseNote();
+    renderPreview();
+  }
+
+  function phraseBtn(label, title, disabled, onClick, testid) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'popup-phrase-btn';
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.setAttribute('data-testid', 'popup-phrase-' + testid);
+    b.disabled = disabled;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function movePhrase(i, delta) {
+    var j = i + delta;
+    if (j < 0 || j >= phraseItems.length) return;
+    var tmp = phraseItems[i];
+    phraseItems[i] = phraseItems[j];
+    phraseItems[j] = tmp;
+    phraseSelected = j;
+    renderPhraseList();
+    savePhrases();
+  }
+
+  function deletePhrase(i) {
+    phraseItems.splice(i, 1);
+    if (phraseSelected >= phraseItems.length) phraseSelected = Math.max(0, phraseItems.length - 1);
+    renderPhraseList();
+    savePhrases();
+  }
+
+  async function savePhrases() {
+    var r = await phrases.save(phraseItems);
+    phraseArea = r.area;
+    phraseItems = r.items;
+    phraseNote(r.ok ? '' : '⚠ Could not save: ' + r.error);
+  }
+
+  if (typeof phrases !== 'undefined' && phraseListEl) {
+    phrases.load().then(function (loaded) {
+      phraseItems = loaded.value.items || [];
+      phraseArea = loaded.area;
+      renderPhraseList();
+      if (loaded.note) logger.log('popup', 'phrases loaded', { note: loaded.note, items: phraseItems.length });
+    });
+
+    var addBtn = document.getElementById('popup-phrase-add');
+    if (addBtn) addBtn.addEventListener('click', function () {
+      if (phraseItems.length >= phrases.MAX_PHRASES) {
+        phraseNote('⚠ That is the maximum of ' + phrases.MAX_PHRASES + '. Delete one first.');
+        return;
+      }
+      phraseItems.push({ id: 'p' + Date.now().toString(36), text: '' });
+      phraseSelected = phraseItems.length - 1;
+      renderPhraseList();
+      var el = document.querySelector('[data-testid="popup-phrase-text-' + phraseSelected + '"]');
+      if (el) el.focus();
+    });
+
+    var resetBtn = document.getElementById('popup-phrase-reset');
+    if (resetBtn) resetBtn.addEventListener('click', function () {
+      // ⚠ CONFIRMED, because this throws away his own wording — the one destructive control here.
+      if (!window.confirm('Replace your phrases with the starter set? Your current list will be lost.')) return;
+      phraseItems = phrases.starterValue().items;
+      phraseSelected = 0;
+      renderPhraseList();
+      savePhrases();
+    });
+
+    var exportBtn = document.getElementById('popup-phrase-export');
+    if (exportBtn) exportBtn.addEventListener('click', function () {
+      var text = phrases.exportJson(phraseItems);
+      navigator.clipboard.writeText(text).then(function () {
+        exportBtn.textContent = 'Copied ' + phraseItems.length;
+        setTimeout(function () { exportBtn.textContent = 'Copy as JSON'; }, 1500);
+      }).catch(function (e) {
+        phraseNote('⚠ Copy failed: ' + (e && e.message ? e.message : e));
+      });
+    });
+
+    var importBtn = document.getElementById('popup-phrase-import');
+    if (importBtn && phraseImportBox) importBtn.addEventListener('click', function () {
+      // First press opens the box; second press imports what is in it. No modal, no new surface.
+      if (phraseImportBox.hidden) {
+        phraseImportBox.hidden = false;
+        phraseImportBox.focus();
+        importBtn.textContent = 'Import this';
+        return;
+      }
+      var r = phrases.importJson(phraseImportBox.value);
+      if (!r.ok) { phraseNote('⚠ ' + r.error); return; }
+      phraseItems = r.items;
+      phraseSelected = 0;
+      phraseImportBox.value = '';
+      phraseImportBox.hidden = true;
+      importBtn.textContent = 'Import JSON…';
+      renderPhraseList();
+      savePhrases();
+      phraseNote(r.skipped ? ('Imported ' + r.items.length + ', skipped ' + r.skipped + '.') : '');
+    });
+
+    if (phraseSampleEl) phraseSampleEl.addEventListener('input', renderPreview);
+  }
+
   var versionEl = document.getElementById('popup-version');
   if (versionEl && chrome.runtime && chrome.runtime.getManifest) {
     versionEl.textContent = 'v' + chrome.runtime.getManifest().version;

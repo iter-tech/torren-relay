@@ -57,6 +57,7 @@
         "utils/tabState.js",
         "utils/tabIndicator.js",
         "utils/priceProbe.js",
+        "utils/phrases.js",
         "utils/loadStore.js",
         "utils/soundDefs.js",
         "vendor/html2canvas.min.js",

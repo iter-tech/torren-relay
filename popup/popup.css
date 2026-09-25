@@ -599,3 +599,98 @@ input[type="range"] {
   outline: 2px solid var(--ext-accent);
   outline-offset: 2px;
 }
+
+/* ── NEGOTIATION PHRASES (EXT-D9) ─────────────────────────────────────────────────────────────
+   A list the dispatcher edits inside a 320px popup, so every row is one line of text plus three
+   small controls. No new colours: the tokens above are the whole palette. */
+.popup-phrases {
+  font-size: 12px;
+  color: var(--ext-n700);
+}
+.popup-phrases-note {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--ext-n500);
+}
+.popup-phrase-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+/* ⚠ min-width:0 — without it a long phrase stretches the flex row and pushes the buttons out of
+   the popup, which is exactly how a 320px panel gains a horizontal scrollbar. */
+.popup-phrase-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--ext-n900);
+  background: var(--ext-surface);
+  border: 1px solid var(--ext-n300);
+  border-radius: var(--ext-radius-sm);
+}
+.popup-phrase-row input:focus {
+  outline: none;
+  border-color: var(--ext-accent);
+}
+.popup-phrase-btn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--ext-n500);
+  background: var(--ext-n100);
+  border: 1px solid var(--ext-n200);
+  border-radius: var(--ext-radius-sm);
+  cursor: pointer;
+}
+.popup-phrase-btn:hover:not(:disabled) {
+  color: var(--ext-accent-text);
+  background: var(--ext-accent-bg);
+}
+.popup-phrase-btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.popup-phrase-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.popup-phrase-preview {
+  margin: 6px 0;
+}
+.popup-phrase-preview input {
+  width: 80px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--ext-n900);
+  background: var(--ext-surface);
+  border: 1px solid var(--ext-n300);
+  border-radius: var(--ext-radius-sm);
+}
+/* The rendered line, in the shape it would be sent. Wraps rather than truncating: a phrase cut off
+   mid-number is worse than a two-line preview. */
+.popup-phrase-preview-out {
+  margin: 6px 0 0;
+  padding: 6px;
+  font-size: 12px;
+  color: var(--ext-n900);
+  background: var(--ext-n100);
+  border-radius: var(--ext-radius-sm);
+  overflow-wrap: anywhere;
+}
+.popup-phrase-import {
+  width: 100%;
+  height: 70px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--ext-n900);
+  background: var(--ext-surface);
+  border: 1px solid var(--ext-n300);
+  border-radius: var(--ext-radius-sm);
+}

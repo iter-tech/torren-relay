@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-09-24 — the dispatcher's negotiation phrases: library, renderer and editor (EXT-D9)
+
+Groundwork for the chat work: later a button on our load card will open Amazon's own Relay Assistant
+for that load and a panel beside it will list these phrases, one click per send. **Booking stays a
+manual click on Amazon's Book button.** 🔴 **This change touches nothing on Amazon's page** — the
+chat DOM is still uncaptured (`docs/AI_CHAT_CAPTURE.md` §7), so nothing attaches to a chat and
+nothing sends a message.
+
+- **`utils/phrases.js`** (new): the list in `chrome.storage.sync` (key `phrasesV1`, versioned in the
+  name and the value) with a **`local` fallback** when sync refuses — every write checks
+  `chrome.runtime.lastError`, because a quota failure arrives there rather than as a throw, and that
+  is exactly how a phrase list "resets itself". `whereStored()` says which area is in use.
+- **Variables:** `{payout}`, `{payout+N}`, `{payout+N%}` and their minus forms, rounded to whole
+  dollars and formatted `$1,700`. The payout is read from the record the extension already holds,
+  the same way `payoutGateFor()` reads it — a flat number or the raw `{ value, unit }`.
+- 🔴 **No payout → the phrase is NOT usable**: the text comes back as typed, never half-substituted
+  and never `$0`. An unknown variable like `{driver}` is left alone and flagged instead.
+- **The editor is in the popup** (a decision, not a default — it is where preferences are edited and
+  it does not touch Amazon's page): list, add, edit, reorder, delete, reset to the starter set with a
+  confirm, live preview against a payout you type, copy as JSON, import JSON. **20 phrases, 200
+  characters each**, enforced on save and on import.
+- **Starter set of 7 lines — wording for Ihor to review.** Plausible English, not measured: no
+  capture of a real negotiation exists here.
+- **One named entry point for the later panel:** `phrases.phrasesForLoad(loadId)` returns every
+  phrase already rendered against that load. Nothing calls it yet, deliberately.
+
+**Proved:** 20 renderer cases (every variable form, both payout shapes, fractional percent,
+separators, unknown variables, and all three "no number" cases refused); export → import round trip;
+the migration path including a **newer** stored version left untouched; and the real popup driven in
+headless Chrome — add, edit, reorder, delete, **reload keeps the list** (stored in sync), preview,
+export/import, reset confirmed and reset refused, plus the sync-refuses path landing in `local` with
+the note saying so. No page exceptions. `node scripts/build-zip.mjs` passes (47 files).
+
 ## 2026-09-24 — docs: SAFETY.md now tells the truth about the empty selector list; the $583.90 question is answered
 
 Documentation only. **No code changed, `FORBIDDEN_SELECTORS` was NOT touched, and no selector was

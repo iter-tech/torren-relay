@@ -13,6 +13,103 @@ behind.
 
 ---
 
+## EXT-D9 — ✅ THE DISPATCHER'S NEGOTIATION PHRASES: A LIBRARY AND AN EDITOR. NOTHING TOUCHES AMAZON'S CHAT
+
+**2026-09-24, Ihor.** Later, a button on our load card will open Amazon's own Relay Assistant chat
+for that load, and a panel beside it will list the dispatcher's phrases — one click sends one into
+the chat. **Booking always stays a manual click on Amazon's own Book button.** This step builds the
+library, its editor and the renderer; it attaches to nothing.
+
+🔴 **NOTHING HERE TOUCHES AMAZON'S PAGE, AND THAT IS THE POINT OF DOING IT NOW.** The chat DOM has
+not been captured — `docs/AI_CHAT_CAPTURE.md` §7 records that a HAR holds no DOM, so the selector
+for the control that opens the assistant is unknown `[?]`. Writing the panel against a guessed
+selector is how you ship a feature that breaks on Amazon's next render. The parts that do not depend
+on that selector are built and proved; the part that does is one named function away.
+
+### The one entry point for the later integration
+
+`phrases.phrasesForLoad(loadId)` → `[{ id, source, text, usable, reason, unknown }]` — every phrase
+already rendered against that load's record. The future panel calls exactly this, draws the list, and
+sends `text` on a click, so it will contain **no formatting, no arithmetic and no storage code of its
+own**. ⚠ Nothing calls it yet, deliberately.
+
+### Storage
+
+- `chrome.storage.sync`, key **`phrasesV1`** — versioned in the name *and* in the value.
+- 🔑 **SYNC FIRST, `local` AS FALLBACK.** Sync follows the dispatcher to a second computer, which is
+  the whole point of a list he has tuned. Sync has hard quotas (~8 KB per item, 100 KB total, a write
+  rate limit), so **every write checks `chrome.runtime.lastError`** — a quota failure arrives there,
+  not as a throw, and without that check a full sync area loses writes silently. That is exactly how
+  a phrase list "resets itself". On refusal the write goes to `local` and
+  `phrases.whereStored()` says which is in use; the editor prints it.
+- **Migration path, with only one version today.** An OLDER shape is upgraded field by field (v0's
+  bare strings included); a **NEWER** one — a second machine already running a later build, syncing
+  back — is kept EXACTLY as it is and reported, never rewritten by older code.
+- **Export / import as JSON**, pretty-printed so it is hand-editable. Import also accepts a bare
+  array of strings, because somebody will paste `["a","b"]` and refusing that helps nobody.
+
+### The variables
+
+`{payout}`, `{payout+N}`, `{payout+N%}` — and their minus forms, because a counter-offer below the
+board rate is a real move. Results are **rounded to whole dollars** and formatted `$1,700`: the
+record carries figures like `1699.5023456`, and "$1,699.50" in a negotiation reads as a machine
+talking.
+
+- **The payout comes from the record the extension already holds**, read the same way
+  `payoutGateFor()` reads it (`content/inlinePanel.js`): a flat number, or the raw `{ value, unit }`.
+  Never from the card's text — a price scraped from the DOM is a string in a currency and a locale,
+  and this has to do arithmetic on it.
+- 🔴 **NO PAYOUT MEANS THE PHRASE IS NOT USABLE.** `renderPhrase()` returns `usable: false` and the
+  text **as typed** — never half-substituted, never "$0". A phrase that mentions the money with a
+  hole where the number goes must not reach a live negotiation.
+- ⚠ **An unknown variable does not block anything.** `{driver}` is left exactly as typed and listed
+  in `unknown` so the editor can flag it — a dispatcher may be using braces as his own punctuation.
+
+### The editor is in the POPUP
+
+Chosen, not defaulted: the popup is where every stored preference is already edited, it opens without
+touching Amazon's page, and it has room for a list that scrolls. The sidebar sits **on** the load
+board where he is working a load — the phrases will be *used* there, beside Amazon's chat, but a list
+you edit is not a list you read mid-negotiation.
+
+List · add · edit · reorder (↑/↓) · delete · reset to the starter set (**confirmed**, the one
+destructive control) · live preview against a payout he types · copy as JSON · import JSON.
+
+**Limits: 20 phrases, 200 characters each**, enforced on save *and* on import so a hand-edited file
+cannot get past them. Twenty is a list you scan while a load is on screen; two hundred characters is
+two sentences, and a paragraph pasted into a chat buries the number being negotiated.
+
+### The starter set — ⚠ WORDING FOR IHOR TO REVIEW
+
+Plausible English negotiation lines, **not measured ones**: no capture of a real negotiation exists
+in this repository.
+
+```
+Can you do better than {payout} on this one?
+I can take it at {payout+150}.
+My rate for this lane is {payout+10%} — can you meet that?
+What is the detention policy at these stops?
+Is there any flexibility on the pickup time?
+Are there other loads on this lane at a better rate?
+That works — I will take it at {payout}.
+```
+
+✅ **Proved.** The renderer, against the real `utils/phrases.js`: 20 cases — every variable form,
+both payout shapes, fractional percent, thousands separators at 4 and 7 digits, two variables in one
+phrase, an unknown variable, and the three "no number" cases (`payout: null`, no record at all, and a
+payout that is a string) all correctly **not usable**. Export → import returns the same 7 texts; a
+bare array imports; nonsense, an empty list, a 30-item file and a 400-character line are all handled
+at the cap. Migration: nothing stored → starter set; v0 mixed shapes → upgraded; v99 → left untouched.
+
+✅ **The editor, driven in headless Chrome against the real popup** (`popup.html` + `popup.js` +
+`popup.css` + `phrases.js`, with `chrome.storage` shimmed onto `localStorage` so a reload is a real
+reload): starter list of 7 → add → edit → move down → delete → **reload: identical, stored in sync**
+→ preview renders `$1,500` → empty payout shows "Not usable" → export/import round trip → reset with
+the confirm → reset **refused** at the confirm keeps his text → and with sync forced to refuse, the
+write lands in `local` and the note says so. No page exceptions. `node scripts/build-zip.mjs` passes
+(47 files).
+
+---
 ## EXT-D8 — ✅ THE PROBE NOW SAYS WHICH PATH OPENED THE SHEET, AND READS IT AGAIN AT +1 s AND +3 s
 
 **2026-09-24, Ihor — follow-up to EXT-D6.** The live result over **25 sheets: 18 `match`, 1 `differ`,
