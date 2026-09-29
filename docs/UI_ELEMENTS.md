@@ -18,7 +18,9 @@ even at zero.
 | popup-fresh-rate | span | This page's requests per minute, last / max. |
 | popup-fresh-503 | span | HTTP 503 count. |
 | popup-fresh-window | span | First → last record time. |
-| popup-fresh-copy | button | Copies `{ exportedAt, version, summary, records }` as JSON. |
+| popup-fresh-endpoints | table | EXT-D11.1: one row per relay /api/ endpoint (board rows first): endpoint · last seen · calls/min · newest-load age · new ids in the last response · warn (SILENT / NO NEW / count). |
+| popup-fresh-endpoints-body | tbody | Rows are `popup-fresh-ep-<endpoint key>`; textContent only. |
+| popup-fresh-copy | button | Copies `{ exportedAt, version, summary, endpoints, records }` as JSON. |
 | popup-fresh-clear | button | Empties the buffer (the measurement only). |
 
 ## AI Chat button (content/aiChat.js — 2026-09-28, EXT-D10)

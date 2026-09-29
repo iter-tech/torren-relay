@@ -566,6 +566,12 @@ input[type="range"] {
 .popup-sender-stats{padding:6px 0 2px;font-size:11px;color:#6B7280;}
 .popup-stat-line{display:flex;justify-content:space-between;padding:1px 0;}
 .popup-stat-line span{font-variant-numeric:tabular-nums;color:#111827;}
+/* EXT-D11.1 — the per-endpoint freshness table */
+.popup-fresh-table{width:100%;border-collapse:collapse;margin:6px 0 4px;font-size:10px;table-layout:fixed;}
+.popup-fresh-table th{text-align:left;font-weight:600;color:#6B7280;border-bottom:1px solid #E5E7EB;padding:2px 2px;}
+.popup-fresh-table td{padding:2px 2px;color:#111827;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.popup-fresh-table th:first-child,.popup-fresh-table td:first-child{width:34%;}
+.popup-fresh-table td.popup-fresh-warn{color:#b3261e;font-weight:600;}
 .popup-stats-reset{
   margin-top:6px;width:100%;padding:4px;font-size:11px;cursor:pointer;
   background:none;border:1px solid #D1D5DB;border-radius:4px;color:#6B7280;

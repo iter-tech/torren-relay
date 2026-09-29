@@ -1020,6 +1020,68 @@
   // One random id per page, so records from two tabs can be told apart in the export.
   var _freshPage = Math.random().toString(36).slice(2, 8);
 
+  // ── EXT-D11.1: WHICH REQUEST BRINGS THE NEWEST LOADS, AND WHEN DOES IT STOP ────────────────
+  //
+  // One cycle of Amazon's board = three calls fired together (samples/ai-chat-2.har #37–#39):
+  //   search:nego   the 5-row UNANCHORED_NEGO block  (eligibleFeaturesFilter)
+  //   search:main   the 50-row main list            (eligibleFeaturesExclusionFilter)
+  //   recommendations                                ("Recently added" — measured: the youngest loads)
+  // The endpoint key below separates them, and every other relay /api/ call is counted by its
+  // normalised path (ids and numbers replaced), so the census can say what fired and what did not.
+  function searchVariant(bodyText) {
+    try {
+      var b = (typeof bodyText === 'string') ? JSON.parse(bodyText) : null;
+      if (!b || typeof b !== 'object') return 'search:other';
+      if (Array.isArray(b.eligibleFeaturesFilter) && b.eligibleFeaturesFilter.indexOf('UNANCHORED_NEGO') !== -1) return 'search:nego';
+      if (Array.isArray(b.eligibleFeaturesExclusionFilter) && b.eligibleFeaturesExclusionFilter.indexOf('UNANCHORED_NEGO') !== -1) return 'search:main';
+      return 'search:other';
+    } catch (e) { return 'search:other'; }
+  }
+  function apiPath(url) {
+    try {
+      var u = new URL(url, window.location.href);
+      if (u.origin !== window.location.origin || u.pathname.indexOf('/api/') !== 0) return null;
+      return u.pathname
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '{id}')
+        .replace(/\/\d+(?=\/|$)/g, '/{n}');
+    } catch (e) { return null; }
+  }
+  // The endpoint key. `bodyText` only matters for /search (the variant); null elsewhere.
+  function endpointKey(url, method, bodyText) {
+    var p = apiPath(url);
+    if (!p) return null;
+    if (p === FRESH_PATHS[0]) return searchVariant(bodyText);
+    if (p === FRESH_PATHS[1]) return 'recommendations';
+    return String(method || 'GET').toUpperCase() + ' ' + p;
+  }
+  function bodyStringOf(init) {
+    return (init && typeof init.body === 'string') ? init.body : null;
+  }
+  // The census: one tiny message per completed relay /api/ call — key, status, time. Nothing else.
+  function censusPost(key, status) {
+    try {
+      if (!key) return;
+      window.postMessage({ __extRelayCensus: true, ev: { ek: key, st: status, t: Date.now(), pg: _freshPage } }, '*');
+    } catch (e) { /* never surface to the page */ }
+  }
+  // New load ids vs the previous response of the SAME endpoint key. The ids stay in this world;
+  // only the count crosses. null for the first response of a key (nothing to compare against).
+  var _freshLastIds = {};
+  function newIdsVsPrevious(key, wo) {
+    try {
+      if (!key || !Array.isArray(wo)) return null;
+      var now = {}, prev = _freshLastIds[key], n = 0;
+      for (var i = 0; i < wo.length; i++) {
+        var id = wo[i] && wo[i].id;
+        if (id === undefined || id === null) continue;
+        now[id] = true;
+        if (prev && !prev[id]) n++;
+      }
+      _freshLastIds[key] = now;
+      return prev ? n : null;
+    } catch (e) { return null; }
+  }
+
   // Request times of OUR page's search/recommendations calls, for "requests in the last 1 / 5 min".
   var _freshReqTimes = [];
   function freshNoteRequest() {
@@ -1084,8 +1146,8 @@
   }
 
   // The body facts. `parsed` is Amazon's own parsed object — read, never kept.
-  function freshBodyFacts(parsed) {
-    var f = { bot: null, botSet: false, mk: null, mcodes: null, rows: null, total: null, newestAgeMin: null };
+  function freshBodyFacts(parsed, key) {
+    var f = { bot: null, botSet: false, mk: null, mcodes: null, rows: null, total: null, newestAgeMin: null, newIds: null };
     try {
       if (!parsed || typeof parsed !== 'object') return f;
       if ('isBotRequest' in parsed) {
@@ -1110,6 +1172,7 @@
       f.rows = Array.isArray(wo) ? wo.length : null;
       f.total = (typeof parsed.totalResultsSize === 'number') ? parsed.totalResultsSize : null;
       if (Array.isArray(wo)) {
+        f.newIds = newIdsVsPrevious(key, wo);
         var newest = NaN;
         for (var i = 0; i < wo.length; i++) {
           var c = wo[i] ? Date.parse(wo[i].createdAtTime) : NaN;
@@ -1121,7 +1184,7 @@
     return f;
   }
 
-  function freshPost(ep, status, headers, facts, note) {
+  function freshPost(ep, status, headers, facts, note, key) {
     try {
       var rate = freshRate();
       var hints = freshHeaderHints(headers);
@@ -1129,7 +1192,8 @@
       window.postMessage({
         __extRelayFreshness: true,
         rec: {
-          t: new Date().toISOString(), pg: _freshPage, ep: ep, st: status,
+          t: new Date().toISOString(), pg: _freshPage, ep: ep, ek: key || ep, st: status,
+          newIds: facts ? facts.newIds : null,
           bot: facts ? facts.bot : null, mk: facts ? facts.mk : null, mcodes: facts ? facts.mcodes : null,
           rows: facts ? facts.rows : null, total: facts ? facts.total : null,
           newestAgeMin: facts ? facts.newestAgeMin : null,
@@ -1142,13 +1206,13 @@
   // fetch: status + headers now; body facts when Amazon reads the body (observe() below). A
   // non-2xx response is recorded at once — Amazon may never read its body.
   var _freshPending = (typeof WeakMap === 'function') ? new WeakMap() : null;
-  function freshOnFetchResponse(url, resp) {
+  function freshOnFetchResponse(url, resp, key) {
     try {
       var ep = freshEndpoint(url);
       if (!ep) return;
       var headers = freshHeadersFromResponse(resp);
-      if (!resp.ok || !_freshPending) { freshPost(ep, resp.status, headers, null, resp.ok ? 'no-weakmap' : 'non-2xx'); return; }
-      _freshPending.set(resp, { ep: ep, status: resp.status, headers: headers });
+      if (!resp.ok || !_freshPending) { freshPost(ep, resp.status, headers, null, resp.ok ? 'no-weakmap' : 'non-2xx', key); return; }
+      _freshPending.set(resp, { ep: ep, key: key, status: resp.status, headers: headers });
     } catch (e) { /* never surface to the page */ }
   }
   function freshOnFetchBody(res, parsed) {
@@ -1156,7 +1220,7 @@
       var p = _freshPending && _freshPending.get(res);
       if (!p) return;
       _freshPending.delete(res);
-      freshPost(p.ep, p.status, p.headers, freshBodyFacts(parsed), null);
+      freshPost(p.ep, p.status, p.headers, freshBodyFacts(parsed, p.key), null, p.key);
     } catch (e) { /* never surface to the page */ }
   }
 
@@ -1253,6 +1317,13 @@
       reportEndpointSeen(url, isCaptured);  // read-only recon; no-op unless CITY_ASSIGN_DEBUG
       var isFresh = freshEndpoint(url) !== null;   // EXT-D11 — observes only
       if (isFresh) freshNoteRequest();
+      // EXT-D11.1 — the census key of this relay /api/ call (null for anything else). Reads the
+      // body only when it is already a plain string, and only to tell the /search variants apart.
+      var apiKey = null;
+      try {
+        apiKey = endpointKey(url, (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET',
+                             bodyStringOf(init));
+      } catch (eK) { apiKey = null; }
 
       // Sequence assigned BEFORE the request goes out, so the two /search responses of one
       // refresh are distinguishable in the log and each capture can be matched to its observe.
@@ -1276,9 +1347,10 @@
       if (isWatched) emitSearchRequest(url, input, init, seq);
 
       var result = origFetch.apply(this, arguments);
-      if (isWatched || isCaptured || isFresh) {
+      if (isWatched || isCaptured || isFresh || apiKey) {
         result.then(function (resp) {
-          if (isFresh) freshOnFetchResponse(url, resp);   // EXT-D11 — reads headers/status only
+          if (apiKey) censusPost(apiKey, resp.status);             // EXT-D11.1 — key + status only
+          if (isFresh) freshOnFetchResponse(url, resp, apiKey);   // EXT-D11 — reads headers/status only
           // NO CLONE ANY MORE (2026-08-13). The body is captured by observing Amazon's own
           // Response.json() read — see installResponseReadHook(). Cloning here was the bug: the
           // SPA's abort errored our tee branch on the one response that renders the board.
@@ -1292,7 +1364,8 @@
         }).catch(function (err) {
           if (isAbort(err, signal)) return; // aborted — normal navigation, report NOTHING
           if (isWatched) report(url, false, 0); // genuine network failure — no HTTP status at all
-          if (isFresh) freshPost(freshEndpoint(url), 0, {}, null, 'network-error');   // EXT-D11
+          if (apiKey) censusPost(apiKey, 0);                                                  // EXT-D11.1
+          if (isFresh) freshPost(freshEndpoint(url), 0, {}, null, 'network-error', apiKey);   // EXT-D11
         });
       }
       return result; // ALWAYS the original promise — Amazon's consumption is untouched
@@ -1307,6 +1380,7 @@
     reportEndpointSeen(url, this.__extCaptured); // read-only recon; see the function comment
     this.__extUrl = url;
     this.__extFresh = freshEndpoint(url);   // EXT-D11 — observes only
+    this.__extMethod = method;              // EXT-D11.1 — for the census key
     // Same sequence space as the fetch wrapper, so a refresh that mixes fetch and XHR still
     // produces one ordered, matchable series.
     this.__extSeq = (this.__extWatched || this.__extCaptured) ? nextSeq() : null;
@@ -1319,6 +1393,16 @@
     return origOpen.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function () {
+    // EXT-D11.1 — census key for any relay /api/ XHR (the body only when it is a plain string).
+    var xk = null;
+    try { xk = endpointKey(this.__extUrl, this.__extMethod, (typeof arguments[0] === 'string') ? arguments[0] : null); }
+    catch (eK) { xk = null; }
+    if (xk) {
+      var cx = this;
+      cx.addEventListener('load', function () { censusPost(xk, cx.status); });
+      cx.addEventListener('error', function () { censusPost(xk, 0); });
+      cx.addEventListener('timeout', function () { censusPost(xk, 0); });
+    }
     // EXT-D11 — the freshness record for an XHR search/recommendations call. Separate listeners,
     // so the existing ones below are unchanged. 'abort' is not subscribed: not a throttle signal.
     if (this.__extFresh) {
@@ -1331,12 +1415,12 @@
           if (rt === '' || rt === 'text') { try { parsed = JSON.parse(fx.responseText); } catch (e1) { parsed = null; } }
           else if (rt === 'json') parsed = fx.response;
           freshPost(fx.__extFresh, fx.status, freshHeadersFromXhr(fx),
-                    (fx.status >= 200 && fx.status < 300) ? freshBodyFacts(parsed) : null,
-                    (fx.status >= 200 && fx.status < 300) ? null : 'non-2xx');
+                    (fx.status >= 200 && fx.status < 300) ? freshBodyFacts(parsed, xk) : null,
+                    (fx.status >= 200 && fx.status < 300) ? null : 'non-2xx', xk);
         } catch (e) { /* never surface to the page */ }
       });
-      fx.addEventListener('error', function () { freshPost(fx.__extFresh, 0, {}, null, 'network-error'); });
-      fx.addEventListener('timeout', function () { freshPost(fx.__extFresh, 0, {}, null, 'timeout'); });
+      fx.addEventListener('error', function () { freshPost(fx.__extFresh, 0, {}, null, 'network-error', xk); });
+      fx.addEventListener('timeout', function () { freshPost(fx.__extFresh, 0, {}, null, 'timeout', xk); });
     }
     if (this.__extWatched || this.__extCaptured) {
       var xhr = this;

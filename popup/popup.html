@@ -301,6 +301,12 @@
       <div class="popup-stat-line">requests per minute, last / max <span id="popup-fresh-rate" data-testid="popup-fresh-rate">—</span></div>
       <div class="popup-stat-line">HTTP 503 <span id="popup-fresh-503" data-testid="popup-fresh-503">—</span></div>
       <div class="popup-stat-line">first / last <span id="popup-fresh-window" data-testid="popup-fresh-window">—</span></div>
+      <!-- EXT-D11.1: every relay /api/ endpoint this board's tab has called. The three board rows
+           (search:main, search:nego, recommendations) are the ones that bring loads. -->
+      <table class="popup-fresh-table" id="popup-fresh-endpoints" data-testid="popup-fresh-endpoints">
+        <thead><tr><th>endpoint</th><th>last seen</th><th>calls/min</th><th>newest</th><th>new ids</th><th>warn</th></tr></thead>
+        <tbody id="popup-fresh-endpoints-body" data-testid="popup-fresh-endpoints-body"><tr><td colspan="6">—</td></tr></tbody>
+      </table>
       <button type="button" id="popup-fresh-copy" data-testid="popup-fresh-copy" class="popup-stats-reset">Copy raw records</button>
       <button type="button" id="popup-fresh-clear" data-testid="popup-fresh-clear" class="popup-stats-reset">Clear</button>
     </div>

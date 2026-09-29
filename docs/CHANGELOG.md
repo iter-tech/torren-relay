@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-29 — Freshness recorder: per-endpoint census, new ids, silence / no-new warnings (EXT-D11.1)
+
+**From the samples:** the board cycle is `search:nego` (5 rows, old loads) + `search:main` (50
+rows) + `recommendations` (20 rows), every ~30 s. **Recommendations brought the youngest loads**,
+some of them only there (`ai-chat-2.har` #5, #39). Still passive: no request added, the refresh rate
+is unchanged, and everything from `6b4af98` is kept.
+
+- **`content/networkObserver.js`**
+  - A census message (key + status) for every relay `/api/` call, fetch and XHR; `/search` is split
+    by its request body into `search:main` / `search:nego` / `search:other`.
+  - Freshness records gain `ek` and `newIds`, counted against the previous response of the same
+    key. Ids never leave the page world.
+- **`utils/freshnessProbe.js`**
+  - A per-endpoint tracker (last seen, calls/min, statuses per minute, usual gap, new ids, newest
+    age) and a 15 s tick.
+  - "endpoint silent" (> 3× the usual gap, floored at 10 s, while the board still cycles) and "no
+    new loads" (10 responses with 0 new ids, ≥ 5 min after the last new ones).
+  - The snapshot goes to `freshnessEndpoints`. `configure()` is for tests only.
+- **Popup** — a per-endpoint table in "Freshness check"; "Copy raw records" includes it.
+- **`scripts/freshness-suite/`** — the replay of `ai-chat-2.har` plus the two warning scenarios.
+  **27/27**; aichat **95/95**; build passes. ⚠ Not verified live.
+
 ## 2026-09-28 — Freshness recorder: passive evidence for silent throttling (EXT-D11)
 
 Built for `docs/THROTTLE_SIGNALS.md`. **Passive:** no request added, the refresh rate is unchanged,

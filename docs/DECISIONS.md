@@ -15,6 +15,58 @@ behind.
 
 ## EXT-D11 — ✅ A PASSIVE FRESHNESS RECORDER, SO SILENT THROTTLING IS CAUGHT THE DAY IT HAPPENS
 
+### ✅ AMENDED 2026-09-29 (EXT-D11.1): WHICH REQUEST BRINGS THE NEWEST LOADS, AND WHEN IT STOPS
+
+**From the samples (read only).** One board cycle is **three calls fired together**, about every
+30 s (`samples/ai-chat-2.har` gaps 30.0 / 33.6 s; `ai-chat.har` 50.0 s):
+
+| endpoint key | request | returns | newest-load age | new ids per response |
+|---|---|---|---|---|
+| `search:nego` | `/search`, 5 rows, `eligibleFeaturesFilter: [UNANCHORED_NEGO]` | loads | **343–808 min**: old negotiable loads only (`ai-chat.har` #17/#45, `ai-chat-2.har` #3…#84) | 0 or 1 |
+| `search:main` | `/search`, 50 rows, `eligibleFeaturesExclusionFilter: [UNANCHORED_NEGO]` | loads | 5.6–29 min (`ai-chat-2.har` #38: 5.6) | **3** on a fresh cycle (#38; `ai-chat.har` #46), then 0 |
+| `recommendations` | `/recommendations/get`, 20 rows | loads | **5.4–7.5 min, the youngest** (`ai-chat-2.har` #5: 7.5 vs search 29.2; #39: 5.4) | **2** (#39), 1 (#58), then 0 |
+| `GET /api/ons/v1/notifications` | its own ~30 s poll | no loads | — | — |
+| `/demand-support/*`, `/rcc/getCommunicationSummary`, `/token`, `/orders/*`, `/stats`, `/filters` | chat, PAT, occasional | no loads | — | — |
+
+🔑 **Recommendations delivers the newest loads first.** Loads `4a25` (7.5 min old, #5) and `03c4`
+(5.4 min, #39) arrived **only** in recommendations and never appeared on search's 50-row page.
+Search's main list brings new loads too, but the youngest it showed was 5.6 min, and its page 1 is
+sorted by relevance.
+
+**What was added (passive, same file set):**
+- **Census** of every relay `/api/` call, per endpoint key, with `/search` split into
+  `search:main` / `search:nego` / `search:other`: last seen, calls per minute, statuses per minute
+  (last 10 minutes), and the usual gap (median of the last 10).
+- **New ids** vs the previous response of the same key. The ids stay in the MAIN world; only the
+  count is recorded (record field `newIds`, plus `ek`).
+- **Two warnings** (`logger.notice`, rate-limited per endpoint for 10 min):
+  - **"endpoint silent"**: a board endpoint with ≥ 3 calls not seen for **> 3 × its median gap**
+    (floored at **10 s**, so ≥ 90 s at the 30 s cycle), while another board endpoint is still
+    cycling (seen within 1.5 × its own gap). It clears with "endpoint back".
+  - **"no new loads"**: a load endpoint whose last **10** responses all had 0 new ids, **≥ 5 min**
+    after its last new id, and that did bring new ids within the last 60 min.
+  - The thresholds sit above what the samples show as normal: up to 4 zero-new responses in a row
+    on `search:main` (#57, #75, #79, #85, including quick repeats), and gaps from 0.1 s to 151.8 s,
+    where the long gaps are pauses while the board is not refreshing, which the "still cycling"
+    condition excludes.
+- **Popup:** a per-endpoint table under "Freshness check" showing endpoint, last seen, calls/min,
+  newest-load age, new ids in the last response, and warn (SILENT / NO NEW). "Copy raw records"
+  now includes the endpoint snapshot (`chrome.storage.local` `freshnessEndpoints`).
+
+**Proof:** `scripts/freshness-suite/run.cjs` **27/27** (the 18 from EXT-D11 plus 9). A replay of
+`ai-chat-2.har` cycles #3–#5, #37–#39, #56–#58 and #74–#76, with their original request and
+response bodies, reproduces the sample's new-id counts exactly: main `null,3,0,0`, recommendations
+`null,2,1,0`, nego `null,0,0,0`. It raises no warning. Then:
+- (a) recommendations stops while search keeps cycling → "endpoint silent", SILENT in the popup,
+  and cleared on return;
+- (b) `search:main` repeats the same ids 11× → "no new loads".
+
+Time is compressed in the test via `freshnessProbe.configure()` (test only). The aichat suite still
+passes 95/95, and the build passes. ⚠ **Not verified live.** The thresholds rest on two short HARs,
+and the first live week should be read before trusting them.
+
+---
+
 **2026-09-28, Ihor.** Amazon may silently stop returning the newest loads to an IP that refreshes
 often (`docs/THROTTLE_SIGNALS.md`). There is **no captured example**, and none of the 40 saved
 responses shows a marker. So nothing is detected yet. What we build is **the evidence, kept

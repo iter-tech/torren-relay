@@ -64,6 +64,11 @@ const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>board</tit
     return fetch(url, { method: 'POST', body: '{"resultSize":50}' })
       .then(function (r) { return r.ok ? r.json() : null; });
   };
+  // EXT-D11.1 replay: the original method and request body, so the /search variant is real.
+  window.__req = function (url, method, body) {
+    return fetch(url, method === 'GET' ? {} : { method: method, body: body })
+      .then(function (r) { return r.ok ? r.json() : null; });
+  };
   window.__xhr = function (url) {
     return new Promise(function (res) {
       var x = new XMLHttpRequest(); x.open('POST', url); x.responseType = 'json';
@@ -79,6 +84,11 @@ const server = http.createServer((req, res) => {
   req.on('data', c => { body += c; });
   req.on('end', () => {
     if (u.pathname === '/loadboard/fresh') return send(200, { 'content-type': 'text/html' }, PAGE);
+    // EXT-D11.1 replay: ?r=<entry> answers with that ai-chat-2.har entry's own body.
+    if (u.searchParams.get('r') !== null) {
+      const e = har[Number(u.searchParams.get('r'))];
+      return send(e.response.status || 200, NORMAL_HEADERS, e.response.content.text || '{}');
+    }
     if (u.pathname === '/api/loadboard/search') {
       const k = u.searchParams.get('k');
       if (k === 'bot') return send(200, Object.assign({}, NORMAL_HEADERS, { 'x-cache': 'Hit from cloudfront', 'age': '37' }), botBody);
@@ -97,6 +107,109 @@ const server = http.createServer((req, res) => {
     send(404, {}, '');
   });
 });
+
+// The replay: one board cycle = the three requests Amazon fires together (nego 5-row, main 50-row,
+// recommendations), with their ORIGINAL request bodies, answered with their ORIGINAL responses.
+const CYCLES = [[3, 4, 5], [37, 38, 39], [56, 57, 58], [74, 75, 76]];
+const reqOf = (i) => ({ url: new URL(har[i].request.url).pathname + '?r=' + i, method: har[i].request.method,
+                        body: har[i].request.postData ? har[i].request.postData.text : null });
+
+async function replaySuite(browser, base) {
+  const context = await browser.newContext();
+  await context.route('**/*', r => (r.request().url().startsWith(base) ? r.continue() : r.abort()));
+  const page = await context.newPage();
+  const errors = [], notices = [];
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('console', m => {
+    if (m.type() === 'error') errors.push(m.text());
+    if (/FRESHNESS WARNING|endpoint back/.test(m.text())) notices.push(m.text());
+  });
+  await page.addInitScript({ content: rd(path.join(REPO, 'content/networkObserver.js')) });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('Runtime.enable');
+  await cdp.send('Page.enable');
+  let iso = null;
+  cdp.on('Runtime.executionContextCreated', e => { if (e.context.name === 'tenlane') iso = e.context.id; });
+  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: '0', worldName: 'tenlane' });
+  await page.goto(base + '/loadboard/fresh');
+  for (let i = 0; i < 50 && !iso; i++) await sleep(20);
+  const inIso = async (expr) => {
+    const r = await cdp.send('Runtime.evaluate', { expression: expr, contextId: iso, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception ? r.exceptionDetails.exception.description : r.exceptionDetails.text);
+    return r.result.value;
+  };
+  for (const src of [rd(path.join(REPO, 'utils/constants.js')), rd(path.join(REPO, 'utils/logger.js')), CHROME_SHIM,
+                     rd(path.join(REPO, 'utils/freshnessProbe.js'))]) {
+    await inIso(src + '\n;void 0');
+  }
+  // Real thresholds' SHAPE, compressed time: a 300 ms "cycle" instead of 30 s, the gap floor
+  // scaled the same way (10 s → 250 ms). Streak length stays 10; "≥ 5 min since the last new id"
+  // becomes 1.5 s. Test only — product code never calls configure().
+  await inIso(`freshnessProbe.configure({ silentMinGapMs: 250, tickMs: 100, snapshotEveryMs: 100, noNewMinMs: 1500 }) && true`);
+  const call = (i) => { const q = reqOf(i); return page.evaluate(a => window.__req(a.url, a.method, a.body), q); };
+  const cycle = async (idx, skipRecs) => {
+    await call(idx[0]); await call(idx[1]);
+    if (!skipRecs) await call(idx[2]);
+    await page.evaluate(() => window.__req('/api/ons/v1/notifications?r=2', 'GET', null));
+    await sleep(300);
+  };
+
+  for (const c of CYCLES) await cycle(c, false);
+  await sleep(300);
+  let eps = await inIso('freshnessProbe._endpoints()');
+  const row = (k) => eps.find(r => r.ek === k) || {};
+  const recs = await inIso(`new Promise(function (r) { freshnessProbe.read(r); })`);
+  const newIdsOf = (k) => recs.filter(r => r.ek === k).map(r => r.newIds);
+  check('census: search split into search:main / search:nego, plus recommendations and GET /api/ons/v1/notifications, 4 calls each',
+        row('search:main').ek && row('search:nego').ek && row('recommendations').ek && row('GET /api/ons/v1/notifications').ek &&
+        ['search:main', 'search:nego', 'recommendations', 'GET /api/ons/v1/notifications'].every(k => row(k).perMin.reduce((a, m) => a + m.n, 0) === 4),
+        eps.map(r => r.ek + ':' + r.perMin.reduce((a, m) => a + m.n, 0)));
+  check('census per minute carries statuses (all 200)', row('search:main').perMin.every(m => Object.keys(m.st).join() === '200'), row('search:main').perMin);
+  check('new ids vs the previous response of the SAME endpoint match the sample: search:main null,3,0,0 · recommendations null,2,1,0 · nego null,0,0,0',
+        JSON.stringify(newIdsOf('search:main')) === '[null,3,0,0]' && JSON.stringify(newIdsOf('recommendations')) === '[null,2,1,0]' &&
+        JSON.stringify(newIdsOf('search:nego')) === '[null,0,0,0]',
+        { main: newIdsOf('search:main'), recs: newIdsOf('recommendations'), nego: newIdsOf('search:nego') });
+  check('a normal replay raises NO endpoint warning', notices.length === 0, notices);
+
+  // (a) recommendations stops; the board keeps cycling.
+  for (let k = 0; k < 6; k++) await cycle(CYCLES[3], true);
+  await sleep(200);
+  eps = await inIso('freshnessProbe._endpoints()');
+  check('(a) recommendations stops while search keeps cycling → "endpoint silent" warning, row flagged',
+        notices.some(n => /endpoint silent: recommendations/.test(n)) && row('recommendations').silent === true && row('search:main').silent === false,
+        { notices, recs: { silent: row('recommendations').silent, lastSeen: row('recommendations').lastSeen } });
+
+  // The popup shows it.
+  const pop = await context.newPage();
+  await pop.addInitScript({ content: CHROME_SHIM });
+  await pop.goto(base + '/ext/popup/popup.html');
+  await sleep(600);
+  const table = await pop.evaluate(() => [...document.querySelectorAll('#popup-fresh-endpoints-body tr')].map(tr => [...tr.children].map(td => td.textContent)));
+  check('popup table: one row per endpoint, board rows first, with last seen / calls/min / newest / new ids / warn — recommendations SILENT',
+        table.length === 4 && table[0][0] === 'search:main' && table[1][0] === 'search:nego' && table[2][0] === 'recommendations' &&
+        table[2][5] === 'SILENT' && /^\d\d:\d\d:\d\d$/.test(table[0][1]) && /m$/.test(table[0][3]) && table[0][4] === '0', table);
+  await pop.close();
+
+  // It comes back.
+  await cycle(CYCLES[3], false);
+  await sleep(200);
+  eps = await inIso('freshnessProbe._endpoints()');
+  check('   … and when it fires again the flag clears ("endpoint back")', row('recommendations').silent === false && notices.some(n => /endpoint back/.test(n)));
+
+  // (b) search:main keeps returning the SAME ids. First a real "new" response (#4 → #38: 3 new),
+  // then #38's body again and again.
+  await call(4); await sleep(50); await call(38);
+  const before = notices.length;
+  await sleep(1600);                               // "≥ 5 min since the last new id", compressed
+  for (let k = 0; k < 11; k++) { await call(38); await sleep(60); }
+  await sleep(200);
+  eps = await inIso('freshnessProbe._endpoints()');
+  check('(b) search:main returns the same ids 11× (≥ 10 in a row with 0 new, after it normally brought new ones) → "no new loads"',
+        notices.slice(before).some(n => /no new loads: search:main/.test(n)) && row('search:main').noNew === true && row('search:main').newIdsLast === 0,
+        { notices: notices.slice(before), noNew: row('search:main').noNew });
+  check('no page errors (replay)', errors.length === 0, errors);
+  await context.close();
+}
 
 const results = [];
 function check(name, pass, detail) {
@@ -233,6 +346,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     check('a forged record is reduced to the known fields (no extra keys, no cookie header)', !('evil' in last) && !('cookie' in last.hdr) && last.hdr['x-cache'] === 'Miss', last);
 
     check('no page errors', errors.length === 0, errors);
+    await context.close();
+
+    // ══ EXT-D11.1 — census, new ids, and the two warnings, on a replay of samples/ai-chat-2.har ══
+    console.log('\n=== EXT-D11.1 replay of ai-chat-2.har ===');
+    await replaySuite(browser, base);
   } catch (e) {
     check('harness ran to completion', false, e.stack);
   } finally {

@@ -323,17 +323,55 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  // EXT-D11.1 — one row per relay /api/ endpoint, board endpoints first. textContent only.
+  var FRESH_BOARD_ORDER = ['search:main', 'search:nego', 'recommendations'];
+  function renderFreshEndpoints(snap) {
+    var body = document.getElementById('popup-fresh-endpoints-body');
+    if (!body) return;
+    body.textContent = '';
+    var rows = (snap && Array.isArray(snap.rows)) ? snap.rows.slice() : [];
+    rows.sort(function (a, b) {
+      var ia = FRESH_BOARD_ORDER.indexOf(a.ek), ib = FRESH_BOARD_ORDER.indexOf(b.ek);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || String(a.ek).localeCompare(String(b.ek));
+    });
+    if (!rows.length) {
+      var tr0 = document.createElement('tr'), td0 = document.createElement('td');
+      td0.colSpan = 6; td0.textContent = 'no requests seen yet';
+      tr0.appendChild(td0); body.appendChild(tr0);
+      return;
+    }
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-testid', 'popup-fresh-ep-' + r.ek);
+      var warn = [r.silent ? 'SILENT' : '', r.noNew ? 'NO NEW' : ''].filter(Boolean).join(' ') ||
+                 (r.warnings ? String(r.warnings) : '');
+      [r.ek, r.lastSeen ? String(r.lastSeen).slice(11, 19) : '—', String(r.callsPerMin),
+       (typeof r.newestAgeMin === 'number') ? r.newestAgeMin + 'm' : '—',
+       (typeof r.newIdsLast === 'number') ? String(r.newIdsLast) : '—', warn || '—'].forEach(function (v, i) {
+        var td = document.createElement('td');
+        td.textContent = v;
+        td.title = v;
+        if (i === 5 && (r.silent || r.noNew)) td.className = 'popup-fresh-warn';
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+  }
+
   if (typeof freshnessProbe !== 'undefined') {
     freshnessProbe.read(function (list) { renderFreshStats(list); });
+    if (freshnessProbe.readEndpoints) freshnessProbe.readEndpoints(renderFreshEndpoints);
 
     var freshCopyBtn = document.getElementById('popup-fresh-copy');
     if (freshCopyBtn) {
       freshCopyBtn.addEventListener('click', function () {
         freshnessProbe.read(function (list) {
+         freshnessProbe.readEndpoints(function (endpoints) {
           var text = JSON.stringify({
             exportedAt: new Date().toISOString(),
             version: (chrome.runtime && chrome.runtime.getManifest) ? chrome.runtime.getManifest().version : null,
             summary: freshnessProbe.summarise(list),
+            endpoints: endpoints,          // EXT-D11.1 — the per-endpoint census snapshot
             records: list
           }, null, 2);
           navigator.clipboard.writeText(text).then(function () {
@@ -343,6 +381,7 @@ document.addEventListener('DOMContentLoaded', function () {
             freshCopyBtn.textContent = 'Copy failed — see console';
             logger.error('popup', 'freshness copy failed', { error: e });
           });
+         });
         });
       });
     }
@@ -1127,6 +1166,10 @@ document.addEventListener('DOMContentLoaded', function () {
   if (area === 'local' && typeof FRESHNESS_PROBE_KEY !== 'undefined' && changes[FRESHNESS_PROBE_KEY] &&
       typeof renderFreshStats === 'function') {
     renderFreshStats(changes[FRESHNESS_PROBE_KEY].newValue);
+  }
+  if (area === 'local' && typeof FRESHNESS_ENDPOINTS_KEY !== 'undefined' && changes[FRESHNESS_ENDPOINTS_KEY] &&
+      typeof renderFreshEndpoints === 'function') {
+    renderFreshEndpoints(changes[FRESHNESS_ENDPOINTS_KEY].newValue);
   }
   if (area === 'local' && changes[LOAD_SENDER_STATS_KEY]) {
     renderSenderStats(changes[LOAD_SENDER_STATS_KEY].newValue);
