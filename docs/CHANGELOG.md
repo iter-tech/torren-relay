@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-29 — Rate guard (EXT-D12) and the redesigned top bar (EXT-D13)
+
+⚠ Proved headless (bar suite 27/27, freshness 27/27, aichat 95/95; build passes, 53 files).
+**Not verified on live Amazon.** Details and the removal steps: `docs/DECISIONS.md` EXT-D12 / D13.
+
+- **`utils/rateGuard.js`** (new, one file) + **`RATE_GUARD_ENABLED`** in `utils/constants.js`.
+  - It combines the search + recommendations rate of all Relay tabs in the background.
+  - green < 80/min, yellow ≥ 80, red ≥ 95. Red refuses the refresh permit in every tab (our
+    auto-refresh pauses) until the rate is below 70.
+  - It shows friendly bar messages and keeps a 503 block log, shown as "last block N min" in the
+    popup. It logs state changes, pause/resume and block start/end.
+  - Flag false → nothing runs, renders or logs.
+- **`background.js`** — `importScripts(constants, rateGuard)`, plus a permit refusal **after** the
+  503 backoff check (the backoff always wins; the 3×503 stop is unchanged).
+- **`content/sidebar.js`**
+  - Four blocks with an "i" each: logo (new SVG mark + "Tenlane"), auto-refresh ("⟳ 2.5s"), page
+    health (the memory dot, now discrete green/yellow/red at 40 % / 75 %, plus a reload button),
+    and rate.
+  - One font and scale, hairline separators, the same 40 px row, narrow-width rules, and the city
+    row restyled to match.
+- **`icons/tenlane-mark.svg`**, **`icons/tenlane-logo.svg`** (new) — the reusable logo.
+- **`popup/`** — loads `rateGuard.js`, which adds the "last block" line.
+- **`scripts/bar-suite/`** (new) and **`docs/bar-screenshots/`** (18 screenshots).
+
 ## 2026-09-29 — Freshness recorder: per-endpoint census, new ids, silence / no-new warnings (EXT-D11.1)
 
 **From the samples:** the board cycle is `search:nego` (5 rows, old loads) + `search:main` (50

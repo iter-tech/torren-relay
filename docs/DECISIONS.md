@@ -13,6 +13,147 @@ behind.
 
 ---
 
+## EXT-D13 — ✅ THE TOP BAR, REDESIGNED INTO BLOCKS: LOGO · AUTO-REFRESH · PAGE HEALTH · RATE
+
+**2026-09-29, Ihor.** The bar on Amazon's page (`content/sidebar.js`) was the text "Tenlane Relay", a
+play button, a slider, "Refresh every 2.5s", a coloured dot and an "i", with the city row
+underneath. It is now four blocks separated by hairlines, each with its own "i". Every function is
+kept.
+
+**Trace, before changing anything:**
+- **The green dot is a memory gauge, and nothing else.** It shows
+  `performance.memory.usedJSHeapSize / jsHeapSizeLimit` via `getHeapUsageRatio()`
+  (`content/content.js:268-280`). It is polled every 7 s, and clicking it runs `location.reload()`.
+- **It used to be a blended colour:** ≤ 40 % green, 62.5 % amber, ≥ 85 % red, linear RGB in
+  between.
+- **Where each control lives (all in `sidebar.js`):** title, play/pause, slider, value label, dot,
+  "i", the shared-rate row, the 503 toast and the scanline are built in `buildSidebar()`. The city
+  row is `content/originCities.js buildOriginCitiesPanel()`, appended into the bar as its second
+  row.
+
+**The blocks:**
+- **Logo.** An SVG mark redrawn from `icons/icon128.png`. The colours are sampled from the PNG:
+  gradient `#1f409a → #2463ea → #0ea5e9`, a white rounded "T", and a cyan dot `#38bdf8` /
+  `#0ea5e9`. Next to it, the wordmark "Tenlane". `aria-label` keeps "Tenlane Relay". The reusable
+  assets are **`icons/tenlane-mark.svg`** and **`icons/tenlane-logo.svg`** (mark + wordmark).
+- **Auto-refresh.** Play/pause, the slider, and a schematic **"⟳ 2.5s"** label (fixed width,
+  tabular figures). The full sentence moved into the label's `title` and the block's "i".
+- **Page health.** The same dot and the same measure, now **three discrete levels: green < 40 %,
+  yellow 40–75 %, red ≥ 75 %**:
+  - 40 % is the old gradient's green stop;
+  - 75 % is past the midpoint between its amber (62.5 %) and red (85 %) stops, where the old dot was
+    already closer to red than to amber.
+
+  A **reload** icon button now sits beside it (the dot still reloads too).
+- **Rate** (EXT-D12). A dot, the per-minute count, and the friendly message when yellow or red. It
+  is absent when `RATE_GUARD_ENABLED` is false.
+
+**Layout:**
+- One font (the system UI stack) and one scale: 12 px, 11 px secondary, 14 px wordmark.
+- **The row stays 40 px**, so body padding and the city row do not move: **no layout shift** (the
+  suite measured 40 px and 44 px padding in every state).
+- Narrow windows: below 1180 px the rate message text hides (it stays in the `title`); below
+  980 px the wordmark hides and the slider narrows. Measured inside the viewport at 1280, 1024 and
+  900 px.
+- The city row keeps its behaviour. Only its look is aligned with the bar: same font, gutter,
+  12 px, 30 px pills.
+
+⚠ **Unchanged, and worth knowing:** body padding covers row 1 only (44 px), as it did before this
+change. When the city row is shown, it still overlaps the page under the centre of the bar. Fixing
+that would push Amazon's page down, a separate decision.
+
+**Proof:** `scripts/bar-suite/run.cjs` checks play/pause, the slider (3.5 s stored, label
+"⟳ 3.5s"), the logo, the city row ("All", "CHICAGO, IL"), every block's "i", the reload button,
+and the health levels at 0.39 / 0.40 / 0.74 / 0.75. Screenshots of every state at 1920 and 1280 px
+are in **`docs/bar-screenshots/`**: normal, health yellow and red, rate yellow and red, and each
+tooltip open. ⚠ **Not verified on live Amazon.**
+
+---
+
+## EXT-D12 — ✅ THE RATE GUARD: ONE REMOVABLE MODULE THAT PAUSES OUR AUTO-REFRESH BEFORE AMAZON BLOCKS
+
+**2026-09-29, Ihor.** **Live evidence, one observation:** on 2026-09-29 at 05:22–05:26 UTC, manual
+refreshing on top of our 2.5 s auto-refresh got the board blocked by Amazon (503, usually for
+5–20 min).
+- **There was no early marker:** `isBotRequest` stayed null and the headers were unchanged until
+  the first 503.
+- **The only signal was the rate.** `r1` was 55–72 normally, rose to 93–105, and the first 503
+  came at **r1 = 107** (r5 = 347).
+
+**Trace:**
+- The freshness recorder's `r1`/`r5` count **only `/api/loadboard/search` (every variant) and
+  `/api/loadboard/recommendations/get` requests**, at request time
+  (`content/networkObserver.js:1012` `FRESH_PATHS`; `freshNoteRequest()` `:1087`, called from
+  the fetch path `:1319` and the XHR path `:1410`; `freshRate()` `:1092`).
+- **`/api/loadboard/similar` and every other `/api/` call are NOT counted.**
+- They count **per page (tab)**, not across tabs.
+
+**What it does:**
+- **Counts across ALL Relay tabs together.** Amazon sees them as one user. Each tab forwards its
+  census events (the same two endpoints) to the background service worker, which keeps one
+  combined count and broadcasts it (`chrome.storage.local` `extRateGuard`). The rate uses the
+  **same endpoint set as the live r1**, so the observed numbers apply unchanged.
+- **States:** green < 80/min, **yellow ≥ 80**, **red ≥ 95**. Red is left only below **70**
+  (hysteresis). All of it is in `RATE_GUARD_CFG`.
+- **Red pauses OUR auto-refresh in every tab.** `background.js grantOrDenyPermit()` refuses the
+  permit (`rateGuardPaused: true`), so each tab's loop skips its ticks and resumes by itself below
+  70. Amazon's UI and requests are never touched, and the dispatcher's own refreshes are never
+  blocked.
+- **Messages:**
+  - yellow: "Refreshing a bit fast — ease off to keep loads coming."
+  - red: "Short pause to keep your board available. Resuming automatically."
+- **Block log:** a 503 streak's start and end, its duration, the number of 503s, and r1/r5 at its
+  start. The popup's Freshness block shows **"rate guard · last block N min"**.
+- **Events logged** (tab debug log via `logger.notice`, plus the background console and
+  `extRateGuardLog`): state change, auto-pause, auto-resume, block start, block end.
+
+**How it and the existing 503 slow-down interact.** They are independent and never contradict.
+- **The 503 backoff** (background.js, from the first rate-limit status) is **checked first** in
+  `grantOrDenyPermit()` and always wins.
+- **The 3-consecutive-503 stop** (sidebar.js, which sets running = false and shows the toast) is
+  untouched.
+- **The rate guard only adds one more reason to refuse a permit, before the first 503.** It never
+  sets `running`, and never shortens or clears a backoff. It releases its own pause only.
+- If both apply, the tab waits for both. If the loop was stopped by the 503 rule, it stays stopped
+  until the dispatcher restarts it, exactly as before.
+
+### 🔧 HOW TO REMOVE THE RATE GUARD (one short task)
+
+Delete **one file**, delete **one flag**, and remove **six small hook blocks**. Each is marked
+`RATE GUARD (EXT-D12)` in its file:
+
+1. Delete **`utils/rateGuard.js`**.
+2. `utils/constants.js`: delete `const RATE_GUARD_ENABLED = true;` (line 159) and its comment
+   block above it.
+3. `manifest.json`: delete the line `"utils/rateGuard.js",` (content_scripts, line 61).
+4. `background.js`: delete the `importScripts('utils/constants.js', 'utils/rateGuard.js')` line
+   (line 22, with its comment), and the `if (typeof rateGuard !== 'undefined' && rateGuard.isPaused())`
+   block in `grantOrDenyPermit()` (lines 105-109).
+5. `popup/popup.html`: delete `<script src="../utils/rateGuard.js"></script>` (line 366).
+   `popup/popup.js`: delete the `rateGuard.mountPopup(...)` line (line 362, with its comment).
+6. `content/sidebar.js`: delete the `if (typeof rateGuard !== 'undefined' && rateGuard.enabled())
+   { … }` block (lines 530-535). The `.ext-bar-rate*` CSS rules may stay (inert) or go.
+
+Everything is guarded by `typeof rateGuard !== 'undefined'`, so a partial removal cannot break
+anything. **Just switching it off:** set the flag to `false`. The suite proves that nothing then
+runs, renders or logs.
+
+**Proof:** `scripts/bar-suite/run.cjs`, **27/27** (with EXT-D13). There is a real
+`background.js` + `rateGuard.js` in a background page with a fake clock, and two tab pages with the
+real bar. Combined traffic:
+- 60/min → green in both tabs;
+- 85 → yellow in both, with the message;
+- 100 → red in both, with the message, and **the permit refused in both**;
+- 60 for 30 s → still red (hysteresis); then green in both and **permits granted again**.
+
+A **3-minute 503 streak** is recorded: 3.0 min, 180 × 503, r1/r5 at start. The popup shows "3 min
+· r1 61 at start …". **Flag false:** no element, no log line and no popup line, 100/min does not
+pause, and the rest of the bar is intact. The freshness suite still passes 27/27 and the aichat
+suite 95/95; the build passes (53 files). ⚠ **Not verified on live Amazon.** The thresholds rest on
+**one** observed block.
+
+---
+
 ## EXT-D11 — ✅ A PASSIVE FRESHNESS RECORDER, SO SILENT THROTTLING IS CAUGHT THE DAY IT HAPPENS
 
 ### ✅ AMENDED 2026-09-29 (EXT-D11.1): WHICH REQUEST BRINGS THE NEWEST LOADS, AND WHEN IT STOPS

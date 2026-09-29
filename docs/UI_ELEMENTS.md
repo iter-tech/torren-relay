@@ -3,6 +3,21 @@
 Every UI element MUST have a unique data-testid.
 When reporting a bug, use the testid name.
 
+## Top bar — blocks (content/sidebar.js — 2026-09-29, EXT-D13) and rate guard (EXT-D12)
+
+Existing testids are kept: `ext-sidebar`, `ext-sidebar-title` (now the logo), `ext-playpause`,
+`ext-slider-speed`, `ext-slider-value` (now "⟳ 2.5s"), `ext-memory-indicator` (now `data-level`
+green/yellow/red/unknown), `ext-memory-info`, `ext-memory-tooltip`.
+
+| testid | Type | Function |
+|--------|------|----------|
+| ext-bar-block-logo / -refresh / -health / -rate | div | The four blocks of row 1, separated by hairlines. |
+| ext-info-logo, ext-info-refresh, ext-info-rate (+ `-tip`) | span / div | Each block's "i" and its tooltip (hover, focus or click). |
+| ext-page-reload | button | Reloads the page, the same as clicking the health dot. Extension-owned; no automatic trigger. |
+| ext-rate-guard | span | Rate block (only when RATE_GUARD_ENABLED): `data-state` green/yellow/red. |
+| ext-rate-guard-dot / -label / -msg | span | The dot, "N/min", and the friendly message (yellow/red). |
+| popup-rate-guard-line / popup-rate-lastblock | div / span | Popup Freshness block: "rate guard · last block N min · r1 … at start". |
+
 ## Popup — Freshness check (measurement) (popup/popup.html — 2026-09-28, EXT-D11)
 
 Passive evidence for silent throttling; filled from `utils/freshnessProbe.js`. Every line prints

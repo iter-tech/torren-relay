@@ -25,8 +25,10 @@ function buildSidebar() {
       'border-radius:0 0 8px 8px;' +
       'box-shadow:0 2px 8px rgba(0,0,0,.14);' +
       'border-bottom:1px solid var(--ext-n200);' +
-      'font-family:Arial,sans-serif;font-size:13px;font-weight:600;' +
-      'letter-spacing:.3px;white-space:nowrap;user-select:none;' +
+      // EXT-D13: one font and one scale for the whole bar — 12px body, 11px secondary, 14px
+      // wordmark. Was Arial 13px/600 with .3px tracking everywhere.
+      'font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,Arial,sans-serif;' +
+      'font-size:12px;font-weight:500;letter-spacing:normal;white-space:nowrap;user-select:none;' +
       // 2026-07-30: was overflow:hidden. Changed to visible because the info tooltip
       // (ext-memory-tooltip; ext-rate-limit-tooltip also existed then) is absolutely
       // positioned BELOW the bar and was being clipped away entirely by it. Nothing
@@ -45,8 +47,79 @@ function buildSidebar() {
       // that could not be tested here. Harmless when nothing is wide enough to hit it.
       'max-width:calc(100vw - 16px);' +
     '}' +
+    // EXT-D13: row 1 is a line of BLOCKS (logo · auto-refresh · page health · rate), each with
+    // its own "i", separated by a hairline. Height stays 40px, so body padding and the city row
+    // below are exactly where they were — no layout shift for Amazon's page.
     '#ext-sidebar .ext-sidebar-row1{' +
-      'height:40px;padding:0 20px;display:flex;align-items:center;gap:12px;' +
+      'height:40px;padding:0 6px;display:flex;align-items:center;gap:0;' +
+    '}' +
+    '#ext-sidebar .ext-bar-block{' +
+      'display:flex;align-items:center;gap:8px;height:24px;padding:0 12px;flex-shrink:0;' +
+    '}' +
+    '#ext-sidebar .ext-bar-block + .ext-bar-block{border-left:1px solid var(--ext-n200);}' +
+    '#ext-sidebar .ext-bar-logo{display:inline-flex;align-items:center;gap:7px;}' +
+    '#ext-sidebar .ext-bar-logo svg{width:20px;height:20px;display:block;flex-shrink:0;}' +
+    '#ext-sidebar .ext-bar-wordmark{font-size:14px;font-weight:700;letter-spacing:-.01em;color:var(--ext-n900);}' +
+    // Page-health dot: discrete green / yellow / red (EXT-D13), grey when unmeasurable.
+    '#ext-sidebar [data-testid="ext-memory-indicator"][data-level="green"]{background:#2ea043;}' +
+    '#ext-sidebar [data-testid="ext-memory-indicator"][data-level="yellow"]{background:#d4a72c;}' +
+    '#ext-sidebar [data-testid="ext-memory-indicator"][data-level="red"]{background:#da3633;}' +
+    '#ext-sidebar [data-testid="ext-memory-indicator"][data-level="unknown"]{background:var(--ext-n400);}' +
+    '#ext-sidebar [data-testid="ext-page-reload"]{' +
+      'width:22px;height:22px;border-radius:50%;border:none;background:transparent;padding:0;' +
+      'display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ext-n500);' +
+    '}' +
+    '#ext-sidebar [data-testid="ext-page-reload"]:hover{background:var(--ext-n100);color:var(--ext-n900);}' +
+    '#ext-sidebar [data-testid="ext-page-reload"]:focus-visible{box-shadow:0 0 0 2px var(--ext-accent);outline:none;}' +
+    '#ext-sidebar [data-testid="ext-page-reload"] svg{width:13px;height:13px;display:block;}' +
+    // Every block's "i" and its tooltip — one style for all of them.
+    '#ext-sidebar .ext-bar-info{' +
+      'width:14px;height:14px;border-radius:50%;cursor:help;flex-shrink:0;position:relative;' +
+      'display:inline-flex;align-items:center;justify-content:center;' +
+      'font-size:10px;font-weight:700;line-height:1;font-style:normal;' +
+      'background:var(--ext-n100);border:1px solid var(--ext-n200);color:var(--ext-n500);outline:none;' +
+    '}' +
+    '#ext-sidebar .ext-bar-info:focus-visible{box-shadow:0 0 0 2px var(--ext-accent);}' +
+    '#ext-sidebar .ext-bar-tip{' +
+      'display:none;position:absolute;top:26px;left:50%;transform:translateX(-50%);width:240px;' +
+      'background:var(--ext-n900);color:var(--ext-bar-bg);font-size:11px;font-weight:400;' +
+      'line-height:1.45;padding:8px 10px;border-radius:6px;text-align:left;' +
+      'box-shadow:0 2px 10px rgba(0,0,0,.3);white-space:normal;letter-spacing:normal;' +
+      'z-index:2147483647;cursor:default;' +
+    '}' +
+    '#ext-sidebar .ext-bar-tip.ext-tooltip-visible{display:block;}' +
+    // Rate block (EXT-D12, only present when RATE_GUARD_ENABLED).
+    '#ext-sidebar .ext-bar-rate{display:inline-flex;align-items:center;gap:6px;min-width:0;}' +
+    '#ext-sidebar .ext-bar-rate__dot{width:8px;height:8px;border-radius:50%;background:#2ea043;flex-shrink:0;}' +
+    '#ext-sidebar .ext-bar-rate[data-state="yellow"] .ext-bar-rate__dot{background:#d4a72c;}' +
+    '#ext-sidebar .ext-bar-rate[data-state="red"] .ext-bar-rate__dot{background:#da3633;}' +
+    '#ext-sidebar .ext-bar-rate__label{font-size:12px;font-weight:600;min-width:48px;' +
+      'font-variant-numeric:tabular-nums;color:var(--ext-n700);}' +
+    '#ext-sidebar .ext-bar-rate__msg{font-size:11px;font-weight:500;max-width:380px;' +
+      'overflow:hidden;text-overflow:ellipsis;color:var(--ext-n700);}' +
+    '#ext-sidebar .ext-bar-rate__msg:empty{display:none;}' +
+    '#ext-sidebar .ext-bar-rate[data-state="yellow"] .ext-bar-rate__msg{color:#7a4f00;}' +
+    '#ext-sidebar .ext-bar-rate[data-state="red"] .ext-bar-rate__msg{color:#9a2a1f;}' +
+    // Narrow windows: the bar must never grow over Amazon's controls. Drop the longest texts
+    // first (their words stay in the tooltips/titles), then the wordmark.
+    '@media (max-width:1180px){#ext-sidebar .ext-bar-rate__msg{display:none;}}' +
+    '@media (max-width:980px){' +
+      '#ext-sidebar .ext-bar-wordmark{display:none;}' +
+      '#ext-sidebar [data-testid="ext-slider-speed"]{width:60px;}' +
+      '#ext-sidebar .ext-bar-block{padding:0 8px;}' +
+    '}' +
+    // City row (originCities.js) — aligned with the bar: same font, same side gutter, same scale.
+    // Its behaviour and its own stylesheet are untouched; this only overrides looks.
+    '#ext-sidebar #ext-origin-cities{font-family:inherit;padding:6px 18px 8px;gap:6px;}' +
+    '#ext-sidebar #ext-origin-cities{--ext-city-btn-h:30px;}' +
+    '#ext-sidebar #ext-origin-cities [data-testid="ext-origin-cities-all"],' +
+    '#ext-sidebar #ext-origin-cities [data-testid="ext-origin-city"],' +
+    '#ext-sidebar #ext-origin-cities [data-testid="ext-origin-city-label"]{' +
+      'font-size:12px;font-weight:600;letter-spacing:normal;' +
+    '}' +
+    '#ext-sidebar #ext-origin-cities [data-testid="ext-origin-cities-all"],' +
+    '#ext-sidebar #ext-origin-cities [data-testid="ext-origin-city"]{' +
+      'padding:5px 12px;border-radius:6px;' +
     '}' +
     // Row 2 — shared-rate status line (2026-07-20 toggle follow-up, 2026-07-30 this task).
     // Hidden by default (JS shows it only when shared mode is ON and backoff is not
@@ -75,7 +148,7 @@ function buildSidebar() {
       'font-size:13px;font-weight:600;color:var(--ext-n900);' +
     '}' +
     '#ext-sidebar [data-testid="ext-playpause"]{' +
-      'width:48px;height:26px;border-radius:13px;' +
+      'width:40px;height:24px;border-radius:12px;' +
       'background:var(--ext-n100);border:1px solid var(--ext-n200);' +
       'display:inline-flex;align-items:center;justify-content:center;' +
       'cursor:pointer;color:var(--ext-n700);outline:none;' +
@@ -124,47 +197,26 @@ function buildSidebar() {
         'background:rgba(76,141,255,.9);}' +
     '}' +
     '#ext-sidebar [data-testid="ext-slider-speed"]{' +
-      'width:80px;cursor:pointer;accent-color:var(--ext-accent);vertical-align:middle;' +
+      'width:84px;cursor:pointer;accent-color:var(--ext-accent);vertical-align:middle;margin:0;' +
     '}' +
+    // Fixed min-width + tabular figures: "⟳ 0.5s" … "⟳ 8.0s" never changes the block's width.
     '#ext-sidebar [data-testid="ext-slider-value"]{' +
-      'font-size:11px;min-width:28px;opacity:.9;color:var(--ext-n700);' +
+      'font-size:12px;font-weight:600;min-width:46px;color:var(--ext-n700);' +
+      'font-variant-numeric:tabular-nums;' +
     '}' +
     // 2026-07-31: the ext-rate-limit-banner / ext-rate-limit-text rules lived here and were
     // removed with the paused message. See BACKLOG.md "Sidebar paused/rate-limit message" for
     // the exact declarations, in case this is reinstated.
     '#ext-sidebar [data-testid="ext-memory-indicator"]{' +
-      'width:12px;height:12px;border-radius:50%;cursor:pointer;' +
-      'border:1px solid var(--ext-n300);flex-shrink:0;' +
+      'width:10px;height:10px;border-radius:50%;cursor:pointer;' +
+      'border:1px solid rgba(0,0,0,.08);flex-shrink:0;' +
       'transition:background-color .4s;outline:none;' +
     '}' +
     '#ext-sidebar [data-testid="ext-memory-indicator"]:focus-visible{' +
       'box-shadow:0 0 0 2px var(--ext-accent);' +
     '}' +
-    // Geometry + tooltip anchoring for the memory info icon. 2026-07-31: these four rules
-    // used to be shared selectors also naming ext-rate-limit-info / ext-rate-limit-tooltip,
-    // plus two rate-limit-only rules (a currentColor override and a 340px tooltip width).
-    // Those selectors and rules went with the paused message — see BACKLOG.md. The memory
-    // declarations below are unchanged.
-    '#ext-sidebar [data-testid="ext-memory-info"]{' +
-      'width:14px;height:14px;border-radius:50%;cursor:help;flex-shrink:0;' +
-      'display:inline-flex;align-items:center;justify-content:center;' +
-      'font-size:10px;font-weight:700;line-height:1;' +
-      'background:var(--ext-n100);border:1px solid var(--ext-n200);color:var(--ext-n700);' +
-      'outline:none;position:relative;' +
-    '}' +
-    '#ext-sidebar [data-testid="ext-memory-info"]:focus-visible{' +
-      'box-shadow:0 0 0 2px var(--ext-accent);' +
-    '}' +
-    '#ext-sidebar [data-testid="ext-memory-tooltip"]{' +
-      'display:none;position:absolute;top:32px;right:0;width:220px;' +
-      'background:var(--ext-n900);color:var(--ext-bar-bg);font-size:11px;font-weight:400;' +
-      'line-height:1.4;padding:8px 10px;border-radius:6px;' +
-      'box-shadow:0 2px 10px rgba(0,0,0,.4);white-space:normal;' +
-      'letter-spacing:normal;z-index:2147483647;' +
-    '}' +
-    '#ext-sidebar [data-testid="ext-memory-tooltip"].ext-tooltip-visible{' +
-      'display:block;' +
-    '}' +
+    // EXT-D13: the memory "i" and its tooltip now use the shared .ext-bar-info / .ext-bar-tip
+    // styles above (same testids: ext-memory-info, ext-memory-tooltip).
 
     /* ── Dark theme overrides — explicit values override nightMode.js's !important rules ── */
     'html.ext-night #ext-sidebar{' +
@@ -174,6 +226,14 @@ function buildSidebar() {
       'box-shadow:0 2px 8px rgba(0,0,0,.4) !important;' +
     '}' +
     'html.ext-night #ext-sidebar [data-testid="ext-sidebar-title"]{color:#e5edf5 !important;}' +
+    'html.ext-night #ext-sidebar .ext-bar-wordmark{color:#e5edf5 !important;}' +
+    'html.ext-night #ext-sidebar .ext-bar-block + .ext-bar-block{border-left-color:rgba(255,255,255,.08) !important;}' +
+    'html.ext-night #ext-sidebar [data-testid="ext-page-reload"]{color:#b0bcca !important;}' +
+    'html.ext-night #ext-sidebar [data-testid="ext-page-reload"]:hover{background:#2c313a !important;color:#e5edf5 !important;}' +
+    'html.ext-night #ext-sidebar .ext-bar-rate__label,' +
+    'html.ext-night #ext-sidebar .ext-bar-rate__msg{color:#b0bcca !important;}' +
+    'html.ext-night #ext-sidebar .ext-bar-rate[data-state="yellow"] .ext-bar-rate__msg{color:#f0c040 !important;}' +
+    'html.ext-night #ext-sidebar .ext-bar-rate[data-state="red"] .ext-bar-rate__msg{color:#ff8a80 !important;}' +
     'html.ext-night #ext-sidebar [data-testid="ext-playpause"]{' +
       'background:#23272d !important;border-color:#2c313a !important;color:#b0bcca !important;' +
     '}' +
@@ -189,10 +249,10 @@ function buildSidebar() {
     'html.ext-night #ext-sidebar [data-testid="ext-slider-value"]{color:#b0bcca !important;}' +
     'html.ext-night #ext-sidebar [data-testid="ext-shared-rate-status"]{color:#9fb3c8 !important;}' +
     'html.ext-night #ext-sidebar [data-testid="ext-memory-indicator"]{border-color:#3a4250 !important;}' +
-    'html.ext-night #ext-sidebar [data-testid="ext-memory-info"]{' +
+    'html.ext-night #ext-sidebar .ext-bar-info{' +
       'background:#23272d !important;border-color:#2c313a !important;color:#b0bcca !important;' +
     '}' +
-    'html.ext-night #ext-sidebar [data-testid="ext-memory-tooltip"]{' +
+    'html.ext-night #ext-sidebar .ext-bar-tip{' +
       'background:#e5edf5 !important;color:#1c1f24 !important;' +
     '}';
     // 2026-07-30: the old static 'body{padding-top:44px!important}' rule was removed —
@@ -213,10 +273,59 @@ function buildSidebar() {
   container.setAttribute('data-testid-drag', 'ext-sidebar-drag-handle');
   container.setAttribute('title', 'Drag to move — double-click to snap back to the top');
 
-  // Title
+  // ── EXT-D13: the "i" + tooltip used by every block ─────────────────────────────────────────
+  // Hover and focus show it, click toggles it (touch). Static text only — never page data.
+  function makeInfo(infoTestid, tipTestid, text) {
+    var info = document.createElement('span');
+    info.className = 'ext-bar-info';
+    info.setAttribute('data-testid', infoTestid);
+    info.setAttribute('tabindex', '0');
+    info.setAttribute('aria-label', 'About this');
+    info.textContent = 'i';
+    var tip = document.createElement('div');
+    tip.className = 'ext-bar-tip';
+    tip.setAttribute('data-testid', tipTestid);
+    tip.setAttribute('role', 'tooltip');
+    tip.textContent = text;
+    info.appendChild(tip);
+    var show = function () { tip.classList.add('ext-tooltip-visible'); };
+    var hide = function () { tip.classList.remove('ext-tooltip-visible'); };
+    info.addEventListener('mouseenter', show);
+    info.addEventListener('mouseleave', hide);
+    info.addEventListener('focus', show);
+    info.addEventListener('blur', hide);
+    info.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (tip.classList.contains('ext-tooltip-visible')) hide(); else show();
+    });
+    return info;
+  }
+  function makeBlock(testid) {
+    var b = document.createElement('div');
+    b.className = 'ext-bar-block';
+    b.setAttribute('data-testid', testid);
+    return b;
+  }
+
+  // Logo block (EXT-D13) — was the plain text "Tenlane Relay". The mark is the extension icon's
+  // own geometry and colours (icons/icon128.png: blue gradient tile, white rounded "T", cyan dot),
+  // redrawn as SVG so it is crisp at 20px; the same artwork is kept as icons/tenlane-logo.svg.
+  // Static markup, no page data — innerHTML is safe here.
   const title = document.createElement('span');
   title.setAttribute('data-testid', 'ext-sidebar-title');
-  title.textContent = EXT_NAME;
+  title.className = 'ext-bar-logo';
+  title.setAttribute('aria-label', EXT_NAME);
+  title.innerHTML =
+    '<svg viewBox="0 0 128 128" aria-hidden="true">' +
+      '<defs><linearGradient id="ext-logo-g" x1="0" y1="0" x2="1" y2="1">' +
+        '<stop offset="0" stop-color="#1f409a"/><stop offset=".55" stop-color="#2463ea"/>' +
+        '<stop offset="1" stop-color="#0ea5e9"/></linearGradient></defs>' +
+      '<rect width="128" height="128" rx="28" fill="url(#ext-logo-g)"/>' +
+      '<circle cx="87" cy="74" r="16" fill="#0ea5e9"/><circle cx="87" cy="74" r="12" fill="#38bdf8"/>' +
+      '<rect x="34" y="30" width="60" height="17" rx="8.5" fill="#fff"/>' +
+      '<rect x="55.5" y="30" width="17" height="67" rx="8.5" fill="#fff"/>' +
+    '</svg>' +
+    '<span class="ext-bar-wordmark">Tenlane</span>';
 
   // Play/pause control — Click writes tabState; tabState subscriber drives the visual.
   const playpause = document.createElement('span');
@@ -266,20 +375,23 @@ function buildSidebar() {
   memoryIndicator.setAttribute('title', 'Memory usage — click to reload page');
   memoryIndicator.setAttribute('aria-label', 'Memory usage indicator. Click to reload the page.');
 
-  // Info icon — hover/tap tooltip explaining the indicator
-  const memoryInfo = document.createElement('span');
-  memoryInfo.setAttribute('data-testid', 'ext-memory-info');
-  memoryInfo.setAttribute('tabindex', '0');
-  memoryInfo.setAttribute('aria-label', 'About the memory indicator');
-  memoryInfo.textContent = 'i';
+  // Info icon — hover/tap tooltip explaining the indicator (EXT-D13: the shared helper, same
+  // testids as before).
+  const memoryInfo = makeInfo('ext-memory-info', 'ext-memory-tooltip',
+    'Page health: how much of the memory Chrome allows this tab Amazon Relay is using — it grows ' +
+    'with every refresh. Green under 40%, yellow from 40%, red from 75%. Reload the page (↻, or ' +
+    'click the dot) to free it; you will need to re-enter your search filters afterward.');
 
-  const memoryTooltip = document.createElement('div');
-  memoryTooltip.setAttribute('data-testid', 'ext-memory-tooltip');
-  memoryTooltip.textContent =
-    'Amazon Relay accumulates data in browser memory with each refresh. ' +
-    'Reloading the page periodically frees that memory. Clicking the dot reloads ' +
-    'the page now. You will need to re-enter your search filters afterward.';
-  memoryInfo.appendChild(memoryTooltip);
+  // EXT-D13: an explicit reload button beside the dot — the dot still reloads too.
+  const pageReload = document.createElement('button');
+  pageReload.type = 'button';
+  pageReload.setAttribute('data-testid', 'ext-page-reload');
+  pageReload.setAttribute('title', 'Reload page');
+  pageReload.setAttribute('aria-label', 'Reload the page');
+  pageReload.innerHTML =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg>';
 
   // Running scanline along the bottom edge
   const scanline = document.createElement('div');
@@ -388,15 +500,39 @@ function buildSidebar() {
   }
   container._showRatePauseMessage = showRatePauseMessage;
 
-  // Build DOM — row 1 (existing controls, now grouped so row 2 can sit below them)
+  // Build DOM — row 1 as BLOCKS (EXT-D13): logo · auto-refresh · page health · rate.
   const row1 = document.createElement('div');
   row1.className = 'ext-sidebar-row1';
-  row1.appendChild(title);
-  row1.appendChild(playpause);
-  row1.appendChild(slider);
-  row1.appendChild(sliderValue);
-  row1.appendChild(memoryIndicator);
-  row1.appendChild(memoryInfo);
+
+  const logoBlock = makeBlock('ext-bar-block-logo');
+  logoBlock.appendChild(title);
+  logoBlock.appendChild(makeInfo('ext-info-logo', 'ext-info-logo-tip',
+    EXT_NAME + ' watches this load board for new loads. Drag the bar to move it; double-click ' +
+    'the bar to put it back at the top.'));
+
+  const refreshBlock = makeBlock('ext-bar-block-refresh');
+  refreshBlock.appendChild(playpause);
+  refreshBlock.appendChild(slider);
+  refreshBlock.appendChild(sliderValue);
+  refreshBlock.appendChild(makeInfo('ext-info-refresh', 'ext-info-refresh-tip',
+    'Auto-refresh: ▶ starts it, ❚❚ stops it. The slider sets how often the board refreshes — ' +
+    'one setting for all your Relay tabs.'));
+
+  const healthBlock = makeBlock('ext-bar-block-health');
+  healthBlock.appendChild(memoryIndicator);
+  healthBlock.appendChild(pageReload);
+  healthBlock.appendChild(memoryInfo);
+
+  row1.appendChild(logoBlock);
+  row1.appendChild(refreshBlock);
+  row1.appendChild(healthBlock);
+
+  // RATE GUARD (EXT-D12): its block exists only when RATE_GUARD_ENABLED — mountBarBlock adds
+  // nothing otherwise, and the empty wrapper is not attached. Remove these lines with the guard.
+  if (typeof rateGuard !== 'undefined' && rateGuard.enabled()) {
+    const rateBlock = makeBlock('ext-bar-block-rate');
+    if (rateGuard.mountBarBlock(rateBlock, makeInfo)) row1.appendChild(rateBlock);
+  }
   container.appendChild(row1);
   container.appendChild(sharedRateStatus);
   container.appendChild(ratePauseMsg);   // D3 — throttling message, hidden until it fires
@@ -456,49 +592,41 @@ function buildSidebar() {
     logger.log('sidebar', 'playpause toggled', { running: nowRunning });
   }
 
-  // --- Memory indicator ---
-  // Color stops (tune here): <=40% green, ~62.5% amber (midpoint), >=85% red.
-  // Linear RGB interpolation between stops; polled independently of the orchestrator
-  // loop (every MEMORY_POLL_MS) so it stays live even while monitoring is paused.
-  var MEMORY_INDICATOR_LOW  = 0.40;
-  var MEMORY_INDICATOR_MID  = 0.625;
-  var MEMORY_INDICATOR_HIGH = 0.85;
-  var MEMORY_POLL_MS        = 7000;
-  var MEMORY_COLOR_GREEN = [46, 160, 67];   // #2ea043
-  var MEMORY_COLOR_AMBER = [212, 167, 44];  // #d4a72c
-  var MEMORY_COLOR_RED   = [218, 54, 51];   // #da3633
-  var MEMORY_COLOR_NEUTRAL = '#8fa1b2'; // n400 — visible on both light and dark bar
+  // --- Page health (memory) indicator ---
+  // Polled independently of the orchestrator loop (every MEMORY_POLL_MS) so it stays live even
+  // while monitoring is paused. Until EXT-D13 it was a blended colour (≤40% green → 62.5% amber →
+  // ≥85% red, linear RGB in between); it is now three discrete levels, below.
+  var MEMORY_POLL_MS = 7000;
 
-  function lerpColor(c1, c2, t) {
-    var r = Math.round(c1[0] + (c2[0] - c1[0]) * t);
-    var g = Math.round(c1[1] + (c2[1] - c1[1]) * t);
-    var b = Math.round(c1[2] + (c2[2] - c1[2]) * t);
-    return 'rgb(' + r + ',' + g + ',' + b + ')';
-  }
-
-  function memoryColorForRatio(ratio) {
-    if (ratio <= MEMORY_INDICATOR_LOW)  return 'rgb(' + MEMORY_COLOR_GREEN.join(',') + ')';
-    if (ratio >= MEMORY_INDICATOR_HIGH) return 'rgb(' + MEMORY_COLOR_RED.join(',') + ')';
-    if (ratio <= MEMORY_INDICATOR_MID) {
-      var t1 = (ratio - MEMORY_INDICATOR_LOW) / (MEMORY_INDICATOR_MID - MEMORY_INDICATOR_LOW);
-      return lerpColor(MEMORY_COLOR_GREEN, MEMORY_COLOR_AMBER, t1);
-    }
-    var t2 = (ratio - MEMORY_INDICATOR_MID) / (MEMORY_INDICATOR_HIGH - MEMORY_INDICATOR_MID);
-    return lerpColor(MEMORY_COLOR_AMBER, MEMORY_COLOR_RED, t2);
+  // EXT-D13: DISCRETE levels instead of the blended colour. Same measure (performance.memory
+  // usedJSHeapSize / jsHeapSizeLimit via getHeapUsageRatio(), content.js:268). Boundaries from
+  // the old gradient: green below its "green" stop (40%); red from 75% — past the midpoint
+  // between the old amber (62.5%) and red (85%) stops, where the old dot was already closer to
+  // red than to amber; yellow in between.
+  var HEALTH_YELLOW_AT = 0.40;
+  var HEALTH_RED_AT    = 0.75;
+  function healthLevel(ratio) {
+    if (typeof ratio !== 'number' || !isFinite(ratio)) return 'unknown';
+    return ratio >= HEALTH_RED_AT ? 'red' : ratio >= HEALTH_YELLOW_AT ? 'yellow' : 'green';
   }
 
   function updateMemoryIndicator() {
     logger.debug('sidebar', 'updateMemoryIndicator called');
     var stats = (typeof getHeapUsageRatio === 'function') ? getHeapUsageRatio() : null;
     if (!stats) {
-      memoryIndicator.style.backgroundColor = MEMORY_COLOR_NEUTRAL;
-      memoryIndicator.setAttribute('title', 'Memory usage unavailable — click to reload page');
+      memoryIndicator.style.removeProperty('background-color');
+      memoryIndicator.setAttribute('data-level', 'unknown');
+      memoryIndicator.setAttribute('title', 'Page health unavailable — click to reload page');
       return;
     }
     var pct = Math.round(stats.ratio * 100);
-    memoryIndicator.style.backgroundColor = memoryColorForRatio(stats.ratio);
-    memoryIndicator.setAttribute('title', 'Memory usage: ' + pct + '% — click to reload page');
-    memoryIndicator.setAttribute('aria-label', 'Memory usage ' + pct + ' percent. Click to reload the page.');
+    var level = healthLevel(stats.ratio);
+    // The colour now comes from the data-level CSS; the inline colour of the old gradient is
+    // cleared so it cannot override it.
+    memoryIndicator.style.removeProperty('background-color');
+    memoryIndicator.setAttribute('data-level', level);
+    memoryIndicator.setAttribute('title', 'Page health: memory ' + pct + '% (' + level + ') — click to reload page');
+    memoryIndicator.setAttribute('aria-label', 'Page health: memory ' + pct + ' percent, ' + level + '. Click to reload the page.');
   }
 
   // Dispatcher-initiated reload only — no automatic trigger exists anywhere in the
@@ -509,13 +637,6 @@ function buildSidebar() {
     location.reload();
   }
 
-  function showMemoryTooltip() {
-    memoryTooltip.classList.add('ext-tooltip-visible');
-  }
-
-  function hideMemoryTooltip() {
-    memoryTooltip.classList.remove('ext-tooltip-visible');
-  }
 
   // --- Global refresh interval + cross-tab rate-limit state (2026-07-20) ---
   // Local cache of background.js's rate-limiter state, kept in sync via
@@ -630,9 +751,12 @@ function buildSidebar() {
   function renderModeLabel() {
     var sec = parseFloat(slider.value);
     if (isNaN(sec)) sec = 2;
+    // EXT-D13: a schematic label. The full wording lives in the slider's title and the block's "i".
     sliderValue.textContent = _sharedLimitEnabled
-      ? 'Shared rate: 1 refresh / ' + sec.toFixed(1) + 's'
-      : 'Refresh every ' + sec.toFixed(1) + 's';
+      ? '⟳ ' + sec.toFixed(1) + 's ·shared'
+      : '⟳ ' + sec.toFixed(1) + 's';
+    sliderValue.setAttribute('title', (_sharedLimitEnabled ? 'Shared rate: 1 refresh every ' : 'Refresh every ') +
+      sec.toFixed(1) + 's — applies to all open Relay tabs');
   }
 
   // Live "Active tabs: N -> each tab refreshes every X.Xs" line, X = interval * N — shown
@@ -718,6 +842,8 @@ function buildSidebar() {
   // deactivation (see comment above); otherwise it would keep polling forever, invisibly,
   // once removed from the DOM, and a reactivation would start a second one alongside it.
   container._memoryPollInterval = setInterval(updateMemoryIndicator, MEMORY_POLL_MS);
+  // EXT-D13: re-read now instead of at the next 7 s poll (the headless screenshots use it).
+  container._updateHealth = updateMemoryIndicator;
 
   // 2026-07-30: the 1s setInterval that redrew the countdown was REMOVED with the countdown.
   // Nothing needs a clock any more — every paused-state transition arrives as a
@@ -850,18 +976,10 @@ function buildSidebar() {
     }
   });
 
-  // Hover (desktop) and tap/focus (touch + keyboard) both reveal the tooltip.
-  memoryInfo.addEventListener('mouseenter', showMemoryTooltip);
-  memoryInfo.addEventListener('mouseleave', hideMemoryTooltip);
-  memoryInfo.addEventListener('focus', showMemoryTooltip);
-  memoryInfo.addEventListener('blur', hideMemoryTooltip);
-  memoryInfo.addEventListener('click', function (ev) {
-    ev.stopPropagation();
-    if (memoryTooltip.classList.contains('ext-tooltip-visible')) {
-      hideMemoryTooltip();
-    } else {
-      showMemoryTooltip();
-    }
+  // EXT-D13: the "i" tooltips wire themselves (makeInfo). The reload button — our own UI, the
+  // same dispatcher-initiated reload as the dot, no automatic trigger.
+  pageReload.addEventListener('click', function () {
+    reloadForMemory();
   });
 
   // 2026-07-31: the five ext-rate-limit-info tooltip listeners (mouseenter/mouseleave/

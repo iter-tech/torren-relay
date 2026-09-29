@@ -17,6 +17,10 @@
 // trusting anything held in a JS variable across invocations. The one exception
 // (permitQueueTail below) is explicitly NOT authoritative — see its comment.
 
+// RATE GUARD (EXT-D12) — the one import line. constants.js brings RATE_GUARD_ENABLED; with it false
+// rateGuard.js installs nothing. REMOVE THIS LINE when removing the rate guard (DECISIONS EXT-D12).
+try { importScripts('utils/constants.js', 'utils/rateGuard.js'); } catch (e) { console.error('[background] rate guard not loaded', e); }
+
 // Must match utils/storage.js's RATE_LIMITER_KEY exactly — duplicated, not shared, because
 // this service worker is not part of the content_scripts bundle and there is no module
 // system in this codebase to import a single constant from.
@@ -96,6 +100,12 @@ async function grantOrDenyPermit(sharedLimitEnabled) {
 
   if (state.backoffUntil && state.backoffUntil > now) {
     return { granted: false, backoffUntil: state.backoffUntil, backoffStepIndex: state.backoffStepIndex };
+  }
+
+  // RATE GUARD (EXT-D12): red → no permit, in every tab, until the combined rate is below 70.
+  // AFTER the 503 backoff, which always wins. REMOVE THIS BLOCK with the rate guard.
+  if (typeof rateGuard !== 'undefined' && rateGuard.isPaused()) {
+    return { granted: false, rateGuardPaused: true };
   }
 
   if (!sharedLimitEnabled) {

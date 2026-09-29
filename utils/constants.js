@@ -151,6 +151,13 @@ const CITY_FILTER_ENABLED = true;
 // description's truth depends on this constant. See BACKLOG 0ao.
 const FAST_BOOK_ENABLED = false;
 
+// ── RATE GUARD (EXT-D12, 2026-09-29) — ONE FLAG, ONE FILE ───────────────────────────────────────
+// utils/rateGuard.js pauses OUR auto-refresh in every tab when the combined search rate of all
+// Relay tabs gets near the level at which Amazon blocked the board (live: first 503 at 107/min).
+// false → the module installs nothing: no listener, no DOM, no log, and the permit hook in
+// background.js is a no-op. Removing it entirely: docs/DECISIONS.md EXT-D12 "HOW TO REMOVE".
+const RATE_GUARD_ENABLED = true;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 🔑 ARE WE ON THE LOAD BOARD? THE ONE DEFINITION. Added 2026-08-31.
 //

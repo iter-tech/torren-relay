@@ -58,6 +58,7 @@
         "utils/tabIndicator.js",
         "utils/priceProbe.js",
         "utils/freshnessProbe.js",
+        "utils/rateGuard.js",
         "utils/phrases.js",
         "utils/loadStore.js",
         "utils/soundDefs.js",

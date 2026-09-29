@@ -358,6 +358,9 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  // RATE GUARD (EXT-D12): "last block" line; adds nothing when the flag is off. Remove with the guard.
+  if (typeof rateGuard !== 'undefined') rateGuard.mountPopup(document.getElementById('popup-fresh-stats'));
+
   if (typeof freshnessProbe !== 'undefined') {
     freshnessProbe.read(function (list) { renderFreshStats(list); });
     if (freshnessProbe.readEndpoints) freshnessProbe.readEndpoints(renderFreshEndpoints);
