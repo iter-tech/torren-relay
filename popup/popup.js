@@ -328,8 +328,11 @@ document.addEventListener('DOMContentLoaded', function () {
       : phraseArea === 'local'
         ? 'Stored in THIS browser only — Chrome sync refused the write.'
         : 'Not saved yet.';
+    // EXT-D10.2: the limit line is shared with the chat dropdown (phrases.limitNote), so a list kept
+    // from the old 20-phrase limit says "all kept, delete N to add" in both places.
+    var limit = phrases.limitNote(phraseItems.length);
     phraseNoteEl.textContent = phraseItems.length + ' of ' + phrases.MAX_PHRASES + ' phrases · '
-      + where + (extra ? ' ' + extra : '');
+      + where + (limit ? ' ⚠ ' + limit : '') + (extra ? ' ' + extra : '');
   }
 
   function renderPreview() {
@@ -427,8 +430,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var addBtn = document.getElementById('popup-phrase-add');
     if (addBtn) addBtn.addEventListener('click', function () {
-      if (phraseItems.length >= phrases.MAX_PHRASES) {
-        phraseNote('⚠ That is the maximum of ' + phrases.MAX_PHRASES + '. Delete one first.');
+      if (!phrases.canAdd(phraseItems.length)) {
+        phraseNote('');
         return;
       }
       phraseItems.push({ id: 'p' + Date.now().toString(36), text: '' });
@@ -481,6 +484,19 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     if (phraseSampleEl) phraseSampleEl.addEventListener('input', renderPreview);
+
+    // EXT-D10.2: the chat dropdown edits the same list. If it changes while the popup is open,
+    // follow it — unless he is typing in a phrase field right now, which must not be yanked away.
+    chrome.storage.onChanged.addListener(function (changes) {
+      if (!changes[phrases.KEY]) return;
+      var active = document.activeElement;
+      if (active && phraseListEl.contains(active)) return;
+      phrases.load().then(function (loaded) {
+        phraseItems = loaded.value.items || [];
+        phraseArea = loaded.area;
+        renderPhraseList();
+      });
+    });
   }
 
   var versionEl = document.getElementById('popup-version');

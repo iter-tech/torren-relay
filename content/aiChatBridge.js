@@ -43,6 +43,7 @@
 
   var MSG_OPEN   = 'tenlane-aichat-open-v1';
   var MSG_RESULT = 'tenlane-aichat-result-v1';
+  var MSG_PROBE  = 'tenlane-aichat-probe-input-v1';   // EXT-D10.2
   var MAX_AGE_MS = 15000;
   var VERIFY_WINDOW_MS = 1000;
   var VERIFY_STEP_MS   = 100;
@@ -101,15 +102,42 @@
   } catch (e) { /* no handshake → every request is refused as unsigned */ }
 
   function canonOpen(d)   { return ['open', d.requestId, d.loadId, d.ts].join('\n'); }
+  function canonProbe(d)  { return ['probe-input', d.requestId, d.ts, d.text].join('\n'); }
   // The diagnostics are signed too — a forged reply cannot plant a misleading log line.
   function canonResult(r) {
     return ['result', r.requestId, r.ok ? '1' : '0', r.result, r.reason || '', r.source || '',
             r.diagJson || ''].join('\n');
   }
 
-  async function verifyOpen(d) {
+  async function verifySigned(d, canon) {
     if (!_key || typeof d.sig !== 'string' || !/^[0-9a-f]{64}$/.test(d.sig)) return false;
-    return hmacCheck('HMAC', await _key, hexToBytes(d.sig), encoder.encode(canonOpen(d)));
+    return hmacCheck('HMAC', await _key, hexToBytes(d.sig), encoder.encode(canon(d)));
+  }
+
+  // EXT-D10.2 — did Amazon's React REGISTER the text in #ra-input, or is it only painted there?
+  // Reads the textarea's own React props (`__reactProps$…`, refreshed on every commit). A controlled
+  // input is registered only when props.value equals the text; an uncontrolled one keeps its value in
+  // the DOM, which is then what Amazon reads. READ-ONLY: nothing is written here.
+  function probeInput(expected) {
+    var ta = document.getElementById('ra-input');
+    if (!ta) return { ok: false, result: 'not-registered', reason: 'no-ra-input', diag: {} };
+    var props = null, ks = objKeys(ta);
+    for (var i = 0; i < ks.length; i++) {
+      if (ks[i].indexOf('__reactProps$') === 0) { props = ta[ks[i]]; break; }
+    }
+    var domMatches = ta.value === expected;
+    if (!props || typeof props !== 'object') {
+      return { ok: domMatches, result: domMatches ? 'registered' : 'not-registered',
+               reason: domMatches ? 'no-react-props (dom value kept)' : 'no-react-props',
+               diag: { controlled: null, domMatches: domMatches } };
+    }
+    var controlled = Object.prototype.hasOwnProperty.call(props, 'value');
+    var propsMatch = controlled ? props.value === expected : null;
+    var ok = controlled ? propsMatch === true : domMatches;
+    return { ok: ok, result: ok ? 'registered' : 'not-registered',
+             reason: ok ? '' : (controlled ? 'react-props-value-differs' : 'dom-value-lost'),
+             diag: { controlled: controlled, propsMatch: propsMatch, domMatches: domMatches,
+                     hasOnChange: typeof props.onChange === 'function' } };
   }
 
   async function reply(r) {
@@ -323,18 +351,23 @@
 
   window.addEventListener('message', function (ev) {
     var d = ev.data;
-    if (ev.source !== window || !d || d.type !== MSG_OPEN) return;
+    if (ev.source !== window || !d || (d.type !== MSG_OPEN && d.type !== MSG_PROBE)) return;
     (async function () {
       if (typeof d.requestId !== 'string' || !/^[0-9a-f]{32}$/.test(d.requestId)) return;
-      if (typeof d.loadId !== 'string' || !d.loadId || typeof d.ts !== 'number') return;
+      if (typeof d.ts !== 'number') return;
+      var isProbe = d.type === MSG_PROBE;
+      if (isProbe ? typeof d.text !== 'string' : (typeof d.loadId !== 'string' || !d.loadId)) return;
       var now = nowMs();
       if (Math.abs(now - d.ts) > MAX_AGE_MS || _seen.has(d.requestId)) return;
-      if (!(await verifyOpen(d))) return;                    // forged or unsigned — silent
+      if (!(await verifySigned(d, isProbe ? canonProbe : canonOpen))) return;   // forged or unsigned — silent
       _seen.set(d.requestId, now);
       _seen.forEach(function (t, id) { if (now - t > MAX_AGE_MS * 2) _seen.delete(id); });
 
       var r;
-      if (_busy) {
+      if (isProbe) {
+        try { r = probeInput(d.text); }
+        catch (e) { r = { ok: false, result: 'not-registered', reason: 'error ' + ((e && e.name) || 'Error'), diag: {} }; }
+      } else if (_busy) {
         r = { ok: false, result: 'unavailable', reason: 'busy', diag: {} };
       } else {
         _busy = true;

@@ -18,6 +18,16 @@ Used only by `content/aiChatBridge.js`. Details: `docs/AI_CHAT_BUTTON.md`.
   Chat panel visible = any of `.chat-box-position`, `.chatbot-body`, `.bot-header`,
   `#demand-support-chat-action-panel-input` (names from the competitor's CSS for Amazon's chat;
   ⚠ not yet seen live). Used only to verify an open, never to click.
+
+## Relay Assistant open chat — DOM ✅ captured live by Ihor 2026-09-28 (EXT-D10.2)
+- Root `div.chat-box-position`; header `div.… message-header` (title "Relay Assistant", minimize/close).
+- Input `textarea#ra-input` (placeholder "Type your message here", hashed class `css-5ivjoy`,
+  `data-mdn-interactive`, rows=1). **`#ra-input` is the anchor; the hashed class is never used.**
+- Send: the `<button type="button" data-mdn-interactive>` right after the input's container, found
+  by structure (the container's next sibling is a BUTTON). Never clicked.
+- Payout inside the chat: `span.wo-total_payout` ("$580.05").
+- 🔴 Booking inside the chat: `#rlb-book-btn`, `#rlb-book-trip-confirm-booking-btn`,
+  `#rlb-book-trip-no-btn` — NEVER touched, clicked, hidden or moved. Not queried by our code.
 A rename of any of these gives "Chat unavailable", not a wrong action.
 
 ## Refresh button ✅

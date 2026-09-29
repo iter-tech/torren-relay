@@ -5,10 +5,9 @@
 // for that load, and a panel beside it will list these phrases — one click sends one into the chat.
 // Booking always stays a manual click on Amazon's own Book button.
 //
-// 🔴 THIS FILE TOUCHES NOTHING ON AMAZON'S PAGE. No chat DOM has been captured yet
-// (`docs/AI_CHAT_CAPTURE.md` §7: the selector for the chat control is unknown), so nothing here
-// attaches to a chat, and nothing sends a message. It is the library and its editor, and the one
-// named entry point the later integration will call — `phrasesForLoad()`.
+// 🔴 THIS FILE TOUCHES NOTHING ON AMAZON'S PAGE. It is the library: storage, limits and rendering.
+// Since 2026-09-28 (EXT-D10.2) content/aiChatPhrases.js uses it for the "Phrases ▾" dropdown inside
+// Amazon's chat; that file does the DOM work and inserts text, and nothing ever sends a message.
 //
 // 🔑 THE LIST IS THE DISPATCHER'S, AND IT PERSISTS UNTIL HE CHANGES IT. It is his words for his
 // negotiation; the starter set is a starting point, not a product opinion. Export/import is JSON so
@@ -30,16 +29,21 @@ var PHRASES_AREA_KEY = 'phrasesStorageArea';
 var PHRASES_VERSION = 1;
 
 /**
- * ⚠ THE TWO LIMITS, AND WHY THESE NUMBERS.
+ * ⚠ THE LIMITS, AND WHY THESE NUMBERS.
  *
- *   20 phrases — a list you scan while a load is on screen. Past twenty it is a document, not a
- *                panel, and the click it is meant to save costs more than typing.
+ *   15 phrases — the ADD limit (Ihor, 2026-09-28; was 20 in EXT-D9). A list you scan in a dropdown
+ *                inside Amazon's chat while a load is on screen. Adding is refused at 15, in the popup
+ *                AND in the chat dropdown, and an import is cut to 15.
+ *   20 phrases — the STORAGE ceiling, i.e. the old limit. 🔴 A LIST SAVED UNDER THE OLD LIMIT IS
+ *                NEVER TRUNCATED: 16–20 stored phrases are all kept and shown; only adding is blocked
+ *                until the list is below 15. Truncating on read would delete his own wording silently.
  *  200 characters — two sentences. Amazon's assistant answers a short question; a paragraph pasted
  *                into a chat reads as a form letter and buries the number being negotiated.
  *
- * Both are enforced on save AND on import, so a hand-edited JSON file cannot get past them.
+ * Enforced on save AND on import, so a hand-edited JSON file cannot get past them.
  */
-var MAX_PHRASES = 20;
+var MAX_PHRASES = 15;
+var MAX_STORED_PHRASES = 20;
 var MAX_PHRASE_LENGTH = 200;
 
 /**
@@ -71,8 +75,13 @@ var phrases = (function () {
     };
   }
 
+  // 🔑 FIXED IDS for the starter set (EXT-D10.2). Until the first save, every load() returns a fresh
+  // starter value; with random ids an edit made from the chat dropdown could not find its own row in
+  // the next load and was silently dropped (caught by the headless proof). Ids only need to be unique
+  // within one list.
   function starterValue() {
-    return { version: PHRASES_VERSION, items: STARTER_PHRASES.map(makeItem), updatedAt: Date.now() };
+    return { version: PHRASES_VERSION, updatedAt: Date.now(),
+             items: STARTER_PHRASES.map(function (t, i) { return { id: 'starter' + i, text: t }; }) };
   }
 
   /**
@@ -96,7 +105,7 @@ var phrases = (function () {
 
     var items = Array.isArray(raw.items) ? raw.items : [];
     var clean = [];
-    for (var i = 0; i < items.length && clean.length < MAX_PHRASES; i++) {
+    for (var i = 0; i < items.length && clean.length < MAX_STORED_PHRASES; i++) {
       var it = items[i];
       var text = (it && typeof it === 'object') ? it.text : it;   // v0 may have been bare strings
       if (typeof text !== 'string') continue;
@@ -188,7 +197,7 @@ var phrases = (function () {
    */
   async function save(items) {
     var clean = [];
-    for (var i = 0; i < items.length && clean.length < MAX_PHRASES; i++) {
+    for (var i = 0; i < items.length && clean.length < MAX_STORED_PHRASES; i++) {
       var text = String(items[i] && items[i].text != null ? items[i].text : items[i]).slice(0, MAX_PHRASE_LENGTH);
       if (!text.trim()) continue;
       clean.push({ id: (items[i] && items[i].id) || makeItem('').id, text: text });
@@ -308,6 +317,30 @@ var phrases = (function () {
     };
   }
 
+  /** True when the text uses any payout variable — i.e. it needs a payout to be usable. */
+  function hasVariables(text) {
+    VAR_RE.lastIndex = 0;
+    var r = VAR_RE.test(String(text == null ? '' : text));
+    VAR_RE.lastIndex = 0;
+    return r;
+  }
+
+  /** Whether one more phrase may be added to a list of `count`. */
+  function canAdd(count) { return count < MAX_PHRASES; }
+
+  /**
+   * The editor's line about the limit, or '' when there is nothing to say. Shared by the popup and
+   * the chat dropdown so they say the same thing.
+   */
+  function limitNote(count) {
+    if (count > MAX_PHRASES) {
+      return 'You have ' + count + ' phrases; the limit is now ' + MAX_PHRASES + '. All are kept — ' +
+        'delete ' + (count - MAX_PHRASES + 1) + ' to add a new one.';
+    }
+    if (count === MAX_PHRASES) return 'That is the maximum of ' + MAX_PHRASES + '. Delete one to add another.';
+    return '';
+  }
+
   /* ── export / import ──────────────────────────────────────────────────────────────────────── */
 
   /** The file a dispatcher keeps. Pretty-printed: it is meant to be readable and hand-editable. */
@@ -380,7 +413,11 @@ var phrases = (function () {
     KEY: PHRASES_KEY,
     VERSION: PHRASES_VERSION,
     MAX_PHRASES: MAX_PHRASES,
+    MAX_STORED_PHRASES: MAX_STORED_PHRASES,
     MAX_PHRASE_LENGTH: MAX_PHRASE_LENGTH,
+    hasVariables: hasVariables,
+    canAdd: canAdd,
+    limitNote: limitNote,
     STARTER_PHRASES: STARTER_PHRASES,
     load: load,
     save: save,

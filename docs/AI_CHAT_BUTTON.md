@@ -132,7 +132,7 @@ field names (`chatBotState`, `setChatBotState`, `chatBotCandidateList`, `workOpp
 A rename breaks it **to "Chat unavailable"**, never to a wrong load: every match is by exact name and
 id.
 
-## 6. Ihor's live test — LoadFetcher OFF (updated for EXT-D10.1)
+## 6. Ihor's live test — LoadFetcher OFF (EXT-D10.1) — ✅ passed live; the current test is §8.4
 
 1. Open `chrome://extensions`. On **LoadFetcher**, turn the toggle **off**.
 2. On **Tenlane Relay**, click the reload icon (↻).
@@ -232,3 +232,141 @@ setter re-renders on any call, as the working path requires live.
 `node scripts/build-zip.mjs`: all assertions passed, 50 files. `FAST_BOOK_ENABLED` is still
 `false`. ⚠ **Still not verified on live Amazon.** The mock models one explanation (a2); the in-place
 update (b1) matches the working path, but whether it was needed is [?].
+
+**✅ Live result afterwards (Ihor, 2026-09-28):** the AI Chat button opens Amazon's chat on the chosen
+load.
+
+---
+
+## 8. EXT-D10.2 — button placement, and a phrase dropdown inside Amazon's chat (2026-09-28)
+
+⚠ **Proved in headless Chrome against a fixture built from the DOM facts Ihor captured live; not
+verified on live Amazon.**
+
+### 8.1 The two layout fixes
+
+- **Card:** "AI Chat" moved to the **left** of the price (`paintCards()` inserts it before
+  `.wo-total_payout`). The 20 px gap is the button's own `margin-right`, and the price element is not
+  touched. Measured: gap **20.0 px**, same line, price element has no style and its class unchanged.
+- **Panel row, one line.** Root cause, found by measuring: `aiChat.js` injects its stylesheet at
+  card-paint time, **before** the panel's own (`injectPanelStyle`). So the panel's
+  `.ext-action-btn{width:28px}`, with the same specificity and later in the document, won, and "AI
+  Chat" was squeezed into a 28 px box ("AI" / "Chat" live). The rule is now
+  `.ext-action-bar .ext-action-btn.ext-action-btn--aichat` (width auto, `nowrap`, `flex:0 0 auto`,
+  height 28). Measured in a 170 px and a 600 px row: **1 line, 28 px high = camera button, box 56 px,
+  text fits.**
+
+### 8.2 The phrase dropdown — `content/aiChatPhrases.js`
+
+Built only on the live DOM facts: `.chat-box-position`, `textarea#ra-input`, the send `<button>`
+right after the input's container (found by structure, never by its hashed class, **never
+clicked**), and `.wo-total_payout` inside the chat. 🔴 The booking controls (`#rlb-book-btn`,
+`#rlb-book-trip-confirm-booking-btn`, `#rlb-book-trip-no-btn`) are **never queried at all**.
+
+- **Detection:** a MutationObserver on `document.body` (150 ms debounce) finds every
+  `.chat-box-position` that contains `#ra-input`. It works whoever opened the chat, our button or
+  Amazon's icon, and re-adds the button if React re-renders it away.
+- **"Phrases ▾"** goes inside the input row, **left of the input's container**, so Amazon's send
+  button stays the row's last child where it was. Amazon look: white, thin neutral border, 4 px
+  radius. Its events stop at our elements, so Amazon's chat never sees our clicks or keys.
+- **Dropdown:** it opens **upward** from the button, and its width and height are clamped to the
+  chat box. Coordinates are computed against its own offsetParent, so it works whatever Amazon's
+  positioning is. A header line shows the payout in use and its source. Rows are
+  `role=option`; ↑/↓ move, **Enter** inserts, **Esc** closes (or cancels an edit first), and a click
+  outside closes.
+- **Insert:** `phrases.renderPhrase()` renders the text. It is set with the **native
+  `HTMLTextAreaElement` value setter** plus a bubbling `input` event; the text **replaces** what was
+  there, the input gets focus with the caret at the end, and the menu closes. **Nothing is sent.**
+  Then comes **verification**: 150 ms later a signed `probe-input` request makes the bridge read the
+  textarea's React props (`__reactProps$…`). For a controlled input, "registered" means
+  `props.value === text`; otherwise the DOM value must have survived. If it is not registered, the
+  button flashes "Not registered" and `phrase-failed` is logged.
+- **Payout:** first the load **our** button opened, if this chat box is that one (read from our
+  record). The binding is dropped when the chat closes, or when the price the chat shows changes
+  (Amazon moved the chat to another load). Otherwise the **single** `.wo-total_payout` shown in the
+  chat. If there is none, or two different ones, the payout is unknown: phrases with variables are
+  **disabled** with "needs a payout — none found for this chat", and plain phrases still insert.
+- **Editing in place:** ✎ gives an inline input with **Save / Cancel** (Enter saves); 🗑 asks
+  **Delete / Keep** inline; **+ Add phrase** sits at the bottom. Every change goes through
+  `phrases.save()`, the same `phrasesV1` storage (sync, with local fallback) as the popup. Before
+  writing, it re-reads the latest list, so a popup change made meanwhile is not overwritten. The
+  popup follows chat-side changes live (`storage.onChanged`), unless a phrase field there is being
+  typed in.
+- **Limit 15 (was 20):** `MAX_PHRASES = 15` is the **add** limit, in the popup, the dropdown and
+  import. `MAX_STORED_PHRASES = 20` (the old limit) is the **storage** ceiling. A list saved under the
+  old limit is **never truncated**: 16–20 phrases are all kept and shown, adding is blocked, and both
+  editors say "You have N phrases; the limit is now 15. All are kept — delete K to add a new one."
+  The 200-character limit is unchanged.
+- **Starter ids are now fixed** (`starter0…6`). With random ids, an edit made before the first save
+  could not find its own row on the next load and was silently dropped (caught by the proof).
+- **Log** (same debug log as `ai-chat-open`, `__EXT_DEBUG.aiChatLog()`):
+  - `phrase-insert` {index, hadVariables, payoutSource `button`/`chat`, registered, check,
+    controlled}
+  - `phrase-edit` {action `edit`/`add`/`delete`, index, count, area}
+  - `phrase-failed` {step or reason, e.g. `no-payout`, `no-ra-input`, `react-props-value-differs`,
+    `chat moved to another load`}
+
+### 8.3 Proof — `scripts/aichat-suite/run.cjs`, **95 / 95 PASS**
+
+The fixture has a React-**controlled** `textarea#ra-input` inside `.chat-box-position`, a
+`.message-header`, the load with `.wo-total_payout`, and the three booking buttons. Those buttons
+have listeners in the capture phase that record **every** event reaching them. The send button
+records a send. An "Amazon chat icon" opens the chat without any of our code. The real popup
+(`popup.html` + `popup.js` + `phrases.js`) is served on the same origin, with `chrome.storage` shimmed
+onto the shared `localStorage`, so both editors use one store as in the extension. Every request not
+to 127.0.0.1 is aborted.
+
+| check | result |
+|---|---|
+| card: left of the price, gap 20.0 px, same line, price untouched | ✅ |
+| panel: one line, 28 px = neighbours, text fits, at 170 px and 600 px rows | ✅ |
+| opened by our button → "Phrases ▾" appears; send button still last and flush right, not covered | ✅ |
+| dropdown opens upward and stays inside the chat box; header "Payout $735 (this load)" | ✅ |
+| click `{payout+150}` phrase → **React state** = "I can take it at $885." (record $735.40), focus in `#ra-input`, menu closed, **0 sends**; logged `registered: true, controlled: true, payoutSource: button` | ✅ |
+| ↓↓↓ + Enter inserts row 3 (replaces); Esc closes, text kept, chat still open | ✅ |
+| edit + add + delete from the dropdown → stored; dropdown shows it; `phrase-edit` ×3 | ✅ |
+| the **popup** shows exactly that list; a popup edit shows up in the dropdown | ✅ |
+| 15 stored → add disabled, "maximum of 15"; **17 stored → 17 shown**, add disabled, "All are kept — delete 3", in the dropdown **and** the popup | ✅ |
+| booking buttons: **0 events**, not moved, not hidden | ✅ |
+| opened by **Amazon's icon** → payout from `.wo-total_payout` ($710 → "$860"), source `chat` | ✅ |
+| no payout → the 4 variable phrases disabled; clicking one inserts nothing (`no-payout`); a plain one inserts | ✅ |
+| everything from §4 and §7.3 (regression, fail-safes, both handshake orders, forgeries) | ✅ still passing |
+
+`node scripts/build-zip.mjs`: all assertions passed, **51 files**. `FAST_BOOK_ENABLED` is still
+`false`.
+
+**Not provable here** `[?]`: the live layout of Amazon's input row (whether inserting before the
+input's container keeps the send button in place there as it does in the fixture); whether Amazon's
+textarea is controlled (the probe handles both cases); and whether Amazon's chat reacts to focus
+changes.
+
+### 8.4 Ihor's live test — LoadFetcher OFF
+
+1. Open `chrome://extensions`. On **LoadFetcher**, turn the toggle **off**.
+2. On **Tenlane Relay**, click the reload icon (↻).
+3. Open `https://relay.amazon.com/loadboard/search` and press **F5**.
+4. **Card:** check that **AI Chat** now sits to the **left** of the price with a small gap, and that
+   the price looks exactly as before. Take a screenshot.
+5. **Panel:** click a negotiable card to open our panel. In its bottom row, check that **AI Chat** is
+   on **one line** and the same height as the camera/map/post icons. Screenshot.
+6. On a card with **AI Chat**, click **AI Chat**. Amazon's chat opens. Check that a **Phrases ▾**
+   button is next to the message box and that Amazon's **Send** button is where it always is.
+7. Click **Phrases ▾**. The list opens **upward** inside the chat, and its first line shows the payout
+   it uses. Click **"I can take it at {payout+150}."**. The text appears in the message box with the
+   price + $150. **Do NOT press Send.** Screenshot.
+8. Click into the message box and press **End**, then type one space. The text must stay (Amazon
+   accepted it). Then clear the box (**Ctrl+A**, **Delete**).
+9. Click **Phrases ▾** → click **✎** on any phrase → change a word → **Save**. Click **+ Add phrase**
+   → type `Test phrase` → **Save**. Click **🗑** on `Test phrase` → **Delete**.
+10. Open the Tenlane Relay popup (toolbar icon). The phrase list must show your edited word, and
+    `Test phrase` must be gone.
+11. Close Amazon's chat. Open it with **Amazon's own chat icon** instead. **Phrases ▾** must appear
+    there too; insert the `{payout+150}` phrase again and check the price matches the load shown in
+    the chat. **Do not send.**
+12. Press **Esc** while the list is open. It must close and leave the chat open.
+13. **Never click Book or anything next to it during this test.**
+14. In the Console (**F12**), click the drop-down at the top-left that says **`top`** and choose
+    **Tenlane Relay**. Type exactly `copy(JSON.stringify(__EXT_DEBUG.aiChatLog(), null, 2))` and
+    press **Enter**.
+15. Paste (**Ctrl+V**) the log into your message to the PM, with the screenshots. Turn LoadFetcher
+    back on afterwards if you want it.

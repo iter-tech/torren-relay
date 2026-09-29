@@ -54,6 +54,15 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/react-dom.js') return send('text/javascript', rd(path.join(HERE, 'node_modules/react-dom/umd/react-dom.development.js')));
   if (u.pathname === '/mock-app.js') return send('text/javascript', rd(path.join(HERE, 'mock-app.js')));
   if (u.pathname.startsWith('/loadboard/')) return send('text/html', pageHtml(u.searchParams.get('variant') || 'full'));
+  // EXT-D10.2: the REAL popup, served from the repo, so the phrase editor can be checked against what
+  // the chat dropdown wrote. Same origin as the board → same localStorage-backed chrome.storage shim.
+  if (u.pathname.startsWith('/ext/')) {
+    const rel = decodeURIComponent(u.pathname.slice(5));
+    const abs = path.join(REPO, rel);
+    if (!abs.startsWith(REPO) || !fs.existsSync(abs)) { res.writeHead(404); return res.end(); }
+    const type = /\.html$/.test(rel) ? 'text/html' : /\.css$/.test(rel) ? 'text/css' : /\.js$/.test(rel) ? 'text/javascript' : 'application/octet-stream';
+    return send(type, fs.readFileSync(abs));
+  }
   if (u.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
   console.log('  (server 404: ' + u.pathname + ')');
   res.writeHead(404); res.end();
@@ -66,6 +75,60 @@ function check(name, pass, detail) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// chrome.* for the test: storage.sync / storage.local on localStorage (shared by the board page's
+// isolated world and the popup page — same origin), onChanged within a page AND across pages via the
+// 'storage' event. Everything else is a harmless no-op.
+const CHROME_SHIM = `
+  var __chromeShim = (function () {
+    var listeners = [];
+    function read(area) { try { return JSON.parse(localStorage.getItem('shim:' + area) || '{}'); } catch (e) { return {}; } }
+    function write(area, obj) { localStorage.setItem('shim:' + area, JSON.stringify(obj)); }
+    function fire(changes, area) { listeners.slice().forEach(function (fn) { try { fn(changes, area); } catch (e) {} }); }
+    function area(name) {
+      return {
+        get: function (keys, cb) {
+          var all = read(name), out = {};
+          if (keys === null || keys === undefined) out = all;
+          else if (typeof keys === 'string') { if (keys in all) out[keys] = all[keys]; }
+          else if (Array.isArray(keys)) keys.forEach(function (k) { if (k in all) out[k] = all[k]; });
+          else Object.keys(keys).forEach(function (k) { out[k] = (k in all) ? all[k] : keys[k]; });
+          var p = Promise.resolve(out); if (cb) setTimeout(function () { cb(out); }, 0); return p;
+        },
+        set: function (obj, cb) {
+          var all = read(name), changes = {};
+          Object.keys(obj).forEach(function (k) { changes[k] = { oldValue: all[k], newValue: obj[k] }; all[k] = obj[k]; });
+          write(name, all);
+          setTimeout(function () { fire(changes, name); if (cb) cb(); }, 0);
+          return Promise.resolve();
+        },
+        remove: function (keys, cb) { var all = read(name); [].concat(keys).forEach(function (k) { delete all[k]; }); write(name, all); if (cb) setTimeout(cb, 0); return Promise.resolve(); },
+        clear: function (cb) { write(name, {}); if (cb) setTimeout(cb, 0); return Promise.resolve(); }
+      };
+    }
+    window.addEventListener('storage', function (e) {
+      if (!e.key || e.key.indexOf('shim:') !== 0) return;
+      var name = e.key.slice(5), o = JSON.parse(e.oldValue || '{}'), n = JSON.parse(e.newValue || '{}'), ch = {};
+      Object.keys(Object.assign({}, o, n)).forEach(function (k) { if (JSON.stringify(o[k]) !== JSON.stringify(n[k])) ch[k] = { oldValue: o[k], newValue: n[k] }; });
+      if (Object.keys(ch).length) fire(ch, name);
+    });
+    var noop = function () {};
+    var ev = { addListener: noop, removeListener: noop, hasListener: function () { return false; } };
+    return {
+      storage: { sync: area('sync'), local: area('local'), session: area('session'),
+                 onChanged: { addListener: function (fn) { listeners.push(fn); }, removeListener: function (fn) { listeners = listeners.filter(function (x) { return x !== fn; }); } } },
+      runtime: { lastError: undefined, id: 'test', getManifest: function () { return { version: '1.1.0', name: 'Tenlane Relay' }; },
+                 getURL: function (p) { return p; }, sendMessage: function (m, cb) { if (typeof cb === 'function') setTimeout(function () { cb(undefined); }, 0); return Promise.resolve(); },
+                 onMessage: ev, connect: function () { return { postMessage: noop, onMessage: ev, onDisconnect: ev, disconnect: noop }; } },
+      tabs: { query: function (q, cb) { if (cb) cb([]); return Promise.resolve([]); }, sendMessage: noop, create: noop, onUpdated: ev },
+      alarms: { create: noop, onAlarm: ev }
+    };
+  })();
+  // In a page's main world a plain 'var chrome' does not replace Chrome's own window.chrome.
+  try { Object.defineProperty(window, 'chrome', { value: __chromeShim, configurable: true, writable: true }); }
+  catch (e) { Object.assign(window.chrome, __chromeShim); }
+  var chrome = window.chrome;
+`;
+
 const STUBS = (records) => `
   var __REC = ${JSON.stringify(records)};
   function getLoadRecord(id) { return Object.prototype.hasOwnProperty.call(__REC, id) ? __REC[id] : null; }
@@ -75,15 +138,16 @@ const STUBS = (records) => `
       var idEl = el.firstElementChild; if (idEl && idEl.id) out.push({ id: idEl.id, el: el }); });
     return out;
   }
-  var chrome = { storage: { local: { get: function (k, cb) { cb && cb({}); } }, onChanged: { addListener: function () {}, removeListener: function () {} } } };
-`;
+` + CHROME_SHIM;
 
 async function openVariant(browser, variant, order, errors, srcs) {
   srcs = srcs || {};
   const keySrc    = srcs.key    || rd(REPO + '/content/aiChatKey.js');
   const bridgeSrc = srcs.bridge || rd(REPO + '/content/aiChatBridge.js');
   const aiChatSrc = srcs.aiChat || rd(REPO + '/content/aiChat.js');
-  const context = await browser.newContext();
+  const context = srcs.context || await browser.newContext();
+  // Nothing leaves the machine: every request that is not to this test server is aborted.
+  await context.route('**/*', r => (/^http:\/\/127\.0\.0\.1:/.test(r.request().url()) ? r.continue() : r.abort()));
   const page = await context.newPage();
   page.on('pageerror', e => errors.push(variant + ': ' + e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push(variant + ' console: ' + m.text()); });
@@ -96,7 +160,7 @@ async function openVariant(browser, variant, order, errors, srcs) {
   const addMain = () => page.addInitScript({ content: bridgeSrc });
   if (order === 'isolated-first') { await addIso(); await addMain(); } else { await addMain(); await addIso(); }
 
-  await page.goto(`http://127.0.0.1:${server.address().port}/loadboard/?variant=${variant}`);
+  await page.goto(`http://127.0.0.1:${server.address().port}/loadboard/?variant=${variant}${srcs.query || ''}`);
   await page.waitForSelector('div.load-card');
   for (let i = 0; i < 50 && !isoCtx; i++) await sleep(20);
   const iso = async (expr) => {
@@ -105,10 +169,17 @@ async function openVariant(browser, variant, order, errors, srcs) {
     return r.result.value;
   };
   const records = {};
-  SETS[variant].loads.forEach(l => { records[l.id] = l.dse === undefined ? { id: l.id } : { id: l.id, demandSupportEnabled: l.dse }; });
+  // Record payout = the card's payout + 5.40, so a phrase rendered from OUR record ("button") is
+  // distinguishable from one rendered from the price the chat shows ("chat").
+  SETS[variant].loads.forEach(l => {
+    records[l.id] = l.dse === undefined ? { id: l.id, payout: l.pay + 5.4 } : { id: l.id, demandSupportEnabled: l.dse, payout: l.pay + 5.4 };
+  });
   // Isolated-world idle scripts, in manifest order, with the few cross-file globals stubbed.
-  for (const src of [rd(REPO + '/utils/designTokens.js'), rd(REPO + '/utils/constants.js'), rd(REPO + '/utils/logger.js'),
-                     STUBS(records), aiChatSrc, rd(REPO + '/content/inlinePanel.js')]) {
+  const scripts = [rd(REPO + '/utils/designTokens.js'), rd(REPO + '/utils/constants.js'), rd(REPO + '/utils/logger.js'),
+                   STUBS(records), rd(REPO + '/utils/phrases.js'), aiChatSrc];
+  if (!srcs.aiChat) scripts.push(rd(REPO + '/content/aiChatPhrases.js'));   // not with the OLD files
+  scripts.push(rd(REPO + '/content/inlinePanel.js'));
+  for (const src of scripts) {
     await iso(src + '\n;void 0');
   }
   await iso('aiChat.paintCards(); true');
@@ -313,6 +384,247 @@ async function failSafes(browser) {
   }
 }
 
+// ═══ EXT-D10.2 — the phrase dropdown inside Amazon's chat ═════════════════════════════════════
+const rectOf = (page, sel) => page.evaluate(s => {
+  const e = document.querySelector(s); if (!e) return null;
+  const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height };
+}, sel);
+const lastEvent = async (iso, name) => (await iso('aiChat.debugLog()')).filter(e => e.event === name).slice(-1)[0];
+const storedPhrases = (page) => page.evaluate(() => {
+  const s = JSON.parse(localStorage.getItem('shim:sync') || '{}');
+  return s.phrasesV1 ? s.phrasesV1.items.map(i => i.text) : null;
+});
+
+async function popupPhrases(context) {
+  const p = await context.newPage();
+  await p.addInitScript({ content: CHROME_SHIM });
+  await p.goto(`http://127.0.0.1:${server.address().port}/ext/popup/popup.html`);
+  await p.waitForSelector('[data-testid="popup-phrase-text-0"]', { state: 'attached', timeout: 5000 });
+  const out = await p.evaluate(() => ({
+    texts: [...document.querySelectorAll('[data-testid^="popup-phrase-text-"]')].map(i => i.value),
+    note: (document.getElementById('popup-phrases-note') || {}).textContent || ''
+  }));
+  return { page: p, texts: out.texts, note: out.note };
+}
+
+async function phraseSuite(browser) {
+  const errors = [];
+  console.log('\n=== EXT-D10.2 phrase dropdown inside Amazon\'s chat ===');
+  const { context, page, iso } = await openVariant(browser, 'full', 'isolated-first', errors);
+  const P = s => '.chat-box-position ' + s;
+
+  // Open the chat with OUR button on the 3rd eligible load (3a4b, card $730.00, record $735.40).
+  await (await cardBtn(page, L[3])).click();
+  await page.waitForSelector(P('[data-testid="ext-phrases-btn"]'), { timeout: 3000 }).catch(() => null);
+  const btnR = await rectOf(page, P('[data-testid="ext-phrases-btn"]'));
+  check('opened by our button → "Phrases ▾" appears inside the chat', !!btnR);
+  const bookBefore = await page.evaluate(() => ['rlb-book-btn', 'rlb-book-trip-confirm-booking-btn', 'rlb-book-trip-no-btn']
+    .map(id => { const r = document.getElementById(id).getBoundingClientRect(); return [id, Math.round(r.left), Math.round(r.top)]; }));
+
+  // Send button: still the row's last child, flush with the row's padding, and not covered.
+  const lay = await page.evaluate(() => {
+    const row = document.querySelector('.mock-input-row'), send = row.querySelector('.css-1gltk7k'),
+          ours = row.querySelector('[data-testid="ext-phrases-btn"]'), ta = document.getElementById('ra-input');
+    const rr = row.getBoundingClientRect(), sr = send.getBoundingClientRect(), or = ours.getBoundingClientRect(), tr = ta.getBoundingClientRect();
+    return { sendIsLast: row.lastElementChild === send, sendRightGap: Math.round(rr.right - 8 - sr.right),
+             overlapSend: !(or.right <= sr.left || or.left >= sr.right), leftOfInput: or.right <= tr.left + 0.5 };
+  });
+  check('send button not covered or shifted (last in row, flush right), our button sits left of the input',
+        lay.sendIsLast && lay.sendRightGap === 0 && !lay.overlapSend && lay.leftOfInput, lay);
+
+  // Open the dropdown: upward, inside the chat box.
+  await page.click(P('[data-testid="ext-phrases-btn"]'));
+  await page.waitForSelector(P('[data-testid="ext-phrases-menu"]'));
+  const geo = await page.evaluate(() => {
+    const root = document.querySelector('.chat-box-position').getBoundingClientRect();
+    const m = document.querySelector('[data-testid="ext-phrases-menu"]').getBoundingClientRect();
+    const b = document.querySelector('[data-testid="ext-phrases-btn"]').getBoundingClientRect();
+    return { inside: m.left >= root.left - 0.5 && m.right <= root.right + 0.5 && m.top >= root.top - 0.5 && m.bottom <= root.bottom + 0.5,
+             upward: m.bottom <= b.top + 0.5, rows: document.querySelectorAll('[data-testid^="ext-phrase-row-"]').length,
+             note: document.querySelector('[data-testid="ext-phrases-note"]').textContent };
+  });
+  check('dropdown opens UPWARD and stays inside the chat box; 7 starter phrases listed; payout from this load',
+        geo.inside && geo.upward && geo.rows === 7 && /\$735 \(this load\)/.test(geo.note), geo);
+
+  // Insert phrase 1 "I can take it at {payout+150}." → record 735.40 + 150 = $885 (button source).
+  await page.click(P('[data-testid="ext-phrase-row-1"] .ext-ph-text'));
+  await sleep(700);
+  let st = await page.evaluate(() => ({ react: window.__raValue, dom: document.getElementById('ra-input').value,
+    focus: document.activeElement && document.activeElement.id, sent: (window.__sent || []).length,
+    menu: !!document.querySelector('[data-testid="ext-phrases-menu"]') }));
+  let ev = await lastEvent(iso, 'phrase-insert');
+  check('phrase inserted: REACT STATE holds "I can take it at $885.", input focused, menu closed, NOTHING SENT',
+        st.react === 'I can take it at $885.' && st.dom === st.react && st.focus === 'ra-input' && st.sent === 0 && !st.menu, st);
+  check('  logged phrase-insert {index 1, hadVariables, payoutSource button, registered via React props}',
+        ev && ev.index === 1 && ev.hadVariables === true && ev.payoutSource === 'button' && ev.registered === true && ev.controlled === true, ev);
+
+  // Keyboard: open, ArrowDown ×3 to row 3, Enter → replaces the text.
+  await page.click(P('[data-testid="ext-phrases-btn"]'));
+  await page.waitForSelector(P('[data-testid="ext-phrase-row-0"]'));
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await sleep(700);
+  st = await page.evaluate(() => ({ react: window.__raValue, sent: (window.__sent || []).length }));
+  check('keyboard: ↓↓↓ + Enter inserts row 3 (REPLACES the text), still nothing sent',
+        st.react === 'What is the detention policy at these stops?' && st.sent === 0, st);
+  await page.click(P('[data-testid="ext-phrases-btn"]'));
+  await page.waitForSelector(P('[data-testid="ext-phrase-row-0"]'));
+  await page.keyboard.press('Escape');
+  await sleep(200);
+  st = await page.evaluate(() => ({ menu: !!document.querySelector('[data-testid="ext-phrases-menu"]'), react: window.__raValue, open: window.__mockState.setIsChatBoxOpen }));
+  check('Esc closes the dropdown, text unchanged, Amazon\'s chat still open', !st.menu && st.react === 'What is the detention policy at these stops?' && st.open === true, st);
+
+  // Edit row 0, add one, delete row 2 — all from the dropdown.
+  await page.click(P('[data-testid="ext-phrases-btn"]'));
+  await page.click(P('[data-testid="ext-phrase-edit-0"]'));
+  await page.fill(P('[data-testid="ext-phrase-input-0"]'), 'Edited: best you can do on {payout}?');
+  await page.click(P('[data-testid="ext-phrase-save-0"]'));
+  await sleep(300);
+  await page.click(P('[data-testid="ext-phrase-add"]'));
+  await page.fill(P('[data-testid="ext-phrase-input-new"]'), 'Added from the chat');
+  await page.keyboard.press('Enter');
+  await sleep(300);
+  await page.click(P('[data-testid="ext-phrase-del-2"]'));
+  await page.click(P('[data-testid="ext-phrase-del-yes-2"]'));
+  await sleep(300);
+  const stored = await storedPhrases(page);
+  const menuTexts = await page.evaluate(() => [...document.querySelectorAll('[data-testid^="ext-phrase-row-"] .ext-ph-text')].map(e => e.firstChild.textContent));
+  check('edit + add + delete persisted to storage (phrasesV1, sync)', stored && stored.length === 7 && stored[0] === 'Edited: best you can do on {payout}?' &&
+        stored[6] === 'Added from the chat' && stored.indexOf('My rate for this lane is {payout+10%} — can you meet that?') === -1, stored);
+  check('  the dropdown shows the saved list (edit rendered with this load\'s payout)', menuTexts[0] === 'Edited: best you can do on $735?' && menuTexts.length === 7, menuTexts);
+  const edits = (await iso('aiChat.debugLog()')).filter(e => e.event === 'phrase-edit').map(e => e.action);
+  check('  logged phrase-edit ×3 (edit, add, delete)', edits.join() === 'edit,add,delete', edits);
+  await page.keyboard.press('Escape');
+
+  // The popup editor shows the same list.
+  let pop = await popupPhrases(context);
+  check('the POPUP editor shows exactly what the dropdown saved', JSON.stringify(pop.texts) === JSON.stringify(stored), pop.texts);
+  // …and a popup edit reaches the dropdown.
+  // The popup is logged out in the test, so its feature blocks are hidden: drive the real handlers
+  // with the same events a person's typing produces.
+  await pop.page.evaluate(() => {
+    const i = document.querySelector('[data-testid="popup-phrase-text-1"]');
+    i.value = 'Edited in the popup';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    i.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await sleep(400);
+  await page.click(P('[data-testid="ext-phrases-btn"]'));
+  await sleep(300);
+  const row1 = await page.evaluate(() => document.querySelector('[data-testid="ext-phrase-row-1"] .ext-ph-text').firstChild.textContent);
+  check('a popup edit appears in the chat dropdown', row1 === 'Edited in the popup', row1);
+  await page.keyboard.press('Escape');
+  await pop.page.close();
+
+  // 15-limit: exactly 15 → add disabled; 17 (saved under the old limit) → all kept, add disabled, note says so.
+  for (const n of [15, 17]) {
+    await page.evaluate(n => {
+      const s = JSON.parse(localStorage.getItem('shim:sync') || '{}');
+      s.phrasesV1 = { version: 1, updatedAt: Date.now(), items: Array.from({ length: n }, (_, i) => ({ id: 'x' + i, text: 'Phrase ' + (i + 1) })) };
+      localStorage.setItem('shim:sync', JSON.stringify(s));
+    }, n);
+    await page.click(P('[data-testid="ext-phrases-btn"]'));
+    await page.waitForSelector(P('[data-testid="ext-phrase-row-0"]'));
+    const lim = await page.evaluate(() => ({ rows: document.querySelectorAll('[data-testid^="ext-phrase-row-"]').length,
+      addDisabled: document.querySelector('[data-testid="ext-phrase-add"]').disabled,
+      note: (document.querySelector('[data-testid="ext-phrases-limit"]') || {}).textContent || '' }));
+    check(`limit: ${n} stored → ${n} rows shown (none dropped), "+ Add phrase" disabled, limit note shown`,
+          lim.rows === n && lim.addDisabled && (n === 15 ? /maximum of 15/.test(lim.note) : /17 phrases.*limit is now 15.*delete 3/.test(lim.note)), lim);
+    await page.keyboard.press('Escape');
+  }
+  pop = await popupPhrases(context);
+  await pop.page.evaluate(() => document.querySelector('[data-testid="popup-phrase-add"]').click());
+  const afterAdd = await pop.page.evaluate(() => document.querySelectorAll('[data-testid^="popup-phrase-text-"]').length);
+  check('popup with 17: all 17 kept, "Add phrase" refused, note says "All are kept … delete 3"',
+        pop.texts.length === 17 && afterAdd === 17 && /All are kept/.test(pop.note) && /delete 3/.test(pop.note), { rows: pop.texts.length, afterAdd, note: pop.note });
+  await pop.page.close();
+
+  // Booking controls: untouched throughout.
+  const bookAfter = await page.evaluate(() => ['rlb-book-btn', 'rlb-book-trip-confirm-booking-btn', 'rlb-book-trip-no-btn']
+    .map(id => { const e = document.getElementById(id); const r = e.getBoundingClientRect(); return [id, Math.round(r.left), Math.round(r.top), getComputedStyle(e).display]; }));
+  const bookEvents = await page.evaluate(() => window.__bookingEvents || []);
+  check('booking buttons: NO event reached them, not moved, not hidden',
+        bookEvents.length === 0 && JSON.stringify(bookAfter.map(b => b.slice(0, 3))) === JSON.stringify(bookBefore) && bookAfter.every(b => b[3] !== 'none'),
+        { bookEvents, bookAfter });
+  await page.screenshot({ path: path.join(OUT, 'shot-chat-phrases.png') });
+
+  // Chat opened by AMAZON'S icon (no binding) → payout parsed from .wo-total_payout ($710.00).
+  await page.evaluate(() => { const s = JSON.parse(localStorage.getItem('shim:sync')); delete s.phrasesV1; localStorage.setItem('shim:sync', JSON.stringify(s)); });
+  await page.click('.chat-box-position [aria-label="Close"]');
+  await sleep(300);
+  await page.click('#mock-amazon-chat-icon');
+  await page.waitForSelector(P('[data-testid="ext-phrases-btn"]'), { timeout: 3000 });
+  await page.click(P('[data-testid="ext-phrases-btn"]'));
+  await page.click(P('[data-testid="ext-phrase-row-1"] .ext-ph-text'));
+  await sleep(700);
+  st = await page.evaluate(() => ({ react: window.__raValue, sent: (window.__sent || []).length }));
+  ev = await lastEvent(iso, 'phrase-insert');
+  check('opened by AMAZON\'S icon → payout from the chat\'s .wo-total_payout ($710 + 150 = "$860"), source chat',
+        st.react === 'I can take it at $860.' && ev.payoutSource === 'chat' && st.sent === 0, { st, ev });
+  check('no page errors (phrases)', errors.length === 0, errors);
+  await context.close();
+
+  // No payout anywhere → variable phrases disabled with a reason; a plain phrase still inserts.
+  const errs2 = [];
+  const np = await openVariant(browser, 'full', 'isolated-first', errs2, { query: '&nopay=1' });
+  await np.page.click('#mock-amazon-chat-icon');
+  await np.page.waitForSelector(P('[data-testid="ext-phrases-btn"]'), { timeout: 3000 });
+  await np.page.click(P('[data-testid="ext-phrases-btn"]'));
+  await np.page.waitForSelector(P('[data-testid="ext-phrase-row-6"]'));
+  const dis = await np.page.evaluate(() => [...document.querySelectorAll('[data-testid^="ext-phrase-row-"]')].map(r => r.getAttribute('aria-disabled') === 'true'));
+  await np.page.click(P('[data-testid="ext-phrase-row-1"] .ext-ph-text'));     // has {payout+150}
+  await sleep(500);
+  const v1 = await np.page.evaluate(() => window.__raValue);
+  const failEv = await lastEvent(np.iso, 'phrase-failed');
+  await np.page.click(P('[data-testid="ext-phrase-row-3"] .ext-ph-text'));     // plain
+  await sleep(700);
+  const v2 = await np.page.evaluate(() => window.__raValue);
+  check('no payout → the 4 variable phrases disabled (with reason), plain ones enabled; clicking a disabled one inserts nothing',
+        JSON.stringify(dis) === JSON.stringify([true, true, true, false, false, false, true]) && v1 === '' && failEv && failEv.reason === 'no-payout', { dis, v1, failEv });
+  check('  a plain phrase still inserts', v2 === 'What is the detention policy at these stops?', v2);
+  check('no page errors (no payout)', errs2.length === 0, errs2);
+  await np.context.close();
+}
+
+// ═══ EXT-D10.2 — visual: card button left of the price, panel button on one line ═════════════
+async function visualChecks(browser) {
+  const errors = [];
+  console.log('\n=== EXT-D10.2 visual measurements ===');
+  const { context, page, iso } = await openVariant(browser, 'full', 'isolated-first', errors);
+  const card = await page.evaluate(id => {
+    const root = document.getElementById(id), b = root.querySelector('[data-testid="ext-ai-chat-card"]'), p = root.querySelector('.wo-total_payout');
+    const br = b.getBoundingClientRect(), pr = p.getBoundingClientRect();
+    return { gap: +(pr.left - br.right).toFixed(1), leftOfPrice: br.right <= pr.left, sameLine: Math.abs((br.top + br.bottom) / 2 - (pr.top + pr.bottom) / 2) < 6,
+             priceStyleUntouched: p.getAttribute('style') === null && p.className === 'wo-total_payout' };
+  }, L[3]);
+  check('card: AI Chat is LEFT of the price, gap ≈ 20 px, same line, price element untouched',
+        card.leftOfPrice && Math.abs(card.gap - 20) <= 1 && card.sameLine && card.priceStyleUntouched, card);
+
+  const pan = await iso(`(function () {
+    injectPanelStyle();                                   // the panel's REAL stylesheet
+    var out = {};
+    [['narrow', 170], ['wide', 600]].forEach(function (w) {
+      var host = document.createElement('div'); host.id = 'ext-inline-panel'; host.style.width = w[1] + 'px';
+      document.body.appendChild(host);
+      var bar = buildActionBar(); host.appendChild(bar);
+      var b = aiChat.decoratePanelBar(bar, '${L[4]}');
+      var cam = bar.querySelector('[data-testid="ext-action-camera"]');
+      var range = document.createRange(); range.selectNodeContents(b);
+      out[w[0]] = { lines: range.getClientRects().length, h: b.getBoundingClientRect().height,
+                    camH: cam.getBoundingClientRect().height, text: b.textContent,
+                    boxW: Math.round(b.getBoundingClientRect().width), textFits: b.scrollWidth <= b.clientWidth };
+      host.id = 'ext-inline-panel-done-' + w[0];
+    });
+    return out;
+  })()`);
+  check('panel: "AI Chat" on ONE line and the same height as the camera/map/post buttons (170 px and 600 px wide rows)',
+        pan.narrow.lines === 1 && pan.wide.lines === 1 && pan.narrow.h === pan.narrow.camH && pan.wide.h === pan.wide.camH &&
+        pan.narrow.textFits && pan.wide.textFits && pan.wide.boxW > 40, pan);
+  await page.screenshot({ path: path.join(OUT, 'shot-visual.png') });
+  check('no page errors (visual)', errors.length === 0, errors);
+  await context.close();
+}
+
 async function three(browser) {
   const errors = [];
   console.log('\n=== button visibility, 3 loads ===');
@@ -335,6 +647,8 @@ async function three(browser) {
   try {
     if (process.env.AICHAT_SKIP_REGRESSION !== '1') await regressionOld(browser);
     await failSafes(browser);
+    await visualChecks(browser);
+    await phraseSuite(browser);
     await suite(browser, 'isolated-first');
     await suite(browser, 'main-first');
     await noCtx(browser);

@@ -75,6 +75,7 @@
         "content/patModal.js",
         "content/patBridge.js",
         "content/aiChat.js",
+        "content/aiChatPhrases.js",
         "content/inlinePanel.js",
         "content/tabAlert.js",
         "content/sidebar.js",

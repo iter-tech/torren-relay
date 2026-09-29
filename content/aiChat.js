@@ -22,6 +22,7 @@
 var aiChat = (function () {
   var MSG_OPEN   = 'tenlane-aichat-open-v1';
   var MSG_RESULT = 'tenlane-aichat-result-v1';
+  var MSG_PROBE  = 'tenlane-aichat-probe-input-v1';
   var REPLY_TIMEOUT_MS = 4000;
   var STATUS_HOLD_MS   = 3500;
   var PAINT_DEBOUNCE_MS = 250;
@@ -62,6 +63,7 @@ var aiChat = (function () {
 
   // Same canonical strings as the bridge. Any change here must be made there too.
   function canonOpen(d) { return ['open', d.requestId, d.loadId, d.ts].join('\n'); }
+  function canonProbe(d) { return ['probe-input', d.requestId, d.ts, d.text].join('\n'); }
   function canonResult(r) {
     return ['result', r.requestId, r.ok ? '1' : '0', r.result, r.reason || '', r.source || '',
             r.diagJson || ''].join('\n');
@@ -85,12 +87,15 @@ var aiChat = (function () {
   }
 
   // ── the debug log ─────────────────────────────────────────────────────────────────────────
-  function logEvent(ev) {
+  // `name` is the event type: 'ai-chat-open' (default), and since EXT-D10.2 'phrase-insert',
+  // 'phrase-edit' and 'phrase-failed' from content/aiChatPhrases.js — one log for the whole feature.
+  function logEvent(ev, name) {
+    ev.event = name || 'ai-chat-open';
     _events.push(ev);
     while (_events.length > LOG_MAX) _events.shift();
     // `notice`, not `log`: one line per dispatcher click, and it must survive DEBUG_LEVEL 1 so a
     // live test can be read from the console without changing the build.
-    logger.notice('aiChat', 'ai-chat-open', ev);
+    logger.notice('aiChat', ev.event, ev);
   }
 
   // ── talking to the bridge ─────────────────────────────────────────────────────────────────
@@ -118,19 +123,32 @@ var aiChat = (function () {
 
   async function requestOpen(loadId) {
     logger.log('aiChat', 'requestOpen called', { loadId: mask(loadId) });
+    return signedRequest({ type: MSG_OPEN, loadId: String(loadId) }, canonOpen);
+  }
+
+  // EXT-D10.2: asks the bridge whether Amazon's React REGISTERED the text in #ra-input — the
+  // textarea's React props, read in the page world. The text is already visible in the DOM, so
+  // sending it here discloses nothing new.
+  function probeInput(text) {
+    logger.log('aiChat', 'probeInput called');
+    return signedRequest({ type: MSG_PROBE, text: String(text) }, canonProbe);
+  }
+
+  async function signedRequest(msg, canon) {
     var k = key();
-    if (!k) return { ok: false, result: 'unavailable', reason: 'no-bridge-key', source: '' };
+    if (!k) return { ok: false, result: 'unavailable', reason: 'no-bridge-key', source: '', diag: {} };
     var rid = new Uint8Array(16);
     crypto.getRandomValues(rid);
-    var msg = { type: MSG_OPEN, requestId: hex(rid), loadId: String(loadId), ts: Date.now() };
-    var sig = await crypto.subtle.sign('HMAC', await k, new TextEncoder().encode(canonOpen(msg)));
+    msg.requestId = hex(rid);
+    msg.ts = Date.now();
+    var sig = await crypto.subtle.sign('HMAC', await k, new TextEncoder().encode(canon(msg)));
     msg.sig = hex(sig);
     return new Promise(function (resolve) {
       _pending[msg.requestId] = {
         resolve: resolve,
         timer: setTimeout(function () {
           delete _pending[msg.requestId];
-          resolve({ ok: false, result: 'unavailable', reason: 'no-bridge-response', source: '' });
+          resolve({ ok: false, result: 'unavailable', reason: 'no-bridge-response', source: '', diag: {} });
         }, REPLY_TIMEOUT_MS)
       };
       window.postMessage(msg, window.location.origin);
@@ -193,8 +211,10 @@ var aiChat = (function () {
     style.id = 'ext-ai-chat-style';
     style.setAttribute('data-testid', 'ext-ai-chat-style');
     style.textContent =
+      // EXT-D10.2: LEFT of the price, 20 px clear of it (Ihor). The price's own element and styles
+      // are untouched; only this button's margin makes the gap.
       '.ext-ai-chat-card{' +
-        'display:inline-block;margin-left:8px;padding:1px 7px;vertical-align:middle;' +
+        'display:inline-block;margin:0 20px 0 0;padding:1px 7px;vertical-align:middle;' +
         'font-size:11px;font-weight:600;line-height:16px;white-space:nowrap;cursor:pointer;' +
         'color:var(--ext-accent);background:transparent;' +
         'border:1px solid var(--ext-accent);border-radius:var(--ext-radius-sm);' +
@@ -204,11 +224,17 @@ var aiChat = (function () {
       '.ext-ai-chat-card[data-state="unavailable"],' +
       '.ext-action-btn--aichat[data-state="unavailable"]{color:#b3261e;border-color:#b3261e;}' +
       // Panel variant: same size and colours as the row's icon buttons, text instead of an icon.
-      '.ext-action-btn--aichat{' +
-        'width:auto;padding:0 8px;font-size:11px;font-weight:600;letter-spacing:0.02em;' +
-        'color:var(--ext-accent);' +
+      // EXT-D10.2: ONE LINE, always. Live it wrapped to "AI" / "Chat". ROOT CAUSE (found by the
+      // headless measurement): this stylesheet is injected at card-paint time, BEFORE the panel's own
+      // (inlinePanel.js injectPanelStyle), so the panel's `.ext-action-btn{width:28px}` — same
+      // specificity, later in the document — won, and "AI Chat" was squeezed into a 28 px box. The
+      // selector below out-ranks it regardless of order; nowrap + no shrink keep one line, and the
+      // row's 28 px height keeps it level with the camera/map/post icons.
+      '.ext-action-bar .ext-action-btn.ext-action-btn--aichat{' +
+        'width:auto;min-width:0;height:28px;padding:0 8px;font-size:11px;font-weight:600;' +
+        'letter-spacing:0.02em;line-height:28px;white-space:nowrap;flex:0 0 auto;color:var(--ext-accent);' +
       '}' +
-      '.ext-action-btn--aichat:hover{color:var(--ext-accent-hover);}';
+      '.ext-action-bar .ext-action-btn.ext-action-btn--aichat:hover{color:var(--ext-accent-hover);}';
     (document.head || document.documentElement).appendChild(style);
   }
 
@@ -253,7 +279,7 @@ var aiChat = (function () {
     }
   }
 
-  // Cards: one compact button after Amazon's payout, on eligible cards only. Idempotent — safe to
+  // Cards: one compact button just before (left of) Amazon's payout, on eligible cards only. Idempotent — safe to
   // run on every mutation burst.
   function paintCards() {
     logger.log('aiChat', 'paintCards called');
@@ -274,7 +300,7 @@ var aiChat = (function () {
         if (!payout || !payout.parentNode) continue;       // no known anchor → no button, no guess
         injectStyle();
         btn = makeButton(id, 'card');
-        payout.parentNode.insertBefore(btn, payout.nextSibling);
+        payout.parentNode.insertBefore(btn, payout);      // EXT-D10.2: left of the price
         keep.add(btn);
       }
       existing.forEach(function (b) {
@@ -327,7 +353,7 @@ var aiChat = (function () {
   }
 
   function debugLog() {
-    console.log('[EXT] ai-chat-open events (newest last), bridge key ' +
+    console.log('[EXT] AI chat events — ai-chat-open / phrase-* (newest last), bridge key ' +
       ((typeof aiChatKeyring !== 'undefined' && aiChatKeyring.ready()) ? 'READY' : 'MISSING'));
     console.table(_events);
     return _events.slice();
@@ -341,7 +367,10 @@ var aiChat = (function () {
     paintCards: paintCards,
     openFor: openFor,
     onChatOpened: onChatOpened,
-    debugLog: debugLog
+    debugLog: debugLog,
+    logEvent: logEvent,
+    probeInput: probeInput,
+    mask: mask
   };
 })();
 

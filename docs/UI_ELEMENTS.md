@@ -15,6 +15,27 @@ clicks nothing of Amazon's.
 | ext-action-ai-chat | button | Same action in the inline panel's bottom row (`ext-action-bar`), after camera/map/post. Class `ext-action-btn ext-action-btn--aichat`. |
 | ext-ai-chat-style | style | CSS for both. Uses `--ext-accent*` tokens, so night mode follows. |
 
+**2026-09-28 (EXT-D10.2):** `ext-ai-chat-card` now sits **left** of the price (margin-right 20 px).
+`ext-action-ai-chat` is forced to one line, 28 px high (a higher-specificity selector).
+
+## Phrase dropdown inside Amazon's chat (content/aiChatPhrases.js — 2026-09-28, EXT-D10.2)
+
+Appears in Amazon's open `.chat-box-position` (whoever opened it), left of `#ra-input`. It inserts
+text and never sends; it never touches Amazon's send or booking buttons.
+
+| testid | Type | Function |
+|--------|------|----------|
+| ext-phrases-btn | button | "Phrases ▾" — toggles the dropdown. Flashes "Not registered" if an insert was not registered by React. |
+| ext-phrases-menu | div[role=listbox] | The dropdown, inside the chat root, opening upward, clamped to the chat box. |
+| ext-phrases-note | div | Header: the payout in use and its source ("this load" / "from the chat"), or "No payout found…". |
+| ext-phrase-row-N | div[role=option] | Phrase N rendered with the payout. Click or Enter inserts it. `aria-disabled` when it needs a payout and none is known. |
+| ext-phrase-edit-N / ext-phrase-del-N | button | ✎ edit inline / 🗑 delete (asks first). |
+| ext-phrase-del-yes-N / ext-phrase-del-no-N | button | Delete / Keep confirmation. |
+| ext-phrase-editing-N, ext-phrase-input-N, ext-phrase-save-N, ext-phrase-cancel-N | row / input / buttons | Inline editor (N = index, or `new`). Enter saves, Esc cancels. |
+| ext-phrase-add | button | "+ Add phrase" — disabled at 15 or more. |
+| ext-phrases-limit | span | The limit note (`phrases.limitNote`). |
+| ext-phrases-style | style | CSS for all of the above (Amazon-like neutral look). |
+
 ## LoadUnit data store (utils/loadStore.js — 2026-06-30)
 
 No new extension UI elements. `loadStore.js` is a pure data-layer module — it maintains

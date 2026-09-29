@@ -21,6 +21,27 @@ expanding the card. The mechanism is the one read out of the competitor in
 `docs/AI_CHAT_CAPTURE.md` §10. The implementation is our own; nothing was copied. Full trace, proof
 and live-test steps: **`docs/AI_CHAT_BUTTON.md`**.
 
+### ✅ AMENDED 2026-09-28 (EXT-D10.2): LIVE-CONFIRMED, BUTTON MOVED, AND A PHRASE DROPDOWN INSIDE AMAZON'S CHAT
+
+**Ihor tested EXT-D10.1 live: the AI Chat button opens Amazon's chat on the chosen load.** Details
+and proof: `docs/AI_CHAT_BUTTON.md` §8 (95/95 headless; ⚠ not verified live).
+
+- **Card button: LEFT of the price, 20 px gap**, made by the button's own margin. Amazon's price
+  element is untouched.
+- **Panel button: one line.** Root cause: our stylesheet loads before the panel's, whose
+  `.ext-action-btn{width:28px}` won the tie. The selector now out-ranks it.
+- **"Phrases ▾" inside Amazon's open chat** (`content/aiChatPhrases.js`), for a chat opened by our
+  button **or** by Amazon's icon. It **inserts** a rendered phrase into `#ra-input`, then **verifies**
+  through the bridge that React registered it (textarea props). 🔴 **IT NEVER SENDS**, never clicks
+  Amazon's send button, and never touches the booking controls; the proof asserts **zero events**
+  reached them.
+- **Payout for variables:** our button's load for the chat it opened; else the one
+  `.wo-total_payout` inside the chat; else unknown, and variable phrases are disabled.
+- ⚠ **More DOM coupling than before:** `.chat-box-position`, `#ra-input`, the input container /
+  send-button structure, `.wo-total_payout`. `#ra-input` is the stable anchor; hashed classes are
+  never used. If any of these are missing, the dropdown simply does not appear, and nothing of
+  Amazon's is changed.
+
 ### 🔴 AMENDED 2026-09-28 (EXT-D10.1): THE FIRST VERSION REPORTED A SUCCESS THAT DID NOT HAPPEN
 
 **Live, LoadFetcher OFF:** 3 clicks, each logged `result: opened`, the button said "Chat opened",
@@ -109,6 +130,22 @@ only on `true` in a 3-load table. `node scripts/build-zip.mjs` passes (50 files)
 ---
 
 ## EXT-D9 — ✅ THE DISPATCHER'S NEGOTIATION PHRASES: A LIBRARY AND AN EDITOR. NOTHING TOUCHES AMAZON'S CHAT
+
+### ⚠ AMENDED 2026-09-28 (with EXT-D10.2)
+
+- **The phrases are now used inside Amazon's chat.** The "Phrases ▾" dropdown (EXT-D10.2) is the
+  second editor and the consumer that the "nothing touches Amazon's chat" heading anticipated. It
+  **inserts** text and never sends. This library itself still touches no page.
+- **LIMIT 20 → 15, and nothing is ever cut.** `MAX_PHRASES = 15` is the **add** limit (popup,
+  dropdown, import). `MAX_STORED_PHRASES = 20`, the old limit, is what load/save keep, so a list
+  saved under EXT-D9 with 16–20 phrases **keeps them all**. Adding is refused until the list is below
+  15, and both editors say so (`phrases.limitNote()`). The 200-character limit is unchanged. The
+  "Limits: 20 phrases" paragraph below is superseded.
+- **Starter ids are fixed** (`starter0…6`, was random per load): an edit to the never-saved starter
+  list would otherwise lose its row between two loads.
+- **The two editors stay in sync:** each writes through `phrases.save()`. The dropdown re-reads
+  before writing; the popup follows `storage.onChanged` unless a phrase field there is being edited.
+- New helpers: `phrases.hasVariables()`, `canAdd()`, `limitNote()`.
 
 **2026-09-24, Ihor.** Later, a button on our load card will open Amazon's own Relay Assistant chat
 for that load, and a panel beside it will list the dispatcher's phrases — one click sends one into

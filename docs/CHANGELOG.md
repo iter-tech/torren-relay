@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-09-28 — AI Chat: button placement, and phrases inside Amazon's chat (EXT-D10.2)
+
+✅ **EXT-D10.1 was confirmed live by Ihor:** the button opens Amazon's chat on the chosen load.
+⚠ This change is proved headless (95/95), **not yet verified live.** Details:
+`docs/AI_CHAT_BUTTON.md` §8.
+
+- **`content/aiChat.js`**
+  - The card button is now **left of the price**, with a 20 px gap. The price element is untouched.
+  - The panel button stays on **one line**. The panel's `width:28px` rule had been winning a
+    specificity tie; the selector now out-ranks it.
+  - New `probeInput()` / `logEvent(ev, name)` / `mask()`, used by the phrase dropdown.
+- **`content/aiChatPhrases.js`** (new) — "Phrases ▾" next to Amazon's `#ra-input`, in any open
+  `.chat-box-position` (found by MutationObserver, whoever opened the chat).
+  - The dropdown opens upward and stays inside the chat box; a click inserts the rendered phrase with
+    the native setter plus an `input` event, then verifies it through the bridge. **It never sends.**
+  - Inline ✎ / 🗑 / "+ Add phrase", in the same storage as the popup.
+  - Payout comes from our button's load, else from the chat's `.wo-total_payout`, else variable
+    phrases are disabled.
+  - Keyboard: ↑ / ↓ / Enter / Esc. Events logged: `phrase-insert`, `phrase-edit`, `phrase-failed`.
+- **`content/aiChatBridge.js`** — a signed, read-only `probe-input` request that checks whether the
+  textarea's React props hold the text.
+- **`utils/phrases.js`**
+  - The add limit is **15** (was 20); a stored list of up to 20 is kept whole, and adding is blocked
+    with a note.
+  - Starter ids are fixed.
+  - New `hasVariables` / `canAdd` / `limitNote`.
+- **`popup/popup.js`** — shows the shared limit note, refuses to add at the limit, and follows chat-side
+  edits live.
+- **`manifest.json`** — `content/aiChatPhrases.js` after `aiChat.js`.
+- **`scripts/aichat-suite/`**
+  - A chat fixture built from the live DOM facts: React-controlled `#ra-input`, a send button, and
+    booking buttons that record every event.
+  - Amazon's-icon path, the no-payout variant, and the real popup on a shared storage shim.
+  - Visual measurements for items 1 and 2. **95/95.** Build passes (51 files).
+
 ## 2026-09-28 — AI Chat: fix a false "Chat opened" (EXT-D10.1)
 
 **Live (LoadFetcher OFF):** the button said "Chat opened" and logged `result: opened` three times,

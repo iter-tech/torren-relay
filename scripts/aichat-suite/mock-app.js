@@ -59,13 +59,61 @@
       if (open) window.__mockChatLog.push({ event: 'getSessionHistory', id: st.workOpportunityForDemandSupport.id });
     }, [st.workOpportunityForDemandSupport, st.setIsChatBoxOpen]);
     if (props.noPanel) return h('div', { id: 'mock-chat-nopanel' }, 'panel never renders');
-    // Amazon's class names, as styled by the competitor's dark-mode CSS.
     return h('div', { id: 'mock-chat', 'data-open': String(open),
                       'data-load': open ? st.workOpportunityForDemandSupport.id : '' },
-      open ? h('div', { className: 'chat-box-position' },
-               h('div', { className: 'bot-header' }, 'Relay Assistant — ' + st.workOpportunityForDemandSupport.id.slice(0, 4)),
-               h('div', { className: 'chatbot-body' }, 'chat body'))
+      h('button', { id: 'mock-amazon-chat-icon', type: 'button', onClick: function () {
+        // Amazon's OWN chat icon: opens the chat on a load without any of our code involved.
+        ctx.setChatBotState(Object.assign({}, st, { workOpportunityForDemandSupport: WOS[1], setIsChatBoxOpen: true }));
+      } }, 'Amazon chat icon'),
+      open ? h(ChatBox, { key: st.workOpportunityForDemandSupport.id, wo: st.workOpportunityForDemandSupport,
+                          onClose: function () { ctx.setChatBotState(Object.assign({}, st, { setIsChatBoxOpen: false })); } })
            : 'chat closed');
+  }
+
+  // EXT-D10.2: Amazon's open Relay Assistant, built from the DOM facts Ihor captured live:
+  // .chat-box-position › .message-header (title + minimize/close) · the load with .wo-total_payout
+  // and the three booking buttons · textarea#ra-input (React-CONTROLLED) in a container, and the send
+  // <button type=button data-mdn-interactive class=css-1gltk7k> right after that container.
+  function ChatBox(props) {
+    var t = React.useState('');
+    var text = t[0];
+    window.__raValue = text;
+    var noPay = params.get('nopay') === '1';
+    var bookRefs = [React.useRef(null), React.useRef(null), React.useRef(null)];
+    React.useEffect(function () {
+      // Booking controls: record EVERY event that reaches them. The suite asserts this stays empty.
+      window.__bookingEvents = window.__bookingEvents || [];
+      var types = ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'focus', 'focusin',
+                   'keydown', 'keyup', 'input', 'change'];
+      bookRefs.forEach(function (r) {
+        types.forEach(function (ty) {
+          r.current.addEventListener(ty, function (e) { window.__bookingEvents.push(r.current.id + ':' + e.type); }, true);
+        });
+      });
+    }, []);
+    var w = props.wo;
+    return h('div', { className: 'chat-box-position', style: {
+        position: 'fixed', right: '16px', bottom: '16px', width: '380px', height: '520px',
+        display: 'flex', flexDirection: 'column', background: '#fff', border: '1px solid #aab7b8', fontFamily: 'Arial' } },
+      h('div', { className: 'css-hdr1 message-header bot-header', style: { display: 'flex', padding: '8px', borderBottom: '1px solid #ddd' } },
+        h('span', { style: { flex: 1 } }, 'Relay Assistant'),
+        h('button', { type: 'button', 'aria-label': 'Minimize' }, '–'),
+        h('button', { type: 'button', 'aria-label': 'Close', onClick: props.onClose }, '×')),
+      h('div', { className: 'chatbot-body', style: { flex: '1 1 auto', overflow: 'auto', padding: '8px' } },
+        h('div', { className: 'mock-load' },
+          'Load ' + w.id.slice(0, 4) + ' ',
+          noPay ? null : h('span', { className: 'wo-total_payout' }, '$' + w.payout.value.toFixed(2))),
+        h('div', { className: 'mock-book-row', style: { marginTop: '8px' } },
+          h('button', { id: 'rlb-book-btn', type: 'button', ref: bookRefs[0] }, 'Book'),
+          h('button', { id: 'rlb-book-trip-confirm-booking-btn', type: 'button', ref: bookRefs[1] }, 'Confirm booking'),
+          h('button', { id: 'rlb-book-trip-no-btn', type: 'button', ref: bookRefs[2] }, 'No'))),
+      h('div', { className: 'mock-input-row', style: { display: 'flex', alignItems: 'center', padding: '8px', borderTop: '1px solid #ddd' } },
+        h('div', { className: 'css-inputwrap', style: { flex: '1 1 auto', minWidth: 0 } },
+          h('textarea', { id: 'ra-input', placeholder: 'Type your message here', className: 'css-5ivjoy',
+                          'data-mdn-interactive': '', rows: 1, value: text, style: { width: '100%', boxSizing: 'border-box' },
+                          onChange: function (e) { t[1](e.target.value); } })),
+        h('button', { type: 'button', 'data-mdn-interactive': '', className: 'css-1gltk7k', style: { marginLeft: '8px' },
+                      onClick: function () { (window.__sent = window.__sent || []).push(text); t[1](''); } }, 'Send')));
   }
 
   function Board() {
