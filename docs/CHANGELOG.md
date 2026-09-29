@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-28 — Freshness recorder: passive evidence for silent throttling (EXT-D11)
+
+Built for `docs/THROTTLE_SIGNALS.md`. **Passive:** no request added, the refresh rate is unchanged,
+and the 503 slow-down is unchanged. ⚠ Not verified live.
+
+- **`content/networkObserver.js`** — for every `/api/loadboard/search` and
+  `/recommendations/get` response (fetch and XHR), it posts one small record:
+  - status, raw `isBotRequest`, `metadata` keys and codes, rows, `totalResultsSize`, and the age of
+    the newest `createdAtTime`;
+  - cache / throttle headers, with ids masked and never cookies or tokens;
+  - requests in the last 1 / 5 min, and throttle-like `hints`.
+
+  The existing report and capture paths are untouched. `metadata` turned out to be a JSON
+  **string**; it is now parsed.
+- **`utils/freshnessProbe.js`** (new) — cleans each record to known fields and keeps the last 500
+  (`freshnessProbeRecords`). It logs `⚠ FRESHNESS WARNING` when hints appear (deduplicated for 10
+  min), and provides summary, read and clear. It loads in the content scripts and the popup.
+- **Popup** — new "Freshness check (measurement)" block, with Copy raw records and Clear.
+- **`manifest.json`** — `utils/freshnessProbe.js` after `priceProbe.js`.
+- **`scripts/freshness-suite/`** (new, 18/18). **`scripts/test-shims/chrome-shim.cjs`** (new) is
+  the storage shim shared with the aichat suite, which still passes 95/95. Build passes (52 files).
+
 ## 2026-09-28 — AI Chat: button placement, and phrases inside Amazon's chat (EXT-D10.2)
 
 ✅ **EXT-D10.1 was confirmed live by Ihor:** the button opens Amazon's chat on the chosen load.

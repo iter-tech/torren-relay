@@ -3,6 +3,24 @@
 Every UI element MUST have a unique data-testid.
 When reporting a bug, use the testid name.
 
+## Popup — Freshness check (measurement) (popup/popup.html — 2026-09-28, EXT-D11)
+
+Passive evidence for silent throttling; filled from `utils/freshnessProbe.js`. Every line prints
+even at zero.
+
+| testid | Type | Function |
+|--------|------|----------|
+| popup-fresh-stats | div | The block. |
+| popup-fresh-total | span | Records (search N, recommendations M). |
+| popup-fresh-bot | span | Records where `isBotRequest` was not null. |
+| popup-fresh-hints | span | Records with any throttle/cache hint. |
+| popup-fresh-age | span | Newest-load age, last / median (minutes). |
+| popup-fresh-rate | span | This page's requests per minute, last / max. |
+| popup-fresh-503 | span | HTTP 503 count. |
+| popup-fresh-window | span | First → last record time. |
+| popup-fresh-copy | button | Copies `{ exportedAt, version, summary, records }` as JSON. |
+| popup-fresh-clear | button | Empties the buffer (the measurement only). |
+
 ## AI Chat button (content/aiChat.js — 2026-09-28, EXT-D10)
 
 Shown only on loads whose record has `demandSupportEnabled === true`, and only while signed in.

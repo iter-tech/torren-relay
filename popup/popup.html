@@ -288,6 +288,23 @@
       <button type="button" id="popup-price-clear" data-testid="popup-price-clear" class="popup-stats-reset">Clear measurement</button>
     </div>
 
+    <!-- 🔑 IS AMAZON HOLDING BACK THE NEWEST LOADS? (EXT-D11). Passive: one record per search /
+         recommendations response the board already received. When loads seem to be missing,
+         "Copy raw records" is the evidence. It decides nothing and alerts nothing. -->
+    <div class="popup-section-title">Freshness check (measurement)</div>
+
+    <div class="popup-sender-stats" id="popup-fresh-stats" data-testid="popup-fresh-stats">
+      <div class="popup-stat-line">records <span id="popup-fresh-total" data-testid="popup-fresh-total">—</span></div>
+      <div class="popup-stat-line">isBotRequest not null <span id="popup-fresh-bot" data-testid="popup-fresh-bot">—</span></div>
+      <div class="popup-stat-line">throttle/cache hints <span id="popup-fresh-hints" data-testid="popup-fresh-hints">—</span></div>
+      <div class="popup-stat-line">newest load age, last / median <span id="popup-fresh-age" data-testid="popup-fresh-age">—</span></div>
+      <div class="popup-stat-line">requests per minute, last / max <span id="popup-fresh-rate" data-testid="popup-fresh-rate">—</span></div>
+      <div class="popup-stat-line">HTTP 503 <span id="popup-fresh-503" data-testid="popup-fresh-503">—</span></div>
+      <div class="popup-stat-line">first / last <span id="popup-fresh-window" data-testid="popup-fresh-window">—</span></div>
+      <button type="button" id="popup-fresh-copy" data-testid="popup-fresh-copy" class="popup-stats-reset">Copy raw records</button>
+      <button type="button" id="popup-fresh-clear" data-testid="popup-fresh-clear" class="popup-stats-reset">Clear</button>
+    </div>
+
 
     <div class="popup-divider"></div>
 
@@ -339,6 +356,7 @@
   <!-- Reads and summarises the price-read measurement (EXT-D6). Same file the content scripts
        write through, so the buckets have exactly one definition. -->
   <script src="../utils/priceProbe.js"></script>
+  <script src="../utils/freshnessProbe.js"></script>
   <!-- The phrase library: storage, the variable renderer and export/import, shared with the content
        scripts so the popup and the future chat panel cannot disagree (EXT-D9). -->
   <script src="../utils/phrases.js"></script>

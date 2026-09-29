@@ -13,6 +13,74 @@ behind.
 
 ---
 
+## EXT-D11 — ✅ A PASSIVE FRESHNESS RECORDER, SO SILENT THROTTLING IS CAUGHT THE DAY IT HAPPENS
+
+**2026-09-28, Ihor.** Amazon may silently stop returning the newest loads to an IP that refreshes
+often (`docs/THROTTLE_SIGNALS.md`). There is **no captured example**, and none of the 40 saved
+responses shows a marker. So nothing is detected yet. What we build is **the evidence, kept
+automatically**, so the next time loads go missing during normal work the records already exist.
+
+### What is recorded, per search / recommendations response the page already receives
+
+`content/networkObserver.js` (MAIN world) → `utils/freshnessProbe.js` (ring buffer, the last
+**500** records, `chrome.storage.local` key `freshnessProbeRecords`, outside STORAGE_KEYS like
+`priceProbeEvents`):
+- time, page id, endpoint, HTTP status, `isBotRequest` (**raw**);
+- `metadata` keys and `reasonList` codes, rows returned, `totalResultsSize`;
+- the age in minutes of the newest `createdAtTime`;
+- headers that could mean caching or throttling: `x-cache`, `age`, `cache-control`,
+  `edge-cache-control`, `retry-after`, `via`, any `x-amz*` / rate-limit / throttle name. Request
+  ids are **masked**, and **cookies, tokens, auth and session headers are never read into a
+  record**;
+- this page's search requests in the last 1 and 5 minutes;
+- `hints`: the throttle-like signals seen, i.e. `isBotRequest` not null, `x-cache` other than
+  `Miss…`, `age`, `retry-after`, `cache-status`, or rate-limit headers.
+
+A non-2xx answer is recorded at once, since Amazon may never read its body. Aborted requests are not
+recorded; a network error is recorded as status 0.
+
+### 🔴 PASSIVE — IT CHANGES NOTHING
+
+**No request is added and the refresh rate is untouched.** The body is the one Amazon itself parses
+(the existing `Response.json` piggyback), and headers are read from the Response / XHR object
+without consuming it. **The 503 path is unchanged:** `report()` → background backoff, proven by
+the suite on the same run. Records are cleaned to known fields on the isolated side, so a message
+forged by the page can store nothing arbitrary. They are evidence, not decisions.
+
+### Warning, not alert
+
+When `hints` is non-empty, a `⚠ FRESHNESS WARNING` line goes to the debug log with the record
+(`logger.notice`, visible at the shipped level). The same set of hints is repeated at most once per
+10 minutes. **No UI alert yet**, as Ihor asked. Note that a 503 carrying `x-cache: Error from
+cloudfront` also warns; that is intended.
+
+### Popup — "Freshness check (measurement)"
+
+Records (search / recommendations), `isBotRequest` not-null count, hint count, newest-load age
+(last / median), requests per minute (last / max), HTTP 503 count, first → last. Buttons: **Copy
+raw records** (JSON with the summary) and **Clear**.
+
+### Found while building it
+
+⚠ **`metadata` is a JSON *string*** in the captured responses (`"{\"reasonList\":[…]}"`,
+`samples/ai-chat-2.har` #4), not an object. The recorder parses it; without that, its keys would
+always have read as empty.
+
+### Proof
+
+`scripts/freshness-suite/run.cjs`: **18/18.** Real `networkObserver.js` in the page world; real
+`freshnessProbe.js` in an isolated world; the real popup. Responses:
+- real bodies from `samples/ai-chat-2.har` #4 and #5, via fetch and via XHR;
+- a synthetic `isBotRequest: true` + `x-cache: Hit` + `age: 37`, recorded with 3 hints and one
+  warning;
+- a 503, recorded, with the existing report still `ok:false, 503`.
+
+It also covers the popup counts, copy, clear, the 500 ring, a forged message, and that no secret
+header value is stored. The aichat suite still passes 95/95 after its storage shim moved to
+`scripts/test-shims/chrome-shim.cjs`. `build-zip` passes (52 files). ⚠ **Not verified live.**
+
+---
+
 ## EXT-D10 — ✅ "AI CHAT" OPENS AMAZON'S OWN RELAY ASSISTANT ON THE CHOSEN LOAD. ⚠ NOT YET SEEN ON LIVE AMAZON
 
 **2026-09-28, Ihor.** A button on each negotiable load card, and one in our inline panel's bottom row,

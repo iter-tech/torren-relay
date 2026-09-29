@@ -57,6 +57,7 @@
         "utils/tabState.js",
         "utils/tabIndicator.js",
         "utils/priceProbe.js",
+        "utils/freshnessProbe.js",
         "utils/phrases.js",
         "utils/loadStore.js",
         "utils/soundDefs.js",

@@ -298,6 +298,63 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  /*
+   * 🔑 THE FRESHNESS MEASUREMENT (EXT-D11). Same treatment as the price check above: rendered on
+   * open, every line printed even at zero, and the numbers come from utils/freshnessProbe.js — the
+   * file the content script writes through.
+   */
+  var FRESH_FIELDS = [
+    ['popup-fresh-total',  function (s) { return s.total + ' (search ' + s.byEp.search + ', recommendations ' + s.byEp.recommendations + ')'; }],
+    ['popup-fresh-bot',    function (s) { return String(s.botNonNull); }],
+    ['popup-fresh-hints',  function (s) { return String(s.hinted); }],
+    ['popup-fresh-age',    function (s) { return (s.lastAge === null ? '—' : s.lastAge + ' min') + ' / ' + (s.medianAge === null ? '—' : s.medianAge + ' min'); }],
+    ['popup-fresh-rate',   function (s) { return (s.lastR1 === null ? '—' : String(s.lastR1)) + ' / ' + s.maxR1; }],
+    ['popup-fresh-503',    function (s) { return String(s.s503); }],
+    ['popup-fresh-window', function (s) { return s.total ? (shortTs(s.first) + ' → ' + shortTs(s.last)) : '—'; }]
+  ];
+
+  function renderFreshStats(list) {
+    if (typeof freshnessProbe === 'undefined') return;
+    var sum = freshnessProbe.summarise(list);
+    for (var i = 0; i < FRESH_FIELDS.length; i++) {
+      var el = document.getElementById(FRESH_FIELDS[i][0]);
+      if (!el) continue;
+      try { el.textContent = FRESH_FIELDS[i][1](sum); } catch (e) { el.textContent = '—'; }
+    }
+  }
+
+  if (typeof freshnessProbe !== 'undefined') {
+    freshnessProbe.read(function (list) { renderFreshStats(list); });
+
+    var freshCopyBtn = document.getElementById('popup-fresh-copy');
+    if (freshCopyBtn) {
+      freshCopyBtn.addEventListener('click', function () {
+        freshnessProbe.read(function (list) {
+          var text = JSON.stringify({
+            exportedAt: new Date().toISOString(),
+            version: (chrome.runtime && chrome.runtime.getManifest) ? chrome.runtime.getManifest().version : null,
+            summary: freshnessProbe.summarise(list),
+            records: list
+          }, null, 2);
+          navigator.clipboard.writeText(text).then(function () {
+            freshCopyBtn.textContent = 'Copied ' + list.length + ' records';
+            logger.log('popup', 'freshness records copied', { records: list.length });
+          }).catch(function (e) {
+            freshCopyBtn.textContent = 'Copy failed — see console';
+            logger.error('popup', 'freshness copy failed', { error: e });
+          });
+        });
+      });
+    }
+
+    var freshClearBtn = document.getElementById('popup-fresh-clear');
+    if (freshClearBtn) {
+      freshClearBtn.addEventListener('click', function () {
+        freshnessProbe.clear(function () { renderFreshStats([]); });
+      });
+    }
+  }
+
 
   /*
    * ── THE NEGOTIATION PHRASES (EXT-D9) ────────────────────────────────────────────────────────
@@ -1066,6 +1123,10 @@ document.addEventListener('DOMContentLoaded', function () {
   // snapshot that is already stale by the time anyone reads it.
   if (area === 'local' && changes[PRICE_PROBE_KEY] && typeof renderPriceStats === 'function') {
     renderPriceStats(changes[PRICE_PROBE_KEY].newValue);
+  }
+  if (area === 'local' && typeof FRESHNESS_PROBE_KEY !== 'undefined' && changes[FRESHNESS_PROBE_KEY] &&
+      typeof renderFreshStats === 'function') {
+    renderFreshStats(changes[FRESHNESS_PROBE_KEY].newValue);
   }
   if (area === 'local' && changes[LOAD_SENDER_STATS_KEY]) {
     renderSenderStats(changes[LOAD_SENDER_STATS_KEY].newValue);
