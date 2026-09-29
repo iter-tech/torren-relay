@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-09-28 — "AI Chat": opens Amazon's own Relay Assistant on the chosen load (EXT-D10)
+
+⚠ **Proved in headless Chrome against a React mock; NOT verified on live Amazon.** Details, trace and
+Ihor's live-test steps: `docs/AI_CHAT_BUTTON.md`. **Booking stays a manual click on Amazon's Book
+button; `FAST_BOOK_ENABLED` stays `false`.**
+
+- **`content/networkObserver.js`** — the projection carries `demandSupportEnabled` (`=== true`, one
+  boolean). The load sender's `toRow()` does not ship it.
+- **`content/aiChatKey.js`** (new, ISOLATED, document_start) — a per-page secret, handed to the
+  bridge before any page script exists.
+- **`content/aiChatBridge.js`** (new, MAIN, document_start) — verifies the signed request. It finds
+  Amazon's React context with `chatBotState` / `setChatBotState` and takes the load from Amazon's own
+  lists or card props. It then sets it through Amazon's setter as a **new** object and confirms from
+  the committed tree. No requests, no clicks. Any miss means nothing is written.
+- **`content/aiChat.js`** (new, ISOLATED) — the buttons: `ext-ai-chat-card` after the card's payout,
+  and `ext-action-ai-chat` in the panel's bottom row. They appear only on `demandSupportEnabled ===
+  true` while signed in. Each shows "Opening…" → "Chat opened" / "Chat unavailable", and logs
+  `ai-chat-open {loadId: abcd***, where, source, result, reason}` via `logger.notice`.
+  `__EXT_DEBUG.aiChatLog()` prints the last 30. `aiChat.onChatOpened(fn)` is the hook for the phrase
+  panel (`phrases.phrasesForLoad`); nothing registers yet.
+- **`content/inlinePanel.js`** — one call in `renderPanelFromData()` adds the panel button.
+- **`manifest.json`** — the bridge joins the MAIN entry, and a new ISOLATED document_start entry
+  runs `aiChatKey.js`. `aiChat.js` loads before `inlinePanel.js`.
+- **`scripts/aichat-suite/`** (new) — the headless proof, 49/49. It is outside the archive by the
+  build script's rule.
+
 ## 2026-09-24 — the dispatcher's negotiation phrases: library, renderer and editor (EXT-D9)
 
 Groundwork for the chat work: later a button on our load card will open Amazon's own Relay Assistant

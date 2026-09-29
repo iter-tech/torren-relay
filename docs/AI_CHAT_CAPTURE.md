@@ -298,3 +298,300 @@ changed by this analysis.
   all 19 `relay.amazon.com` entries); nothing was read from any header value.
 - Ihor's own typed text was three words per message (`hi chat 1/2/3`) and is quoted as such; the
   assistant's replies are quoted because they are the evidence that the right load was answered.
+
+---
+
+## 9. How the competitor (LoadFetcher) opens the chat on a chosen load — `samples/competitor-ai.har`
+
+**Source:** 19 entries, `2026-09-29T02:27:52.292Z` → `02:28:43.723Z` (UTC), WebInspector, no `pages`.
+Read-only analysis in node; nothing was sent and Relay was not opened. Masking: account `A105***`,
+carrier `03e2***`, loads `7443***` / `e3f0***` / `a5d1***`. The `/api/token` access tokens (entries
+2, 11, 16) are **not** reproduced. Extension id `ihcg***` (LoadFetcher, per Ihor).
+
+### 9.1 ⚠ The chat in this capture is a DIFFERENT backend from §1–§8
+
+| | `ai-chat.har` / `ai-chat-2.har` (Amazon's icon, 09-24/25) | `competitor-ai.har` (09-29) |
+|---|---|---|
+| endpoints | `POST relay.amazon.com/api/loadboard/demand-support/{chat-history,query}` | `GET cloudfront.na.api.relay.amazon.dev/compass/v1/sessions/<sessionId>/events`, `POST …/compass/v1/chat/stream` (SSE, `text/event-stream`) |
+| auth | cookie + `x-csrf-token` | `x-relay-access-token` from `GET relay.amazon.com/api/token` (900 s, returns `api_url`) |
+| session id | returned by server (`neg:…`, colons) | **sent by the client** in the URL and body: `neg-<account>-<carrierId>-<workOpportunityId>` |
+| client code | chunk `218-8c0a4f452545d178a739.js` (`getMessages`, `startSession`, `sendMessage`) | chunk `446-c977afe39d33f312a109.js` (`getSessionHistory`, `sendMessage`), same CDN `d2rgidlsfg8vnm.cloudfront.net` |
+
+`chat/stream` body (entry 4, masked): `{"message":"Hello","sessionId":"neg-A105***-03e2***-7443***",
+"clientId":"RLB-RA-SpotDemandNego","messageType":"HIDDEN:auto_start","context":{"entityIdentifiers":
+{"workOpportunityId":"7443***","workOpportunityVersion":182,"woMajorVersion":2,
+"workOpportunityOptionId":"1","carrierId":"03e2***"}, …}, "timeZone":…}`. The response is an SSE
+stream with tool calls `get_work_opportunity`, `check_market_metrics`, ending `end_turn`.
+
+⚠ **[?]** Whether Amazon rolled out `compass` between 09-25 and 09-29, or it is served only with
+LoadFetcher present, is not decidable from these files. Both chunks come from Amazon's CDN, and no
+chrome-extension frame sits *below* chunk 446 on any stack (see 9.3).
+
+### 9.2 Chat requests in time order (Q1)
+
+| # | UTC | request | load | `workOpportunityVersion` sent |
+|---|---|---|---|---|
+| 0–2 | 02:27:52.292 | translations ×2, `GET /api/token` | — | — |
+| 3 | 02:27:52.844 | `GET …/sessions/neg-…-7443***/events` → `{"events":[]}` | `7443***` | — |
+| 4 | 02:27:53.197 | `POST …/chat/stream` `HIDDEN:auto_start` (15.7 s stream) | `7443***` | 182 |
+| 9–11 | 02:28:15.059 | translations ×2, `GET /api/token` | — | — |
+| 12 | 02:28:15.348 | `GET …/sessions/neg-…-e3f0***/events` → `{"events":[]}` | `e3f0***` | — |
+| 13 | 02:28:15.797 | `POST …/chat/stream` `HIDDEN:auto_start` (13.0 s) | `e3f0***` | 127 |
+| 14–16 | 02:28:21.459 | translations ×2, `GET /api/token` | — | — |
+| 17 | 02:28:21.740 | `GET …/sessions/neg-…-a5d1***/events` → `{"events":[]}` (4.5 s wait) | `a5d1***` | — |
+
+There is no `action` field in this API. The equivalent of `start_new_conversation` is the
+`chat/stream` with `messageType:"HIDDEN:auto_start"`.
+
+⚠ **THREE chat opens, not two.** Entry 17 opens a third load 6 s after the second, while entry 13's
+stream was still running. It has no `chat/stream` after it. [?] It could be an extra click, or a
+stream that was still pending at export and therefore missing.
+
+**Do the ids match the 3rd and 5th negotiable loads? NO, and it cannot be checked for the first
+click.**
+- The first open (entry 3, 02:27:52) comes **before** every `/loadboard/search` in the file. The list
+  that click was made on is not in the capture. The version it sent (182) equals the one entry 8
+  later returns, so the page already held that row.
+- The only board state in the file is entries 7 and 8 (02:28:10, `relevanceForSearchTab`). Entry 7
+  is 5 rows filtered to `eligibleFeatures: UNANCHORED_NEGO`, all `demandSupportEnabled:true`, and
+  **none of them is a chat load**. Entry 8 is 50 rows, of which 8 are `demandSupportEnabled:true`, in
+  order: `1311, b8ef, eeee, 2977, 62c7, e3f0, 7443, a5d1`. So the chat loads are negotiable
+  **#6, #7, #8** of entry 8, or #11–#13 if entry 7's block is counted first. Neither ordering gives
+  3rd/5th. [?] LoadFetcher may render or number its own list differently.
+
+### 9.3 Who sent them (Q2) — Amazon's own code, through a fetch wrapper
+
+Every chat request (3, 4, 12, 13, 17) has `_initiator.type: "script"` and this stack (entry 3):
+
+```
+window.fetch        chrome-extension://ihcg***/main.js                 0:166736   ← wrapper
+window.fetch        chrome-extension://ihcg***/mainComponent.bundle.js 320:1243424 ← wrapper
+getSessionHistory   d2rgidlsfg8vnm.cloudfront.net/446-c977….js        5:1663954  ← Amazon chat
+  [await] (anon) 446-….js 5:1679887 < (anon) 446-….js 5:1680673
+  < ap 1858:93234 < vb 1858:113187 < (anon) 1858:109842 < q 1884:1636 < S 1884:2168   (m.media-amazon.com …?name=vendor)
+```
+
+Entry 4 is the same with `sendMessage` 446-….js 5:1666080 < `A` 5:1679394. Entries 12 and 17 are
+the same, rooted at `Fr 1858:46875 / qb / ub` instead of `q/S`.
+
+🔑 **The two chrome-extension frames are LoadFetcher's `window.fetch` monkey-patches, not the
+caller.** Our own `networkObserver.js:1095` sits in exactly that top position on every chat request in
+`ai-chat.har` (entries 4, 5, 20, 21, 35, 36). Under the wrappers, every frame is Amazon's: chat chunk 446,
+then React's commit-phase effect path in `vendor` (`ap < vb < … < q < S` on the first open,
+`… < qb < ub < Fr` on later opens). **These are the same vendor frames as Amazon's own icon** in
+`ai-chat.har` entry 4 (first open) and entries 20/35 (later opens). So the chat requests are sent by
+a `useEffect` inside Amazon's chat component when it mounts or re-renders for a load. The same
+wrappers are on the token and translation fetches (0–2, 9–11, 14–16), with Amazon's
+`push.9689.a` / `resolveResourcePack` in chunk `114-086e…` beneath them.
+
+### 9.4 Requests initiated by a chrome-extension script (Q3)
+
+- **Entry 6** is the only one. `POST relay.amazon.com/api/loadboard/search` at 02:28:03.798, stack
+  `window.fetch < n < (anon)…`, all in `mainComponent.bundle.js`, with no Amazon frame.
+  `sortByField: startTime`, 40 rows. **None of the three chat loads is in it.** This is LoadFetcher's
+  own board query, unrelated to the chat.
+- Entries 5 and 18 (`/api/ons/v1/notifications`) have `o.send@main.js` on top, which is an XHR
+  wrapper, with Amazon's jQuery `ajax` below it. They are Amazon's, not LoadFetcher's.
+- **No request to any non-Amazon host.** Hosts: `relay.amazon.com`,
+  `cloudfront.na.api.relay.amazon.dev`, `d2rgidlsfg8vnm.cloudfront.net`.
+
+### 9.5 What changes between the clicks (Q4)
+
+- **No URL-borne binding.** Every URL has an empty `queryString`. The `referer` is
+  `https://relay.amazon.com/loadboard/search` on every relay.amazon.com request (2, 5–8, 11, 16, 18),
+  and `https://relay.amazon.com/` (origin-trimmed) on every cross-origin compass call. A HAR records
+  no `pushState` or hash change, and none is visible.
+- **No request carries the load id before the chat's own `sessions/…/events`.** The id first appears
+  in entry 3, 12 or 17's URL (checked across all request URLs and bodies). The only earlier mention of
+  `e3f0`/`7443`/`a5d1` is in the *response* of Amazon's board search, entry 8.
+- **Per open, Amazon's app runs the same four steps:** it re-reads translations, calls `GET /api/token`,
+  then `sessions/{neg-…-<loadId>}/events`, then `chat/stream` `auto_start`. This is a fresh chat mount
+  per load.
+
+### 9.6 Was the export filtered? (the "-day -font -pendo -28a" filter)
+
+- The four text terms match **0 URLs** in `ai-chat.har` and `ai-chat-2.har`, so on their own they
+  would remove nothing seen before.
+- ⚠ **This export holds only `fetch` (17) and `xhr` (2).** The two earlier captures had `ping`
+  (22 / 45 `unagi.amazon.com`) and `script` (3 / 3 chunks). A 40-second session on the board with no
+  `unagi` beacon is unlikely, so **a resource-type filter (Fetch/XHR) was probably also active, and
+  the export followed it** [?]. What that could hide: a document or navigation entry, chunk-446's
+  own load (`script`), any WebSocket, and any `ping` or `other` request LoadFetcher makes. It cannot
+  hide a `fetch` or `xhr`.
+
+### 9.7 Mechanism (Q5)
+
+**(b) LoadFetcher drives Amazon's own chat UI, and Amazon's code sends every chat request.**
+- ✅ **Proven** (9.3): the callers are chunk 446's `getSessionHistory` / `sendMessage`, invoked from
+  React effects, with the same vendor frames as Amazon's own icon. LoadFetcher appears only as a
+  fetch wrapper, and it made no compass or demand-support call itself (9.4).
+- ✅ **Proven:** the load binding is the `sessionId` and `entityIdentifiers.workOpportunityId` that
+  Amazon's client builds, and nothing in the network precedes it.
+- ⚠ **[?] How the component gets the chosen load is not in the HAR.** A call stack through React's
+  scheduler loses the click that caused it. Candidates, none of them tested: a programmatic `.click()`
+  on Amazon's per-card assistant control (which may exist without the card being expanded), a
+  dispatched DOM or custom event, or writing to React props or state through the fiber.
+
+### 9.8 The one next step that would prove it (Q6)
+
+**Read LoadFetcher's installed source. It is static, and no request is sent.** Copy
+`mainComponent.bundle.js` (and `main.js`) from
+`%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\ihcg…\<version>\` into `samples/`. Then
+search them for the AI button's handler: `demandSupport`, `RLB-RA`, `auto_start`, `.click(`,
+`dispatchEvent`, `__reactFiber` / `__reactProps`, `compass`. Whatever that handler touches is the
+mechanism. If it is minified beyond reading, the fallback is a live DevTools step: an Event Listener
+Breakpoint on `Mouse › click`, then click LoadFetcher's AI button and step until chunk 446 is
+reached.
+
+---
+
+## 10. LoadFetcher's source — how "Open AI Chat" binds Amazon's chat to a chosen load
+
+**Source:** LoadFetcher 3.23.9 (`"name": "LoadFetcher - Relay Amazon Efficiency Booster"`, id
+`ihcg***`), copied read-only from `Chrome\User Data\Default\Extensions\ihcg…\3.23.9_0\` to
+`samples/competitor-ext/`. `samples/` is gitignored (`.gitignore:8`, checked with `git
+check-ignore`). Only the extension folder was read in User Data. No request was sent. **We are
+learning the mechanism only; none of this code goes into our extension.**
+
+Offsets are byte offsets from `grep -b`. `main.js` is a single line, so offset = column.
+
+### 10.1 Two worlds: the button in React, the action in page JS
+
+`contentScript.bundle.js` (407 bytes, the whole file) injects both bundles into the **page's main
+world** with `<script>` tags:
+
+```js
+// contentScript.bundle.js (de-minified)
+if (!document.getElementById("myScript")) {
+  const s = document.createElement("script");
+  s.id = "myScript"; s.src = chrome.runtime.getURL("main.js"); s.type = "module";
+  document.body.appendChild(s);
+}
+const s2 = document.createElement("script");
+s2.src = chrome.runtime.getURL("mainComponent.bundle.js");
+(document.head || document.documentElement).appendChild(s2);
+```
+
+Both files are `web_accessible_resources` for `relay.amazon.com` (manifest l.32–35). This is why the
+HAR (§9.3) shows `main.js` and `mainComponent.bundle.js` as main-world `window.fetch` wrappers.
+- ✅ The chat-opening code is in `main.js`, which is injected only via that `<script>`, so it runs in
+  the **main world**. It has to: `__reactFiber$…` expandos on Amazon's DOM nodes are not visible
+  from an isolated content-script world.
+- `mainComponent.bundle.js` is *also* listed under `content_scripts` (manifest l.12), so it runs in
+  both worlds. It bundles its **own** React. Its `__reactFiber$` at offset 774247 is React-DOM's own
+  internals (`_n="__reactFiber$"+cn`), not a hook into Amazon.
+
+### 10.2 The button, and which cards get it (Q1)
+
+`mainComponent.bundle.js` line 597, component `kb` (LoadFetcher's per-load panel), offset ~16715866:
+
+```js
+// de-minified
+const { token } = useLoadFetcherAuth();              // m
+const showAi = !!token && !subscription?.isExpired  // w = !(!m||N) && e?.demandSupportEnabled
+               && load?.demandSupportEnabled;
+...
+showAi && <span title="Open AI chat for this load"
+   onClick={() => window.postMessage(
+       { type: "LOADFETCHER_OPEN_AI_CHAT", payload: { loadId: load?.id } }, "*")}>
+   Open AI Chat</span>
+```
+
+- **The field is `demandSupportEnabled`**, taken from Amazon's `/loadboard/search` rows. The same
+  field in §9.2 marks exactly the 8 negotiable rows of entry 8. The loads LoadFetcher keeps in its
+  store (`main.js` ~170279) copy `demandSupportEnabled` from the search row. Its DOM fallback
+  (`mainComponent` ~732020) sets `demandSupportEnabled: !!card.querySelector(".ai-tag")`.
+- Gates besides that field: a LoadFetcher login token and a subscription that has not expired.
+- **Where the panel appears:** `ub` portals `kb` into `document.getElementById(load.id)`, which is
+  Amazon's card node whose id is the work-opportunity id. It does this for each load in state list
+  `g`. `g` is toggled by `LOADFETCHER_LOAD_COLLAPSE`, which `main.js` (~154946) posts when a click
+  lands inside Amazon's `.load-card__selected` / `.wo-card`, and also when its refresher detects a
+  new load. [?] The code does not settle whether that counts as "expanded" in Amazon's UI. It is
+  Amazon's *selected* card that gets the panel, not Amazon's details sheet. There is exactly one
+  "Open AI Chat" button in the whole extension (1 occurrence).
+
+### 10.3 The click handler: writes Amazon's React context state (Q2)
+
+`main.js` offset 154172 receives the message:
+
+```js
+window.addEventListener("message", ev => {
+  ...
+  else if (ev.data.type === "LOADFETCHER_OPEN_AI_CHAT") {
+    const loadId = ev.data?.payload?.loadId;
+    loadId && openAmazonChat(loadId);                  // O(A)
+  } ...
+```
+
+`main.js` offsets 159388–160620, `O` de-minified (constants resolved from offset 159388:
+`k="__reactFiber$"`, `T="return"`, `K="child"`, `L="sibling"`, `R="memoizedProps"`,
+`J="dependencies"`, `Z="firstContext"`, `x="memoizedValue"`, `N="next"`):
+
+```js
+const fiberOf = el => el && el[Object.keys(el).find(k => k.startsWith("__reactFiber$"))];
+function openAmazonChat(loadId) { try {
+  // 1. find the React root: fiber of <body> (or first DOM node with one), walk .return to the top
+  let f = fiberOf(document.body) ?? firstNodeWithFiber(); while (f?.return) f = f.return;
+  // 2. DFS over child/sibling; on each fiber read its CONTEXT dependencies:
+  //    fiber.dependencies.firstContext → .memoizedValue, following .next
+  //    pick the context value v with v.chatBotState && typeof v.setChatBotState === "function"
+  //    (prefer one whose chatBotCandidateList is non-empty)
+  const ctx = findChatBotContext(root);  if (!ctx) return;
+  // 3. the work opportunity: by id in ctx.chatBotCandidateList, then ctx.workOpportunityList;
+  //    else from getElementById(loadId) walk fiber.return ≤60 levels, scanning memoizedProps for
+  //    an object with .id === loadId && Array.isArray(.loads)
+  const wo = find(ctx.chatBotCandidateList, loadId) ?? find(ctx.workOpportunityList, loadId)
+             ?? propsSearchUp(document.getElementById(loadId), loadId);  if (!wo) return;
+  // 4. write Amazon's chat state and call Amazon's own setter
+  const s = ctx.chatBotState;
+  s.workOpportunityForDemandSupport = wo;
+  s.setIsChatBoxOpen = true;
+  s.setShowBadgeOnIcon = false;
+  ctx.setChatBotState(s);
+} catch {} }
+```
+
+🔑 **So the answer is "writes React state", through a setter that Amazon's own app exposes in a
+React Context value.** Nothing is clicked. No DOM event is dispatched and no Amazon global is
+called. Nothing sends a request, and nothing touches URL/history. The load is picked **by id**, which
+is why any negotiable load works in any order. Amazon's "steps through negotiable loads in order"
+behaviour (§5 and the earlier finding) belongs to its own icon, which reads `chatBotCandidateList`
+in order [?]. LoadFetcher sets `workOpportunityForDemandSupport` directly.
+
+⚠ **[?]** It mutates the *same* `chatBotState` object and passes it back. A plain `useState` setter
+would bail out on an identical reference. That it still re-renders means Amazon's
+`setChatBotState` is not a plain setter, or something else in the render path forces an update.
+The HAR proves the open happened (§9.2); the code does not show why the identical reference works.
+
+### 10.4 What it relies on (Q4)
+
+- **React internals:** the `__reactFiber$` prefix on DOM nodes, and fiber fields `return`, `child`,
+  `sibling`, `memoizedProps`, `dependencies.firstContext.memoizedValue` / `.next`.
+- **Amazon context shape (field names):** `chatBotState`, `setChatBotState`, `chatBotCandidateList`,
+  `workOpportunityList`, and inside the state `workOpportunityForDemandSupport`, `setIsChatBoxOpen`,
+  `setShowBadgeOnIcon`. The work-opportunity object must have `id` and `loads[]`.
+- **Amazon DOM:** the card element `id` = work-opportunity id (`getElementById(loadId)`),
+  `.load-card`, `.load-card__selected`, `.wo-card`, `.wo-total_payout`, `.ai-tag` (the negotiable
+  marker), `.wo-card-header__components`, `#selected-work-sheet`. It also styles
+  `textarea#demand-support-chat-action-panel-input` and `.chatbot-body` (dark-mode CSS only).
+- **Page messaging:** `window.postMessage` with `LOADFETCHER_OPEN_AI_CHAT`. No Amazon global or
+  event name is used.
+
+### 10.5 Tie to the HAR (Q5)
+
+The click calls `postMessage`, then `O(loadId)` runs in the main world. It sets `chatBotState` and
+calls Amazon's `setChatBotState` **synchronously in a `message` handler, with no network activity**.
+React then re-renders Amazon's chat box, open and bound to `workOpportunityForDemandSupport`. In the
+commit phase, the chat component's effect calls chunk 446's `getSessionHistory`
+(`sessions/neg-…-<loadId>/events`), then `sendMessage` `HIDDEN:auto_start`. This matches every
+observation in §9:
+- The stacks bottom out in React's scheduler (`vendor` `ap < vb < … < q < S` / `Fr`), with no
+  LoadFetcher frame. The `message` handler only queued a state update, and React ran the effect later.
+- LoadFetcher shows up only as the `window.fetch` wrappers on top.
+- The load id appears in no request before the chat's own. The binding is client-side React state.
+- The `workOpportunityVersion` sent (182 / 127) is the one in the object LoadFetcher pulled from
+  Amazon's own lists or props.
+
+[?] Not proven by the code: that `chatBotState` lives in the component that loads chunk 446 (the
+compass client) and not only the older `demand-support` client (chunk 218). The code is agnostic,
+since it only writes state. Whichever chat implementation Amazon renders then does its own fetching.

@@ -3,6 +3,18 @@
 Every UI element MUST have a unique data-testid.
 When reporting a bug, use the testid name.
 
+## AI Chat button (content/aiChat.js — 2026-09-28, EXT-D10)
+
+Shown only on loads whose record has `demandSupportEnabled === true`, and only while signed in.
+Clicking it opens Amazon's own Relay Assistant bound to that load (`docs/AI_CHAT_BUTTON.md`). It
+clicks nothing of Amazon's.
+
+| testid | Type | Function |
+|--------|------|----------|
+| ext-ai-chat-card | button | Compact "AI Chat" pill inserted after the card's `.wo-total_payout`. Stops its own pointer/mouse/click events from propagating, so the card is not selected and our panel does not toggle. Label: "AI Chat" → "Opening…" → "Chat opened" / "Chat unavailable" (3.5 s) → "AI Chat". `data-state` = busy / ok / unavailable. |
+| ext-action-ai-chat | button | Same action in the inline panel's bottom row (`ext-action-bar`), after camera/map/post. Class `ext-action-btn ext-action-btn--aichat`. |
+| ext-ai-chat-style | style | CSS for both. Uses `--ext-accent*` tokens, so night mode follows. |
+
 ## LoadUnit data store (utils/loadStore.js — 2026-06-30)
 
 No new extension UI elements. `loadStore.js` is a pure data-layer module — it maintains

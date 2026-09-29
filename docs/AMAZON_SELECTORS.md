@@ -3,6 +3,19 @@
 Pull stable selectors from AMAZON_DOM_REFERENCE.md.
 Update here if Amazon changes layout. Record verification date.
 
+## Relay Assistant chat state (React internals, not DOM) ⚠ UNVERIFIED LIVE
+Added: 2026-09-28 (EXT-D10). Source: `docs/AI_CHAT_CAPTURE.md` §10, read from a competitor's code.
+Used only by `content/aiChatBridge.js`. Details: `docs/AI_CHAT_BUTTON.md`.
+- DOM node → fiber: own key starting `__reactFiber$`. Root: walk `.return`, then `stateNode.current`.
+- Context value: `{ chatBotState: object, setChatBotState: function, chatBotCandidateList: [],
+  workOpportunityList: [] }`, found on a Provider's `memoizedProps.value` or on
+  `dependencies.firstContext[.next].memoizedValue`.
+- State fields written: `workOpportunityForDemandSupport`, `setIsChatBoxOpen`, `setShowBadgeOnIcon`.
+- Card node: `document.getElementById(<workOpportunityId>)`. The AI Chat button anchors after
+  `.wo-total_payout` (the same anchor as the surge badge).
+- Negotiable flag: `workOpportunities[].demandSupportEnabled` in `/api/loadboard/search` (API, not DOM).
+A rename of any of these gives "Chat unavailable", not a wrong action.
+
 ## Refresh button ✅
 Verified: 2026-06-02
 Location: bottom-right of load board, adjacent to "Next Refresh Xs" countdown text.

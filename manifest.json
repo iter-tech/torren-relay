@@ -74,6 +74,7 @@
         "content/patApi.js",
         "content/patModal.js",
         "content/patBridge.js",
+        "content/aiChat.js",
         "content/inlinePanel.js",
         "content/tabAlert.js",
         "content/sidebar.js",
@@ -100,8 +101,25 @@
         "https://relay.amazon.in/*",
         "https://relay.amazon.pl/*"
       ],
-      "js": ["content/networkObserver.js"],
+      "js": ["content/networkObserver.js", "content/aiChatBridge.js"],
       "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://relay.amazon.ca/*",
+        "https://relay.amazon.co.jp/*",
+        "https://relay.amazon.co.uk/*",
+        "https://relay.amazon.com/*",
+        "https://relay.amazon.cz/*",
+        "https://relay.amazon.de/*",
+        "https://relay.amazon.es/*",
+        "https://relay.amazon.fr/*",
+        "https://relay.amazon.it/*",
+        "https://relay.amazon.in/*",
+        "https://relay.amazon.pl/*"
+      ],
+      "js": ["content/aiChatKey.js"],
       "run_at": "document_start"
     },
     {

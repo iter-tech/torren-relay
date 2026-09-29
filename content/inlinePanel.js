@@ -1545,6 +1545,12 @@ function renderPanelFromData(cardElement, sheetLoadId, data, trigger) {
     });
   }
 
+  // EXT-D10: "AI Chat" in the same row, only on a load whose record has demandSupportEnabled ===
+  // true. content/aiChat.js builds and wires it; it opens Amazon's own assistant and clicks nothing.
+  if (typeof aiChat !== 'undefined') {
+    aiChat.decoratePanelBar(panel.querySelector('[data-testid="ext-action-bar"]'), sheetLoadId);
+  }
+
   // Wire ext-action-fastbook: read storage for initial visibility, attach click handler,
   // and keep visibility in sync with popup toggle changes via chrome.storage.onChanged.
   if (_fastBookStorageListener) {

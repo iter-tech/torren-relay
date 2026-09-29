@@ -13,6 +13,70 @@ behind.
 
 ---
 
+## EXT-D10 — ✅ "AI CHAT" OPENS AMAZON'S OWN RELAY ASSISTANT ON THE CHOSEN LOAD. ⚠ NOT YET SEEN ON LIVE AMAZON
+
+**2026-09-28, Ihor.** A button on each negotiable load card, and one in our inline panel's bottom row,
+opens **Amazon's original Relay Assistant already bound to that load**, in any order and without
+expanding the card. The mechanism is the one read out of the competitor in
+`docs/AI_CHAT_CAPTURE.md` §10. The implementation is our own; nothing was copied. Full trace, proof
+and live-test steps: **`docs/AI_CHAT_BUTTON.md`**.
+
+### What it does, and what it never does
+
+- **It writes one React state object, through Amazon's own setter.** A MAIN-world bridge
+  (`content/aiChatBridge.js`) finds the context value carrying `chatBotState` + `setChatBotState`. It
+  takes the load object **from Amazon's own state** (`chatBotCandidateList` → `workOpportunityList`
+  → the card's React props), then calls `setChatBotState({...state, workOpportunityForDemandSupport,
+  setIsChatBoxOpen: true, setShowBadgeOnIcon: false})`. **That is always a new object**: passing
+  Amazon's own object back mutated would depend on a re-render that a plain `useState` setter skips.
+  Amazon's chat then re-renders, and **Amazon's code sends every chat request**.
+- 🔴 **We send no request, click nothing of Amazon's, and touch no booking element.** Booking stays a
+  manual click on Amazon's Book button. `FAST_BOOK_ENABLED` stays `false`.
+- 🔴 **FAIL-SAFE, NO FALLBACK TO CLICKING.** If the context, the setter or the load is missing,
+  nothing is written. The button says "Chat unavailable" and the reason is logged
+  (`ai-chat-open`, `logger.notice`, so it survives the shipped DEBUG_LEVEL 1).
+- **Shown only on `demandSupportEnabled === true`**, a boolean now added to networkObserver's
+  projection. Anything else means no button.
+
+### 🔑 "Our captured workOpportunity" is NOT a fallback — and cannot be
+
+The prompt allowed our captured object as a fallback "only if its shape matches". It never can. Since
+D7 was reversed (privacy), the raw body does not leave the MAIN world. The projection has no
+`version` or `workOpportunityOptionId`, which the chat's requests carry (§9.1). Keeping raw objects in
+the MAIN world to make a fallback possible would reopen that decision, so **it was not done**. The
+third source is the card's own React props: Amazon's object, not ours.
+
+### 🔑 The request must be provably OURS
+
+`postMessage` is broadcast, so the page and LoadFetcher can post anything on our channel. Each
+request is **HMAC-SHA-256 signed** with a secret that `content/aiChatKey.js` (ISOLATED,
+document_start) hands to the bridge in one synchronous `CustomEvent`, **before any page script
+exists**. Replies are signed as well. The bridge also rejects stale and replayed requests. The proof
+found two defects in the first draft, both fixed: `document.documentElement` is `null` at
+document_start, and a late key script leaked the secret to a page `hello`.
+
+### ⚠ FRAGILITY — THE PRICE OF THIS MECHANISM
+
+It reads **React internals** (`__reactFiber$`, `return` / `child` / `sibling`, `memoizedProps`,
+`dependencies.firstContext`, `stateNode.current`) and **Amazon's field names** (`chatBotState`,
+`setChatBotState`, `chatBotCandidateList`, `workOpportunityList`, `workOpportunityForDemandSupport`,
+`setIsChatBoxOpen`, `setShowBadgeOnIcon`, `demandSupportEnabled`). None of these is an API; Amazon
+can rename any of them in any deploy, and so can a React upgrade. **The failure mode is designed to
+be "Chat unavailable", never a wrong load**: every match is by exact field name and exact id, and the
+result is re-read from the committed tree before "Chat opened" is shown. When it breaks, the
+`reason` in the log says which step failed.
+
+### Proof
+
+Headless Chrome, `scripts/aichat-suite/run.cjs`: **49/49**. That covers both handshake orders; the
+3rd, 5th, 4th and 1st eligible loads, with all three load sources exercised; the card not selected;
+five kinds of forged or replayed message; a hostile page `hello`; the panel row from the real
+`buildActionBar()`; no context → "Chat unavailable" with the page unchanged; and the button present
+only on `true` in a 3-load table. `node scripts/build-zip.mjs` passes (50 files).
+⚠ **Not verified on live Amazon** — the mock is shaped after §10, not after Amazon's code.
+
+---
+
 ## EXT-D9 — ✅ THE DISPATCHER'S NEGOTIATION PHRASES: A LIBRARY AND AN EDITOR. NOTHING TOUCHES AMAZON'S CHAT
 
 **2026-09-24, Ihor.** Later, a button on our load card will open Amazon's own Relay Assistant chat

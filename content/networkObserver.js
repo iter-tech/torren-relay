@@ -458,6 +458,13 @@
         // "does a trailer come with this load" is one bit. See DECISIONS.md D10-AMENDED.
         trailerProvided: trailerProvidedOf(item),
 
+        // EXT-D10 (2026-09-28). Amazon's own "this load is negotiable in the Relay Assistant"
+        // flag — the field that marks exactly the chat-enabled rows in samples/competitor-ai.har
+        // entry 8 (docs/AI_CHAT_CAPTURE.md §9.2). ONE BIT, strictly `true` or not: anything other
+        // than a literal true is false, so a missing or renamed field hides the AI Chat button
+        // rather than showing it on a load the assistant cannot take.
+        demandSupportEnabled: item.demandSupportEnabled === true,
+
         loads: loads
       };
     } catch (e) {
@@ -469,7 +476,8 @@
       // missing key would read downstream as "Required" rather than "unknown".
       return { id: id, transitOperatorType: null, stopCount: null, totalDistance: null,
                distanceUnit: null, payout: null, payoutUnit: null,
-               deadhead: null, deadheadUnit: null, trailerProvided: null, loads: [] };
+               deadhead: null, deadheadUnit: null, trailerProvided: null,
+               demandSupportEnabled: false, loads: [] };
     }
   }
 
