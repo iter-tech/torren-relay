@@ -14,6 +14,10 @@ Used only by `content/aiChatBridge.js`. Details: `docs/AI_CHAT_BUTTON.md`.
 - Card node: `document.getElementById(<workOpportunityId>)`. The AI Chat button anchors after
   `.wo-total_payout` (the same anchor as the surge badge).
 - Negotiable flag: `workOpportunities[].demandSupportEnabled` in `/api/loadboard/search` (API, not DOM).
+- EXT-D10.1: only a context value a rendered component CONSUMES counts (`fiber.dependencies`).
+  Chat panel visible = any of `.chat-box-position`, `.chatbot-body`, `.bot-header`,
+  `#demand-support-chat-action-panel-input` (names from the competitor's CSS for Amazon's chat;
+  ⚠ not yet seen live). Used only to verify an open, never to click.
 A rename of any of these gives "Chat unavailable", not a wrong action.
 
 ## Refresh button ✅

@@ -1,4 +1,4 @@
-// aiChatBridge.js — MAIN world, run_at document_start (EXT-D10, 2026-09-28).
+// aiChatBridge.js — MAIN world, run_at document_start (EXT-D10, amended EXT-D10.1 2026-09-28).
 //
 // Opens AMAZON'S OWN Relay Assistant chat bound to a load the dispatcher chose. The mechanism is the
 // one documented in docs/AI_CHAT_CAPTURE.md §10: Amazon keeps the chat's state in a React context
@@ -7,20 +7,32 @@
 // Amazon's own effect then sends every chat request (§9.3). This is our own implementation of that
 // documented mechanism.
 //
+// 🔴 EXT-D10.1 — WHY THE FIRST VERSION SAID "Chat opened" AND NOTHING OPENED (live, 2026-09-28).
+// Three differences from the path that is proven to work on the same page (docs/AI_CHAT_BUTTON.md §7):
+//   1. It accepted a context value from a Provider's props even when no rendered component reads
+//      it, and walked children first. Now ONLY values a rendered component actually consumes
+//      (fiber.dependencies) count, in sibling-first order, preferring a non-empty candidate list.
+//   2. It passed setChatBotState a NEW object. Now Amazon's own chatBotState object is updated IN
+//      PLACE and that same object is passed to Amazon's setter — so every holder of the reference
+//      sees the change, exactly as on the working path.
+//   3. Its "verification" re-read the context it had itself just written, so it could only ever
+//      confirm its own write. Now success also requires Amazon's chat panel to be VISIBLE.
+//
 // 🔴 WHAT THIS FILE NEVER DOES. It sends no request of its own. It clicks nothing and dispatches no
-// DOM event at Amazon's UI. It touches no Book button or any booking element. It writes nothing but
-// the one state object below, and only after the context, the setter AND the load have all been
-// found — any miss is a no-op on Amazon's page and a reported reason.
+// DOM event at Amazon's UI. It touches no Book button or any booking element. It writes three fields
+// of one state object, and only after the consumed context, the setter AND the load have all been
+// found — any miss is a no-op on Amazon's page and a reported reason. It refuses to overwrite a field
+// that holds a function.
 //
 // ⚠ FRAGILE BY NATURE: it reads React internals (`__reactFiber$`, fiber return/child/sibling,
-// memoizedProps, dependencies) and Amazon's field names. Any rename on Amazon's side turns the button
-// into "Chat unavailable" — never into a wrong action, because every lookup is by exact name and id.
+// memoizedProps, dependencies) and Amazon's field names and chat-panel classes. Any rename turns the
+// button into "Chat unavailable" — never into a wrong load, because every lookup is by exact name and id.
 //
 // MESSAGING. Requests arrive by window.postMessage from content/aiChat.js and are accepted ONLY when
 // signed (HMAC-SHA-256) with the secret exchanged at document_start with content/aiChatKey.js — see
 // that file for why the exchange cannot be observed by the page. Unsigned, stale, replayed or
 // mis-signed messages are dropped silently, and so is anything of another type (e.g. LoadFetcher's
-// LOADFETCHER_OPEN_AI_CHAT). Results go back signed the same way.
+// LOADFETCHER_OPEN_AI_CHAT). Results go back signed the same way, diagnostics included.
 //
 // No logger in this world (same as networkObserver.js); outcomes are reported to the isolated side,
 // which logs them.
@@ -32,10 +44,17 @@
   var MSG_OPEN   = 'tenlane-aichat-open-v1';
   var MSG_RESULT = 'tenlane-aichat-result-v1';
   var MAX_AGE_MS = 15000;
-  var CONFIRM_DELAY_MS = 400;
+  var VERIFY_WINDOW_MS = 1000;
+  var VERIFY_STEP_MS   = 100;
   var MAX_FIBERS = 300000;
   var MAX_ROOTS  = 8;
-  var PROPS_WALK_LEVELS = 40;
+  var PROPS_WALK_LEVELS = 60;
+
+  // Amazon's chat panel. Class/id names read from the dark-mode stylesheet the competitor ships for
+  // Amazon's chat (samples/competitor-ext, docs/AI_CHAT_CAPTURE.md §10.4). ⚠ Not yet seen live by us.
+  var CHAT_PANEL_SELECTORS = [
+    '.chat-box-position', '.chatbot-body', '.bot-header', '#demand-support-chat-action-panel-input'
+  ];
 
   // Captured at document_start, before any page script can replace them.
   var subtle    = window.crypto && window.crypto.subtle;
@@ -44,6 +63,7 @@
   var hmacCheck = subtle && subtle.verify.bind(subtle);
   var encoder   = new TextEncoder();
   var objKeys   = Object.keys;
+  var toJson    = JSON.stringify;
   var nowMs     = Date.now;
   var post      = window.postMessage.bind(window);
 
@@ -81,8 +101,10 @@
   } catch (e) { /* no handshake → every request is refused as unsigned */ }
 
   function canonOpen(d)   { return ['open', d.requestId, d.loadId, d.ts].join('\n'); }
+  // The diagnostics are signed too — a forged reply cannot plant a misleading log line.
   function canonResult(r) {
-    return ['result', r.requestId, r.ok ? '1' : '0', r.result, r.reason || '', r.source || ''].join('\n');
+    return ['result', r.requestId, r.ok ? '1' : '0', r.result, r.reason || '', r.source || '',
+            r.diagJson || ''].join('\n');
   }
 
   async function verifyOpen(d) {
@@ -108,9 +130,7 @@
     return null;
   }
 
-  // From any fiber to its root's CURRENT tree. A DOM node's fiber pointer can be the alternate
-  // (the previous render); the root's stateNode.current is always the committed tree, so state read
-  // from it is never stale.
+  // From any fiber to its root's CURRENT (committed) tree.
   function currentRootOf(fiber) {
     var f = fiber, guard = 0;
     while (f && f.return && guard++ < 100000) f = f.return;
@@ -124,15 +144,21 @@
            typeof v.chatBotState === 'object' && typeof v.setChatBotState === 'function';
   }
 
-  // Every distinct React root reachable from the card and from the page. Amazon may mount more than
-  // one app; the chat's context need not live in the same root as the board.
+  // Roots in a fixed order: the page's own first (document.body, then the first element in document
+  // order that has a fiber — the same starting point as the working path), then the card's, then
+  // any other distinct root.
   function findRoots(loadId) {
     var roots = [];
     function addFrom(node) {
       var f = fiberOf(node);
-      if (!f) return;
+      if (!f) return false;
       var r = currentRootOf(f);
       if (r && roots.indexOf(r) === -1) roots.push(r);
+      return true;
+    }
+    if (!addFrom(document.body)) {
+      var all0 = document.getElementsByTagName('*');
+      for (var j = 0; j < all0.length; j++) if (addFrom(all0[j])) break;
     }
     addFrom(document.getElementById(loadId));
     var all = document.body ? document.body.getElementsByTagName('*') : [];
@@ -140,46 +166,46 @@
     return roots;
   }
 
-  // Depth-first over one tree. Collects context values from Provider props and from consumers'
-  // context dependencies. Prefers a value whose candidate list is non-empty.
-  function findChatContext(roots) {
-    var best = null, visited = 0;
+  // Scans every root. CONSUMED context values (read by a rendered component through
+  // fiber.dependencies) are candidates; Provider-only values are counted for the log and NEVER chosen
+  // — a provider nobody reads cannot open anything, and writing to one is exactly how the first version
+  // "succeeded" with the chat still closed. Order: depth-first, SIBLING before CHILD.
+  function scanChatContexts(roots) {
+    var consumed = [], providerOnly = [], visited = 0;
     for (var r = 0; r < roots.length; r++) {
       var stack = [roots[r]];
       while (stack.length && visited < MAX_FIBERS) {
         var f = stack.pop();
         visited++;
-        var p = f.memoizedProps;
-        if (p && typeof p === 'object' && isChatContextValue(p.value)) {
-          if (!best) best = p.value;
-          if (Array.isArray(p.value.chatBotCandidateList) && p.value.chatBotCandidateList.length) {
-            return { ctx: p.value, visited: visited };
-          }
-        }
         var dep = f.dependencies && f.dependencies.firstContext;
         for (var n = 0; dep && n < 64; n++, dep = dep.next) {
-          if (isChatContextValue(dep.memoizedValue)) {
-            if (!best) best = dep.memoizedValue;
-            var list = dep.memoizedValue.chatBotCandidateList;
-            if (Array.isArray(list) && list.length) return { ctx: dep.memoizedValue, visited: visited };
-          }
+          var v = dep.memoizedValue;
+          if (isChatContextValue(v) && consumed.indexOf(v) === -1) consumed.push(v);
         }
-        if (f.sibling) stack.push(f.sibling);
+        var p = f.memoizedProps;
+        if (p && typeof p === 'object' && isChatContextValue(p.value) &&
+            providerOnly.indexOf(p.value) === -1) {
+          providerOnly.push(p.value);
+        }
         if (f.child) stack.push(f.child);
+        if (f.sibling) stack.push(f.sibling);
       }
     }
-    return { ctx: best, visited: visited };
+    providerOnly = providerOnly.filter(function (v) { return consumed.indexOf(v) === -1; });
+    var chosen = -1;
+    for (var i = 0; i < consumed.length; i++) {
+      var list = consumed[i].chatBotCandidateList;
+      if (Array.isArray(list) && list.length) { chosen = i; break; }
+    }
+    if (chosen === -1 && consumed.length) chosen = 0;
+    return { consumed: consumed, providerOnly: providerOnly.length, chosen: chosen, visited: visited };
   }
 
   function sameId(o, loadId) { return !!o && typeof o === 'object' && String(o.id) === loadId; }
 
-  // The shape the chat needs: its requests carry workOpportunityId, version, majorVersion and
-  // optionId (§9.1), so the object must at least be a work opportunity with that id and loads[].
-  function isWorkOpportunity(o, loadId) { return sameId(o, loadId) && Array.isArray(o.loads); }
-
   function findInList(list, loadId) {
     if (!Array.isArray(list)) return null;
-    for (var i = 0; i < list.length; i++) if (isWorkOpportunity(list[i], loadId)) return list[i];
+    for (var i = 0; i < list.length; i++) if (sameId(list[i], loadId)) return list[i];
     return null;
   }
 
@@ -191,7 +217,8 @@
       if (!p || typeof p !== 'object') continue;
       var ks = objKeys(p);
       for (var i = 0; i < ks.length; i++) {
-        if (isWorkOpportunity(p[ks[i]], loadId)) return p[ks[i]];
+        var o = p[ks[i]];
+        if (sameId(o, loadId) && Array.isArray(o.loads)) return o;
       }
     }
     return null;
@@ -207,45 +234,90 @@
     return null;
   }
 
-  function shapeNote(wo) {
-    var missing = [];
-    if (typeof wo.version !== 'number') missing.push('version');
-    if (wo.majorVersion === undefined) missing.push('majorVersion');
-    if (wo.workOpportunityOptionId === undefined) missing.push('workOpportunityOptionId');
-    return missing.length ? 'missing ' + missing.join(',') : '';
+  function typeOf(v) {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return 'array(' + v.length + ')';
+    return typeof v;
+  }
+
+  function panelVisible() {
+    for (var i = 0; i < CHAT_PANEL_SELECTORS.length; i++) {
+      var el = document.querySelector(CHAT_PANEL_SELECTORS[i]);
+      if (el && el.getClientRects().length > 0) return CHAT_PANEL_SELECTORS[i];
+    }
+    return null;
+  }
+
+  function stateApplied(loadId) {
+    var s = scanChatContexts(findRoots(loadId));
+    var ctx = s.chosen >= 0 ? s.consumed[s.chosen] : null;
+    var st = ctx && ctx.chatBotState;
+    return !!st && sameId(st.workOpportunityForDemandSupport, loadId) && st.setIsChatBoxOpen === true;
   }
 
   async function openChat(loadId) {
+    var diag = {};
     var roots = findRoots(loadId);
-    if (!roots.length) return { ok: false, result: 'unavailable', reason: 'no-react-root' };
-    var found = findChatContext(roots);
-    if (!found.ctx) {
-      return { ok: false, result: 'unavailable',
-               reason: 'no-chat-context (roots ' + roots.length + ', fibers ' + found.visited + ')' };
+    diag.roots = roots.length;
+    if (!roots.length) return { ok: false, result: 'unavailable', reason: 'no-react-root', diag: diag };
+
+    var scan = scanChatContexts(roots);
+    diag.contextsConsumed = scan.consumed.length;
+    diag.contextsProviderOnly = scan.providerOnly;
+    diag.fibers = scan.visited;
+    if (scan.chosen < 0) {
+      return { ok: false, result: 'unavailable', diag: diag,
+               reason: scan.providerOnly ? 'no-consumed-chat-context' : 'no-chat-context' };
     }
-    var ctx = found.ctx;
+    diag.chosen = scan.chosen;
+    var ctx = scan.consumed[scan.chosen];
+    var st = ctx.chatBotState;
+    diag.types = {
+      setChatBotState: typeOf(ctx.setChatBotState),
+      chatBotCandidateList: typeOf(ctx.chatBotCandidateList),
+      workOpportunityList: typeOf(ctx.workOpportunityList),
+      workOpportunityForDemandSupport: typeOf(st.workOpportunityForDemandSupport),
+      setIsChatBoxOpen: typeOf(st.setIsChatBoxOpen),
+      setShowBadgeOnIcon: typeOf(st.setShowBadgeOnIcon)
+    };
+    diag.keysBefore = objKeys(st);
+
     var hit = locateLoad(ctx, loadId);
-    if (!hit) return { ok: false, result: 'unavailable', reason: 'load-not-in-amazon-state' };
+    if (!hit) return { ok: false, result: 'unavailable', reason: 'load-not-in-amazon-state', diag: diag };
 
-    // A NEW object every time. Passing Amazon's own state object back, mutated, would rely on the
-    // setter re-rendering for an identical reference, which a plain useState setter does not do.
-    var next = Object.assign({}, ctx.chatBotState, {
-      workOpportunityForDemandSupport: hit.wo,
-      setIsChatBoxOpen: true,
-      setShowBadgeOnIcon: false
-    });
-    ctx.setChatBotState(next);
+    // These are data fields on the working path (it assigns true/false to them). If Amazon ever
+    // makes one a function, overwriting it would break Amazon's own code — refuse instead.
+    if (typeof st.setIsChatBoxOpen === 'function' || typeof st.setShowBadgeOnIcon === 'function') {
+      return { ok: false, result: 'unavailable', reason: 'open-flag-is-a-function', source: hit.source, diag: diag };
+    }
 
-    // Confirm from the committed tree, not from what we passed.
-    await new Promise(function (res) { setTimeout(res, CONFIRM_DELAY_MS); });
-    var after = findChatContext(findRoots(loadId)).ctx;
-    var st = after && after.chatBotState;
-    var applied = !!st && sameId(st.workOpportunityForDemandSupport, loadId) && st.setIsChatBoxOpen === true;
+    diag.panelBefore = panelVisible();
+
+    // IN PLACE, then Amazon's setter with THE SAME object — see the header, difference 2.
+    st.workOpportunityForDemandSupport = hit.wo;
+    st.setIsChatBoxOpen = true;
+    st.setShowBadgeOnIcon = false;
+    ctx.setChatBotState(st);
+    diag.keysAfter = objKeys(st);
+
+    // Success only when BOTH hold within ~1 s: the consumed state says open-on-this-load, AND Amazon's
+    // chat panel is visible. Either alone is not proof — difference 3.
+    var applied = false, panel = null, waited = 0;
+    while (waited <= VERIFY_WINDOW_MS) {
+      await new Promise(function (res) { setTimeout(res, VERIFY_STEP_MS); });
+      waited += VERIFY_STEP_MS;
+      applied = stateApplied(loadId);
+      panel = panelVisible();
+      if (applied && panel) break;
+    }
+    diag.verify = { stateApplied: applied, panel: panel, waitedMs: waited };
+    var ok = applied && !!panel;
     return {
-      ok: applied,
-      result: applied ? 'opened' : 'unavailable',
-      reason: applied ? shapeNote(hit.wo) : 'state-not-applied',
-      source: hit.source
+      ok: ok,
+      result: ok ? 'opened' : 'set-not-applied',
+      reason: ok ? '' : (!applied ? 'state-not-applied' : 'panel-not-seen'),
+      source: hit.source,
+      diag: diag
     };
   }
 
@@ -263,16 +335,16 @@
 
       var r;
       if (_busy) {
-        r = { ok: false, result: 'unavailable', reason: 'busy' };
+        r = { ok: false, result: 'unavailable', reason: 'busy', diag: {} };
       } else {
         _busy = true;
         try { r = await openChat(d.loadId); }
-        catch (e) { r = { ok: false, result: 'unavailable', reason: 'error ' + ((e && e.name) || 'Error') }; }
+        catch (e) { r = { ok: false, result: 'unavailable', reason: 'error ' + ((e && e.name) || 'Error'), diag: {} }; }
         finally { _busy = false; }
       }
-      r.requestId = d.requestId;
-      r.source = r.source || '';
-      await reply(r);
+      var out = { requestId: d.requestId, ok: r.ok, result: r.result, reason: r.reason || '',
+                  source: r.source || '', diagJson: toJson(r.diag || {}) };
+      await reply(out);
     })();
   });
 })();

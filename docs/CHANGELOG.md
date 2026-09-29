@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-28 — AI Chat: fix a false "Chat opened" (EXT-D10.1)
+
+**Live (LoadFetcher OFF):** the button said "Chat opened" and logged `result: opened` three times,
+but Amazon's chat never opened. LoadFetcher's button opened it on the same page. Diff, cause and
+proof: `docs/AI_CHAT_BUTTON.md` §7. ⚠ **Not verified live yet.**
+
+- **`content/aiChatBridge.js`**
+  - The context is chosen only from values a rendered component **consumes**
+    (`fiber.dependencies`), sibling-first. Provider-only values are counted, never chosen.
+  - The three fields are set on **Amazon's own `chatBotState`**, and that same object is passed to
+    `setChatBotState`. A field that holds a function is never overwritten.
+  - "Opened" now requires, within ~1 s, the consumed state open on that load **and** a visible
+    Amazon chat panel. Otherwise the result is `set-not-applied` and the button shows "Chat
+    unavailable".
+  - The list lookup no longer requires `loads[]`; the props walk goes up to 60 levels.
+- **`content/aiChat.js`** — each `ai-chat-open` event now carries `contexts`, `chosen`, `keysBefore`,
+  `keysAfter`, `types`, `verify` and `panelBefore` (names and types only). These diagnostics are part
+  of the signed reply.
+- **`scripts/aichat-suite/`**
+  - The mock gains an unconsumed decoy context and Amazon's chat-panel classes.
+  - A regression run executes the **old** files from `aaad6d3` and shows the live failure.
+  - Two new fail-safe variants: provider-only and no-panel.
+  - **71/71.** Build passes.
+
 ## 2026-09-28 — "AI Chat": opens Amazon's own Relay Assistant on the chosen load (EXT-D10)
 
 ⚠ **Proved in headless Chrome against a React mock; NOT verified on live Amazon.** Details, trace and

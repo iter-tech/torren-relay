@@ -21,15 +21,46 @@ expanding the card. The mechanism is the one read out of the competitor in
 `docs/AI_CHAT_CAPTURE.md` §10. The implementation is our own; nothing was copied. Full trace, proof
 and live-test steps: **`docs/AI_CHAT_BUTTON.md`**.
 
+### 🔴 AMENDED 2026-09-28 (EXT-D10.1): THE FIRST VERSION REPORTED A SUCCESS THAT DID NOT HAPPEN
+
+**Live, LoadFetcher OFF:** 3 clicks, each logged `result: opened`, the button said "Chat opened",
+and **Amazon's chat did not open**. With LoadFetcher ON, on the same page, its button did open it.
+Diff and proof: `docs/AI_CHAT_BUTTON.md` §7.
+
+- ✅ **Proven from our code:** the "verification" re-read state through the same finder that had
+  just written it, so it could only ever confirm its own write.
+- ✅ **Proven differences from the working path:** (a) we accepted a chat-shaped value from a
+  **Provider's props**, even one no component reads, and walked child-first. The working path only
+  takes values a rendered component **consumes** (`fiber.dependencies`), sibling-first. (b) We
+  passed a **new** object; the working path updates **Amazon's own `chatBotState` in place** and
+  passes that same object back.
+- [?] Which of (a) and (b) was decisive on Amazon's page is unknown, because Amazon's chat code is
+  in no capture. Both are fixed.
+- 🔴 **REVERSED:** the bullet below that says "always a new object … a plain useState setter skips"
+  was my assumption. It is **not** what works live. The rule is now: **in place, same object**, and
+  **never overwrite a field that holds a function** (refused as `open-flag-is-a-function`).
+- 🔴 **NEW RULE: "opened" needs two independent facts within ~1 s:** the consumed state is open on
+  that load, **and** Amazon's chat panel is visible. Otherwise the result is `set-not-applied` and
+  the button says "Chat unavailable". The panel selectors (`.chat-box-position`, `.chatbot-body`,
+  `.bot-header`, `#demand-support-chat-action-panel-input`) come from the competitor's CSS for
+  Amazon's chat and are **not yet seen live**. If they are wrong, the error is a visible false
+  failure, never a false success.
+- Diagnostics in each `ai-chat-open`: context counts, the chosen one, `chatBotState` keys before and
+  after (names only), the type of each field used, and the verification result.
+- **Proof:** the mock now contains an unconsumed decoy context. **The old code from `aaad6d3`
+  reproduces the live failure** there, and the new code passes. Suite **71/71** (the previous 49 made
+  stricter, plus 16 new checks inside them, plus 6 new). Build passes. ⚠ **Not verified live.**
+
 ### What it does, and what it never does
 
 - **It writes one React state object, through Amazon's own setter.** A MAIN-world bridge
   (`content/aiChatBridge.js`) finds the context value carrying `chatBotState` + `setChatBotState`. It
   takes the load object **from Amazon's own state** (`chatBotCandidateList` → `workOpportunityList`
   → the card's React props), then calls `setChatBotState({...state, workOpportunityForDemandSupport,
-  setIsChatBoxOpen: true, setShowBadgeOnIcon: false})`. **That is always a new object**: passing
-  Amazon's own object back mutated would depend on a re-render that a plain `useState` setter skips.
-  Amazon's chat then re-renders, and **Amazon's code sends every chat request**.
+  setIsChatBoxOpen: true, setShowBadgeOnIcon: false})`. ~~**That is always a new object**: passing
+  Amazon's own object back mutated would depend on a re-render that a plain `useState` setter skips.~~
+  **REVERSED by EXT-D10.1 above: in place, same object.** Amazon's chat then re-renders, and
+  **Amazon's code sends every chat request**.
 - 🔴 **We send no request, click nothing of Amazon's, and touch no booking element.** Booking stays a
   manual click on Amazon's Book button. `FAST_BOOK_ENABLED` stays `false`.
 - 🔴 **FAIL-SAFE, NO FALLBACK TO CLICKING.** If the context, the setter or the load is missing,

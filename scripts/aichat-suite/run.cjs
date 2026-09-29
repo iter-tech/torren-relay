@@ -31,6 +31,12 @@ const SETS = {
   three: { loads: [{ id: L[0], dse: true, pay: 900 }, { id: L[1], dse: false, pay: 901 }, { id: L[2], dse: undefined, pay: 902 }],
            candidates: [L[0]], wolist: [L[0], L[1], L[2]] },
 };
+SETS.provideronly = SETS.full;   // EXT-D10.1: decoy Provider only, nothing consumes it
+SETS.nopanel = SETS.full;        // EXT-D10.1: real context consumed, chat panel never renders
+
+// The first version (commit aaad6d3), for the regression run — read from git, never from disk copies.
+const OLD_COMMIT = 'aaad6d3';
+const gitShow = (rel) => require('child_process').execFileSync('git', ['-C', REPO, 'show', OLD_COMMIT + ':' + rel], { encoding: 'utf8' });
 
 function pageHtml(v) {
   const s = SETS[v];
@@ -72,7 +78,11 @@ const STUBS = (records) => `
   var chrome = { storage: { local: { get: function (k, cb) { cb && cb({}); } }, onChanged: { addListener: function () {}, removeListener: function () {} } } };
 `;
 
-async function openVariant(browser, variant, order, errors) {
+async function openVariant(browser, variant, order, errors, srcs) {
+  srcs = srcs || {};
+  const keySrc    = srcs.key    || rd(REPO + '/content/aiChatKey.js');
+  const bridgeSrc = srcs.bridge || rd(REPO + '/content/aiChatBridge.js');
+  const aiChatSrc = srcs.aiChat || rd(REPO + '/content/aiChat.js');
   const context = await browser.newContext();
   const page = await context.newPage();
   page.on('pageerror', e => errors.push(variant + ': ' + e.message));
@@ -82,8 +92,8 @@ async function openVariant(browser, variant, order, errors) {
   await cdp.send('Page.enable');
   let isoCtx = null;
   cdp.on('Runtime.executionContextCreated', e => { if (e.context.name === 'tenlane') isoCtx = e.context.id; });
-  const addIso = () => cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: rd(REPO + '/content/aiChatKey.js'), worldName: 'tenlane' });
-  const addMain = () => page.addInitScript({ content: rd(REPO + '/content/aiChatBridge.js') });
+  const addIso = () => cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: keySrc, worldName: 'tenlane' });
+  const addMain = () => page.addInitScript({ content: bridgeSrc });
   if (order === 'isolated-first') { await addIso(); await addMain(); } else { await addMain(); await addIso(); }
 
   await page.goto(`http://127.0.0.1:${server.address().port}/loadboard/?variant=${variant}`);
@@ -98,7 +108,7 @@ async function openVariant(browser, variant, order, errors) {
   SETS[variant].loads.forEach(l => { records[l.id] = l.dse === undefined ? { id: l.id } : { id: l.id, demandSupportEnabled: l.dse }; });
   // Isolated-world idle scripts, in manifest order, with the few cross-file globals stubbed.
   for (const src of [rd(REPO + '/utils/designTokens.js'), rd(REPO + '/utils/constants.js'), rd(REPO + '/utils/logger.js'),
-                     STUBS(records), rd(REPO + '/content/aiChat.js'), rd(REPO + '/content/inlinePanel.js')]) {
+                     STUBS(records), aiChatSrc, rd(REPO + '/content/inlinePanel.js')]) {
     await iso(src + '\n;void 0');
   }
   await iso('aiChat.paintCards(); true');
@@ -115,6 +125,9 @@ async function state(page) {
     chatLog: window.__mockChatLog.map(e => e.id.slice(0, 4)),
     selected: [...document.querySelectorAll('[data-mock-selected="true"]')].length,
     chatDom: (document.getElementById('mock-chat') || {}).textContent || null,
+    panel: !!document.querySelector('.chat-box-position'),
+    decoyLoad: window.__mockDecoyState && window.__mockDecoyState.workOpportunityForDemandSupport
+      ? window.__mockDecoyState.workOpportunityForDemandSupport.id.slice(0, 4) : null,
   }));
 }
 
@@ -143,8 +156,15 @@ async function suite(browser, order) {
     const st = await state(page);
     const label = await b.textContent();
     const ev = (await iso('aiChat.debugLog()')).slice(-1)[0];
-    check(`[${order}] click ${nth} eligible (${id.slice(0, 4)}) → chat state holds that load, open`,
-          st.load === id && st.open === true && st.badge === false && st.kept === 'kept', { load: st.load && st.load.slice(0, 4), open: st.open, kept: st.kept });
+    check(`[${order}] click ${nth} eligible (${id.slice(0, 4)}) → chat state holds that load, open, PANEL VISIBLE`,
+          st.load === id && st.open === true && st.badge === false && st.kept === 'kept' && st.panel === true,
+          { load: st.load && st.load.slice(0, 4), open: st.open, kept: st.kept, panel: st.panel });
+    check(`[${order}]   the unconsumed decoy context was NOT written`, st.decoyLoad === null, st.decoyLoad);
+    check(`[${order}]   diagnostics: 1 consumed / 1 provider-only, chosen 0, verified by state + panel, keys + types logged`,
+          ev && ev.contexts === '1 consumed / 1 provider-only' && ev.chosen === 0 &&
+          /^state yes, panel \.chat-box-position/.test(ev.verify || '') &&
+          /setIsChatBoxOpen/.test(ev.keysBefore || '') && /setIsChatBoxOpen:boolean/.test(ev.types || ''),
+          ev && { contexts: ev.contexts, chosen: ev.chosen, verify: ev.verify, keysBefore: ev.keysBefore, types: ev.types });
     check(`[${order}]   Amazon-side effect ran for it; card NOT selected; button says "Chat opened"`,
           st.chatLog[st.chatLog.length - 1] === id.slice(0, 4) && st.selected === 0 && label === 'Chat opened', { chatLog: st.chatLog, selected: st.selected, label });
     check(`[${order}]   logged ai-chat-open, source ${expectSource}`,
@@ -245,6 +265,54 @@ async function noCtx(browser) {
   await context.close();
 }
 
+// EXT-D10.1 — the live failure, reproduced with the FIRST version's three files from git.
+async function regressionOld(browser) {
+  const errors = [];
+  console.log(`\n=== REGRESSION: old code (${OLD_COMMIT}) against the page with a decoy context ===`);
+  const srcs = { key: gitShow('content/aiChatKey.js'), bridge: gitShow('content/aiChatBridge.js'),
+                 aiChat: gitShow('content/aiChat.js') };
+  const { context, page, iso } = await openVariant(browser, 'full', 'isolated-first', errors, srcs);
+  const b = await cardBtn(page, L[3]);
+  await b.click();
+  await sleep(1200);
+  const st = await state(page);
+  const label = await b.textContent();
+  const ev = (await iso('aiChat.debugLog()')).slice(-1)[0];
+  const reproduced = label === 'Chat opened' && ev && ev.result === 'opened' && st.panel === false &&
+                     st.open === false && st.decoyLoad === '3a4b';
+  check('OLD code reproduces the live failure: says "Chat opened" + result opened, but the chat panel ' +
+        'is NOT open (it wrote the unconsumed decoy context)', reproduced,
+        { label, result: ev && ev.result, source: ev && ev.source, panel: st.panel, realChatOpen: st.open, decoyLoad: st.decoyLoad });
+  await context.close();
+  return reproduced;
+}
+
+async function failSafes(browser) {
+  console.log('\n=== EXT-D10.1 fail-safes ===');
+  for (const [variant, expectReason, desc] of [
+    ['provideronly', 'no-consumed-chat-context', 'only an UNCONSUMED chat context on the page'],
+    ['nopanel', 'panel-not-seen', 'state applies but Amazon\'s chat panel never appears'],
+  ]) {
+    const errors = [];
+    const { context, page, iso } = await openVariant(browser, variant, 'isolated-first', errors);
+    const b = await cardBtn(page, L[3]);
+    await b.click();
+    await sleep(1600);
+    const st = await state(page);
+    const label = await b.textContent();
+    const ev = (await iso('aiChat.debugLog()')).slice(-1)[0];
+    const expectResult = variant === 'nopanel' ? 'set-not-applied' : 'unavailable';
+    check(`${desc} → "Chat unavailable", result ${expectResult}, reason ${expectReason}`,
+          label === 'Chat unavailable' && ev && ev.result === expectResult && ev.reason === expectReason,
+          ev && { label, result: ev.result, reason: ev.reason, contexts: ev.contexts, verify: ev.verify });
+    if (variant === 'provideronly') {
+      check('  … and the unconsumed context was NOT written', st.decoyLoad === null, st.decoyLoad);
+    }
+    check(`  no page errors (${variant})`, errors.length === 0, errors);
+    await context.close();
+  }
+}
+
 async function three(browser) {
   const errors = [];
   console.log('\n=== button visibility, 3 loads ===');
@@ -265,6 +333,8 @@ async function three(browser) {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
   try {
+    if (process.env.AICHAT_SKIP_REGRESSION !== '1') await regressionOld(browser);
+    await failSafes(browser);
     await suite(browser, 'isolated-first');
     await suite(browser, 'main-first');
     await noCtx(browser);

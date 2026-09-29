@@ -63,7 +63,8 @@ var aiChat = (function () {
   // Same canonical strings as the bridge. Any change here must be made there too.
   function canonOpen(d) { return ['open', d.requestId, d.loadId, d.ts].join('\n'); }
   function canonResult(r) {
-    return ['result', r.requestId, r.ok ? '1' : '0', r.result, r.reason || '', r.source || ''].join('\n');
+    return ['result', r.requestId, r.ok ? '1' : '0', r.result, r.reason || '', r.source || '',
+            r.diagJson || ''].join('\n');
   }
 
   // ── eligibility ───────────────────────────────────────────────────────────────────────────
@@ -106,7 +107,10 @@ var aiChat = (function () {
       if (!valid || !_pending[d.requestId]) return;     // forged answers are ignored
       clearTimeout(p.timer);
       delete _pending[d.requestId];
-      p.resolve({ ok: d.ok === true, result: d.result, reason: d.reason || '', source: d.source || '' });
+      var diag = {};
+      try { diag = JSON.parse(d.diagJson || '{}'); } catch (e2) { diag = { unparseable: true }; }
+      p.resolve({ ok: d.ok === true, result: d.result, reason: d.reason || '', source: d.source || '',
+                  diag: diag });
     }).catch(function (e) {
       logger.error('aiChat', 'verifying the bridge reply failed', { error: e });
     });
@@ -153,6 +157,18 @@ var aiChat = (function () {
     }
     var ev = { loadId: mask(loadId), where: where, source: r.source || null, result: r.result };
     if (r.reason) ev.reason = r.reason;
+    // EXT-D10.1 diagnostics — names and types only, never values. Flattened so console.table and a
+    // copied log line read without expanding anything.
+    var g = r.diag || {};
+    if (g.contextsConsumed !== undefined) ev.contexts = g.contextsConsumed + ' consumed / ' +
+      (g.contextsProviderOnly || 0) + ' provider-only';
+    if (g.chosen !== undefined) ev.chosen = g.chosen;
+    if (g.keysBefore) ev.keysBefore = g.keysBefore.join(',');
+    if (g.keysAfter) ev.keysAfter = g.keysAfter.join(',');
+    if (g.types) ev.types = Object.keys(g.types).map(function (k) { return k + ':' + g.types[k]; }).join(' ');
+    if (g.verify) ev.verify = 'state ' + (g.verify.stateApplied ? 'yes' : 'NO') + ', panel ' +
+      (g.verify.panel || 'NOT SEEN') + ', ' + g.verify.waitedMs + 'ms';
+    if (g.panelBefore) ev.panelBefore = g.panelBefore;
     logEvent(ev);
 
     setStatus(btn, r.ok ? 'Chat opened' : 'Chat unavailable', r.ok ? 'ok' : 'unavailable');
